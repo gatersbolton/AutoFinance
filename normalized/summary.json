@@ -1,0 +1,26 @@
+{
+  "cells_count": 2717,
+  "conflicts_count": 5,
+  "docs_processed": 1,
+  "export_stats": {
+    "conflicted_cells": 0,
+    "period_columns": 7,
+    "written_cells": 51
+  },
+  "facts_count": 1070,
+  "issues_count": 229,
+  "mapping_review_count": 864,
+  "page_errors": [],
+  "pages_discovered": 44,
+  "providers_seen": {
+    "aliyun_table": 22,
+    "tencent_table_v3": 22
+  },
+  "skipped_text_providers": [
+    "aliyun_text",
+    "tencent_text"
+  ],
+  "template_header_row": 3,
+  "template_sheet": "Sheet1",
+  "unsupported_providers": []
+}

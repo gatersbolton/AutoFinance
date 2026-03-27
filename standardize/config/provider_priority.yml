@@ -1,0 +1,8 @@
+families:
+  aliyun:
+    - aliyun_table
+  tencent:
+    - tencent_table_v3
+default_priority:
+  - aliyun_table
+  - tencent_table_v3
