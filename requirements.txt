@@ -1,0 +1,8 @@
+tencentcloud-sdk-python
+alibabacloud_ocr_api20210707==3.1.2
+alibabacloud-tea-openapi
+alibabacloud-tea-util
+PyMuPDF
+Pillow
+pytest
+urllib3<2

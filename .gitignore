@@ -1,0 +1,5 @@
+secret
+outputs/
+.venv/
+__pycache__/
+.pytest_cache/
