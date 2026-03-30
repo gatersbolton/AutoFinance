@@ -4,17 +4,188 @@
   "docs_processed": 1,
   "export_stats": {
     "conflicted_cells": 0,
-    "period_columns": 7,
-    "written_cells": 51
+    "header_row": 3,
+    "helper_sheets": [
+      "_meta_summary",
+      "_issues",
+      "_validation",
+      "_duplicates",
+      "_conflicts",
+      "_unplaced_facts",
+      "_review_queue"
+    ],
+    "period_columns": 6,
+    "period_keys": [
+      "2022-12-31__期初数",
+      "2022-12-31__期末数",
+      "2022年度__上期",
+      "2022年度__期初数",
+      "2022年度__期末数",
+      "2022年度__本期"
+    ],
+    "sheet_name": "Sheet1",
+    "source_facts": "facts_deduped",
+    "unplaced_count": 630,
+    "written_cells": 42
   },
-  "facts_count": 1070,
+  "facts_count": 672,
+  "integrity_summary": {
+    "checks_total": 8,
+    "integrity_fail_total": 0,
+    "integrity_pass_total": 8,
+    "integrity_review_total": 0,
+    "records": [
+      {
+        "check_id": "INT001",
+        "check_name": "required_helper_sheets",
+        "message": "Workbook helper sheet contract check.",
+        "meta_json": "{\"actual_sheets\":[\"Sheet1\",\"_issues\",\"_validation\",\"_duplicates\",\"_conflicts\",\"_review_queue\",\"_unplaced_facts\",\"_meta_summary\"],\"required_sheets\":[\"_meta_summary\",\"_issues\",\"_validation\",\"_duplicates\",\"_conflicts\",\"_unplaced_facts\",\"_review_queue\"]}",
+        "severity": "error",
+        "status": "pass"
+      },
+      {
+        "check_id": "INT002",
+        "check_name": "duplicate_main_period_columns",
+        "message": "Main sheet must not contain duplicate period columns.",
+        "meta_json": "{\"period_columns\":[\"2022-12-31__期初数\",\"2022-12-31__期末数\",\"2022年度__上期\",\"2022年度__期初数\",\"2022年度__期末数\",\"2022年度__本期\"]}",
+        "severity": "error",
+        "status": "pass"
+      },
+      {
+        "check_id": "INT003",
+        "check_name": "no_unknown_date_columns_when_summary_zero",
+        "message": "run_summary says unknown_date_total=0, so main sheet must not expose unknown_date columns.",
+        "meta_json": "{\"period_columns\":[\"2022-12-31__期初数\",\"2022-12-31__期末数\",\"2022年度__上期\",\"2022年度__期初数\",\"2022年度__期末数\",\"2022年度__本期\"]}",
+        "severity": "error",
+        "status": "pass"
+      },
+      {
+        "check_id": "INT004",
+        "check_name": "no_unknown_role_columns_on_main_sheet",
+        "message": "Main sheet must not expose unresolved period-role columns.",
+        "meta_json": "{\"period_columns\":[\"2022-12-31__期初数\",\"2022-12-31__期末数\",\"2022年度__上期\",\"2022年度__期初数\",\"2022年度__期末数\",\"2022年度__本期\"]}",
+        "severity": "error",
+        "status": "pass"
+      },
+      {
+        "check_id": "INT005",
+        "check_name": "main_sheet_periods_match_exportable_facts",
+        "message": "Main sheet period columns must match exportable resolved deduped facts.",
+        "meta_json": "{\"actual_periods\":[\"2022-12-31__期初数\",\"2022-12-31__期末数\",\"2022年度__上期\",\"2022年度__期初数\",\"2022年度__期末数\",\"2022年度__本期\"],\"expected_periods\":[\"2022-12-31__期初数\",\"2022-12-31__期末数\",\"2022年度__上期\",\"2022年度__期初数\",\"2022年度__期末数\",\"2022年度__本期\"]}",
+        "severity": "error",
+        "status": "pass"
+      },
+      {
+        "check_id": "INT006",
+        "check_name": "export_uses_deduped_facts",
+        "message": "Export must explicitly use deduped facts as its source of truth.",
+        "meta_json": "{\"source_facts\":\"facts_deduped\"}",
+        "severity": "error",
+        "status": "pass"
+      },
+      {
+        "check_id": "INT007",
+        "check_name": "accepted_conflicts_are_explained",
+        "message": "Accepted conflict outcomes must either land on the main sheet or be present in _unplaced_facts with a reason.",
+        "meta_json": "{\"missing\":[]}",
+        "severity": "error",
+        "status": "pass"
+      },
+      {
+        "check_id": "INT008",
+        "check_name": "no_duplicate_exportable_fact_keys",
+        "message": "Exportable deduped facts must not contain duplicate mapping_code + period_key keys.",
+        "meta_json": "{\"duplicate_keys\":[]}",
+        "severity": "error",
+        "status": "pass"
+      }
+    ]
+  },
   "issues_count": 229,
-  "mapping_review_count": 864,
+  "mapping_review_count": 880,
   "page_errors": [],
   "pages_discovered": 44,
   "providers_seen": {
     "aliyun_table": 22,
     "tencent_table_v3": 22
+  },
+  "review_summary": {
+    "reason_breakdown": {
+      "conflict:review_required": 2,
+      "issue:suspicious_value": 147,
+      "mapping:unmapped": 576,
+      "quality:suspicious_numeric": 147,
+      "validation:amount_legality:review": 147,
+      "validation:ratio_total_check:fail": 20,
+      "validation:subtotal_check:fail": 84
+    },
+    "review_total": 581,
+    "with_evidence_total": 467
+  },
+  "run_summary": {
+    "amount_coverage_ratio": 0.23506224019745336,
+    "cells_total": 2717,
+    "conflict_decision_breakdown": {
+      "accepted_with_rule_support": 4,
+      "review_required": 1
+    },
+    "docs_total": 1,
+    "duplicate_groups_total": 390,
+    "duplicates_total": 613,
+    "facts_deduped_total": 672,
+    "facts_raw_total": 1070,
+    "integrity_fail_total": 0,
+    "mapped_by_alias": 8,
+    "mapped_by_exact": 180,
+    "mapped_by_relation": 0,
+    "mapped_facts_ratio": 0.14285714285714285,
+    "mapped_facts_total": 96,
+    "pages_skipped_as_non_table": 3,
+    "pages_total": 22,
+    "pages_with_tables": 13,
+    "period_key_breakdown": {
+      "2022-12-31__期初数": 74,
+      "2022-12-31__期末数": 71,
+      "2022年度__unknown": 129,
+      "2022年度__上期": 68,
+      "2022年度__期初数": 106,
+      "2022年度__期末数": 110,
+      "2022年度__本期": 114
+    },
+    "provider_compared_pairs": 220,
+    "provider_conflict_pairs": 5,
+    "provider_equal_pairs": 215,
+    "repaired_facts_total": 0,
+    "review_facts_total": 145,
+    "review_reason_breakdown": {
+      "contains_chinese_noise": 25,
+      "expected_numeric_but_unparseable": 143,
+      "numeric_parse_failed": 143,
+      "provider_conflict": 2,
+      "seal_or_stamp_noise": 2
+    },
+    "review_total": 581,
+    "statement_type_breakdown": {
+      "balance_sheet": 145,
+      "cash_flow": 65,
+      "note": 397,
+      "unknown": 65
+    },
+    "suspicious_cells_total": 228,
+    "tables_total": 69,
+    "unknown_date_ratio": 0.0,
+    "unknown_date_total": 0,
+    "unmapped_ratio": 0.8571428571428571,
+    "unmapped_total": 576,
+    "validation_fail_total": 32,
+    "validation_pass_total": 26,
+    "validation_reason_breakdown": {
+      "amount_legality": 147,
+      "balance_equation": 7,
+      "ratio_total_check": 23,
+      "subtotal_check": 122
+    },
+    "validation_total": 299
   },
   "skipped_text_providers": [
     "aliyun_text",
@@ -22,5 +193,18 @@
   ],
   "template_header_row": 3,
   "template_sheet": "Sheet1",
-  "unsupported_providers": []
+  "unsupported_providers": [],
+  "validation_summary": {
+    "validation_fail_total": 32,
+    "validation_pass_total": 26,
+    "validation_reason_breakdown": {
+      "amount_legality": 147,
+      "balance_equation": 7,
+      "ratio_total_check": 23,
+      "subtotal_check": 122
+    },
+    "validation_review_total": 147,
+    "validation_skipped_total": 94,
+    "validation_total": 299
+  }
 }

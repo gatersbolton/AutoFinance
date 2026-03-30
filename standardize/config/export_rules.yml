@@ -1,0 +1,16 @@
+required_helper_sheets:
+  - _meta_summary
+  - _issues
+  - _validation
+  - _duplicates
+  - _conflicts
+  - _unplaced_facts
+  - _review_queue
+allowed_statuses:
+  - observed
+  - repaired
+allowed_conflict_decisions:
+  - ""
+  - accepted
+  - accepted_with_rule_support
+  - accepted_with_validation_support

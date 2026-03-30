@@ -1,0 +1,40 @@
+pre_ocr:
+  binarize_threshold: 210
+  strong_horizontal_ratio: 0.35
+  strong_vertical_ratio: 0.18
+  table_likelihood_trigger: 0.45
+  line_density_trigger: 0.45
+  numeric_density_trigger: 0.35
+  selection_threshold: 0.45
+  hard_keyword_hits: 2
+  weights:
+    table_likelihood_score: 0.4
+    numeric_density_score: 0.2
+    line_density_score: 0.3
+    keyword_score: 0.1
+  keywords:
+    - 资产负债表
+    - 利润表
+    - 现金流量表
+    - 所有者权益变动表
+    - 行次
+    - 期初数
+    - 期末数
+    - 本期
+    - 上期
+    - 合计
+    - 金额
+    - 比例
+post_ocr:
+  selection_threshold: 0.35
+  review_ratio_threshold: 0.15
+  unknown_date_ratio_threshold: 0.2
+  weights:
+    suspicious_cells: 0.25
+    validation_fail: 0.3
+    review_ratio: 0.2
+    unknown_date_ratio: 0.2
+    unknown_statement: 0.15
+    compare_gap: 0.25
+    missing_key_facts: 0.2
+    xlsx_fallback: 0.2

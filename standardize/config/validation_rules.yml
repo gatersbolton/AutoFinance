@@ -1,0 +1,23 @@
+balance_equation:
+  aliases:
+    assets_total:
+      - 资产总计
+    liabilities_total:
+      - 负债合计
+    equity_total:
+      - 所有者权益合计
+      - 股东权益合计
+      - 负债及股东权益总计
+  tolerance:
+    absolute: 1
+    relative: 0.0001
+subtotal_rules:
+  min_detail_rows: 2
+  tolerance:
+    absolute: 1
+    relative: 0.0001
+ratio_rules:
+  expected_total: 1.0
+  tolerance: 0.02
+amount_legality:
+  status_when_noise_detected: review

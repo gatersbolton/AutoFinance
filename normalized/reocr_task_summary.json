@@ -1,0 +1,12 @@
+{
+  "granularity_breakdown": {
+    "cell": 2,
+    "page": 114,
+    "row": 465
+  },
+  "provider_breakdown": {
+    "aliyun_table": 114,
+    "tencent_table_v3": 467
+  },
+  "tasks_total": 581
+}

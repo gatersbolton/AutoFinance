@@ -1,0 +1,7 @@
+max_candidates: 3
+candidate_min_score: 0.62
+prefixes_to_strip:
+  - 其中
+  - 减
+  - 加
+parenthetical_suffix_max_len: 20

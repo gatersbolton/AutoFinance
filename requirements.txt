@@ -4,6 +4,7 @@ alibabacloud-tea-openapi
 alibabacloud-tea-util
 PyMuPDF
 Pillow
+numpy
 pytest
 openpyxl
 PyYAML

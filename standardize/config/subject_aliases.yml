@@ -1,8 +1,20 @@
 aliases:
-  应交税金:
-    - 应交税费
-  预收账款:
-    - 合同负债
-  应付工资:
-    - 应付职工薪酬
+  - canonical_code: ZT_024
+    canonical_name: 应交税费
+    alias: 应交税金
+    alias_type: legacy_alias
+    enabled: true
+    note: 旧准则常见写法
+  - canonical_code: ZT_041
+    canonical_name: 合同负债
+    alias: 预收账款
+    alias_type: legacy_alias
+    enabled: true
+    note: 新收入准则替代写法
+  - canonical_code: ZT_030
+    canonical_name: 应付职工薪酬
+    alias: 应付工资
+    alias_type: legacy_alias
+    enabled: true
+    note: 旧科目名称
 disabled: []

@@ -1,0 +1,10 @@
+crop_padding: 12
+reason_weights:
+  conflict: 4.0
+  validation: 3.0
+  mapping: 2.5
+  quality: 2.5
+  issue: 2.0
+  source: 1.5
+  unplaced: 2.0
+max_evidence_images_per_doc: 500

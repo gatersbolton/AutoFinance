@@ -1,0 +1,13 @@
+{
+  "reason_breakdown": {
+    "conflict:review_required": 2,
+    "issue:suspicious_value": 147,
+    "mapping:unmapped": 576,
+    "quality:suspicious_numeric": 147,
+    "validation:amount_legality:review": 147,
+    "validation:ratio_total_check:fail": 20,
+    "validation:subtotal_check:fail": 84
+  },
+  "review_total": 581,
+  "with_evidence_total": 467
+}

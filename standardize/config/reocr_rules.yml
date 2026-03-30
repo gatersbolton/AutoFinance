@@ -1,0 +1,5 @@
+reocr:
+  cell_priority: 4.0
+  row_priority: 3.0
+  table_priority: 2.0
+  page_priority: 1.0

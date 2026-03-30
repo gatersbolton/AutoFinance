@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass, field, fields, is_dataclass
+from dataclasses import dataclass, field, fields, is_dataclass
 from typing import Any, Dict, List, Optional
 
 
@@ -84,6 +84,10 @@ class StatementMeta:
     report_date_norm: str
     unit_raw: str
     unit_multiplier: float
+    report_date_candidates_json: str = ""
+    statement_group_key: str = ""
+    source_level: str = ""
+    reason: str = ""
 
 
 @dataclass
@@ -161,6 +165,27 @@ class FactRecord:
     mapping_method: str
     mapping_confidence: Optional[float]
     issue_flags: List[str]
+    fact_id: str = ""
+    report_date_norm: str = ""
+    period_role_norm: str = ""
+    period_source_level: str = ""
+    period_reason: str = ""
+    duplicate_group_id: str = ""
+    kept_fact_id: str = ""
+    comparison_status: str = ""
+    comparison_reason: str = ""
+    source_kind: str = ""
+    statement_group_key: str = ""
+    source_row_start: int = 0
+    source_row_end: int = 0
+    source_col_start: int = 0
+    source_col_end: int = 0
+    mapping_relation_type: str = ""
+    mapping_review_required: bool = False
+    conflict_id: str = ""
+    conflict_decision: str = ""
+    unplaced_reason: str = ""
+    review_id: str = ""
 
 
 @dataclass
@@ -196,6 +221,119 @@ class ConflictRecord:
     accepted_provider: str
     reason: str
     meta_json: str
+    conflict_id: str = ""
+    compared_pair_count: int = 0
+    providers: str = ""
+    candidate_values_json: str = ""
+    magnitude_ratio: Optional[float] = None
+    validation_delta: str = ""
+    needs_review: bool = False
+    accepted_fact_id: str = ""
+
+
+@dataclass
+class DuplicateRecord:
+    duplicate_group_id: str
+    doc_id: str
+    statement_type: str
+    statement_group_key: str
+    period_key: str
+    canonical_key: str
+    kept_fact_id: str
+    dropped_fact_id: str
+    kept_provider: str
+    dropped_provider: str
+    kept_source_cell_ref: str
+    dropped_source_cell_ref: str
+    dedupe_reason: str
+    decision: str
+    meta_json: str
+
+
+@dataclass
+class ProviderComparisonRecord:
+    doc_id: str
+    page_no: int
+    providers_present: str
+    aligned_groups: int
+    compared_pairs: int
+    equal_pairs: int
+    conflict_pairs: int
+    uncomparable_groups: int
+    reason: str
+    meta_json: str
+
+
+@dataclass
+class ValidationResultRecord:
+    validation_id: str
+    doc_id: str
+    statement_type: str
+    period_key: str
+    rule_name: str
+    rule_type: str
+    lhs_value: Optional[float]
+    rhs_value: Optional[float]
+    diff_value: Optional[float]
+    tolerance: Optional[float]
+    status: str
+    evidence_fact_refs: List[str]
+    message: str
+    meta_json: str
+
+
+@dataclass
+class PageSelectionRecord:
+    doc_id: str
+    page_no: int
+    source_file: str
+    table_likelihood_score: float
+    numeric_density_score: float
+    line_density_score: float
+    keyword_score: float
+    is_candidate_table_page: bool
+    selection_reason: str
+    meta_json: str
+
+
+@dataclass
+class SecondaryOCRCandidateRecord:
+    doc_id: str
+    page_no: int
+    providers_present: str
+    provider_comparison_coverage: float
+    trigger_score: float
+    trigger_reasons: List[str]
+    recommend_secondary_ocr: bool
+    reason: str
+    meta_json: str
+
+
+@dataclass
+class RunSummaryRecord:
+    docs_total: int
+    pages_total: int
+    pages_with_tables: int
+    pages_skipped_as_non_table: int
+    tables_total: int
+    cells_total: int
+    facts_raw_total: int
+    facts_deduped_total: int
+    mapped_facts_total: int
+    mapped_facts_ratio: float
+    unknown_date_total: int
+    unknown_date_ratio: float
+    suspicious_cells_total: int
+    repaired_facts_total: int
+    review_facts_total: int
+    duplicates_total: int
+    duplicate_groups_total: int
+    provider_compared_pairs: int
+    provider_equal_pairs: int
+    provider_conflict_pairs: int
+    validation_total: int
+    validation_pass_total: int
+    validation_fail_total: int
 
 
 @dataclass
@@ -215,9 +353,153 @@ class MappingReviewRecord:
 
 
 @dataclass
+class MappingCandidateRecord:
+    doc_id: str
+    page_no: int
+    provider: str
+    statement_type: str
+    row_label_raw: str
+    row_label_std: str
+    normalized_label: str
+    candidate_code: str
+    candidate_name: str
+    candidate_rank: int
+    candidate_score: float
+    candidate_method: str
+    relation_type: str
+    review_required: bool
+    source_cell_ref: str
+    meta_json: str
+
+
+@dataclass
+class UnmappedLabelSummaryRecord:
+    row_label_std: str
+    normalized_label: str
+    occurrences: int
+    numeric_occurrences: int
+    amount_abs_total: float
+    example_source_cell_ref: str
+    top_candidate_code: str
+    top_candidate_name: str
+    top_candidate_score: float
+    top_candidate_method: str
+    meta_json: str
+
+
+@dataclass
 class TemplateSubject:
     code: str
     canonical_name: str
     row_index: int
     sheet_name: str
     source_value: str
+
+
+@dataclass
+class AliasRecord:
+    canonical_code: str
+    canonical_name: str
+    alias: str
+    alias_type: str
+    enabled: bool
+    note: str = ""
+
+
+@dataclass
+class RelationRecord:
+    canonical_code: str
+    canonical_name: str
+    relation_type: str
+    related_codes: List[str]
+    related_names: List[str]
+    enabled: bool
+    review_required: bool
+    note: str = ""
+
+
+@dataclass
+class ConflictDecisionAuditRecord:
+    conflict_id: str
+    doc_id: str
+    page_no: int
+    statement_type: str
+    period_key: str
+    providers: str
+    compared_pair_count: int
+    candidate_values_json: str
+    magnitude_ratio: Optional[float]
+    decision: str
+    decision_reason: str
+    accepted_fact_id: str
+    needs_review: bool
+    validation_delta: str
+    meta_json: str
+
+
+@dataclass
+class ValidationImpactRecord:
+    conflict_id: str
+    candidate_provider: str
+    candidate_fact_id: str
+    doc_id: str
+    statement_type: str
+    period_key: str
+    fail_count: int
+    review_count: int
+    impacted_rules_json: str
+    delta_score: float
+    meta_json: str
+
+
+@dataclass
+class ReviewQueueRecord:
+    review_id: str
+    priority_score: float
+    reason_codes: List[str]
+    doc_id: str
+    page_no: int
+    statement_type: str
+    row_label_raw: str
+    row_label_std: str
+    period_key: str
+    value_raw: str
+    value_num: Optional[float]
+    provider: str
+    source_file: str
+    bbox: str
+    related_fact_ids: List[str]
+    related_conflict_ids: List[str]
+    related_validation_ids: List[str]
+    mapping_candidates: str
+    evidence_cell_path: str
+    evidence_row_path: str
+    evidence_table_path: str
+    meta_json: str
+
+
+@dataclass
+class ReOCRTaskRecord:
+    task_id: str
+    granularity: str
+    doc_id: str
+    page_no: int
+    table_id: str
+    logical_subtable_id: str
+    bbox: str
+    reason_codes: List[str]
+    suggested_provider: str
+    priority_score: float
+    expected_benefit: str
+    source_review_id: str
+    meta_json: str
+
+
+@dataclass
+class ArtifactIntegrityRecord:
+    check_id: str
+    check_name: str
+    severity: str
+    status: str
+    message: str
+    meta_json: str

@@ -1,0 +1,4 @@
+magnitude_ratio_review_threshold: 10
+magnitude_ratio_force_review_threshold: 100
+enable_validation_aware: true
+allow_provider_priority_tiebreak: true

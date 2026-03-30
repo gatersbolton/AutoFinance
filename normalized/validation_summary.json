@@ -1,0 +1,13 @@
+{
+  "validation_fail_total": 32,
+  "validation_pass_total": 26,
+  "validation_reason_breakdown": {
+    "amount_legality": 147,
+    "balance_equation": 7,
+    "ratio_total_check": 23,
+    "subtotal_check": 122
+  },
+  "validation_review_total": 147,
+  "validation_skipped_total": 94,
+  "validation_total": 299
+}

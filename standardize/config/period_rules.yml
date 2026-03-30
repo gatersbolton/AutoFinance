@@ -1,0 +1,13 @@
+source_weights:
+  header: 120
+  page_context: 95
+  page_text: 70
+  result_json: 65
+  doc_id: 18
+line_scoring:
+  financial_statement_bonus: 18
+  as_of_bonus: 10
+  report_date_penalty: 40
+  audit_report_penalty: 20
+repeat_bonus: 2
+tie_threshold: 5

@@ -224,6 +224,21 @@ def extract_facts(subtables: List[LogicalSubtable], keyword_config: Dict[str, An
                         mapping_method="",
                         mapping_confidence=None,
                         issue_flags=list(dict.fromkeys(flag for flag in issue_flags if flag)),
+                        fact_id="",
+                        report_date_norm=subtable.statement_meta.report_date_norm,
+                        period_role_norm=period_role_raw,
+                        period_source_level=subtable.statement_meta.source_level or "page",
+                        period_reason=subtable.statement_meta.reason or "",
+                        duplicate_group_id="",
+                        kept_fact_id="",
+                        comparison_status="uncompared",
+                        comparison_reason="not_compared_yet",
+                        source_kind=parse_cell_meta(cell).get("source_kind", ""),
+                        statement_group_key=subtable.statement_meta.statement_group_key,
+                        source_row_start=cell.row_start,
+                        source_row_end=cell.row_end,
+                        source_col_start=cell.col_start,
+                        source_col_end=cell.col_end,
                     )
                 )
 
