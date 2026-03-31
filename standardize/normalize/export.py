@@ -8,6 +8,7 @@ from typing import Any, Dict, Iterable, List, Tuple
 from openpyxl import load_workbook
 
 from ..models import ConflictRecord, DuplicateRecord, FactRecord, IssueRecord, ReviewQueueRecord, ValidationResultRecord
+from ..statement.export_filters import classify_export_blocker
 from .mapping import load_template_subjects
 
 
@@ -38,6 +39,7 @@ def export_template(
     template_path: Path,
     output_path: Path,
     facts: List[FactRecord],
+    derived_facts: List[FactRecord] | None = None,
     run_summary: Dict[str, Any] | None = None,
     issues: List[IssueRecord] | None = None,
     validations: List[ValidationResultRecord] | None = None,
@@ -45,6 +47,8 @@ def export_template(
     conflicts: List[ConflictRecord] | None = None,
     review_queue: List[ReviewQueueRecord] | None = None,
     applied_actions: List[Dict[str, Any]] | None = None,
+    classification_audit: List[Dict[str, Any]] | None = None,
+    period_role_audit: List[Dict[str, Any]] | None = None,
     export_rules: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     export_rules = export_rules or {}
@@ -54,9 +58,11 @@ def export_template(
     workbook = load_workbook(template_path)
     worksheet = workbook[sheet_name]
 
+    derived_facts = derived_facts or []
+    export_facts = list(facts) + list(derived_facts)
     grouped: Dict[Tuple[str, str], List[FactRecord]] = defaultdict(list)
     unplaced_rows: List[Dict[str, Any]] = []
-    for fact in facts:
+    for fact in export_facts:
         reason = determine_unplaced_reason(fact, export_rules)
         if reason:
             fact.unplaced_reason = fact.unplaced_reason or reason
@@ -100,6 +106,11 @@ def export_template(
     replace_sheet_with_rows(workbook, "_review_queue", review_queue or [], model_cls=ReviewQueueRecord)
     replace_sheet_with_rows(workbook, "_unplaced_facts", unplaced_rows, headers=UNPLACED_HEADERS)
     replace_sheet_with_rows(workbook, "_applied_actions", applied_actions or [])
+    replace_sheet_with_rows(workbook, "_derived_facts", derived_facts or [])
+    replace_sheet_with_rows(workbook, "_classification_audit", classification_audit or [])
+    replace_sheet_with_rows(workbook, "_period_role_audit", period_role_audit or [])
+    replace_sheet_with_key_values(workbook, "_benchmark_summary", {})
+    replace_sheet_with_rows(workbook, "_gap_explanations", [])
     workbook.save(output_path)
     return {
         "written_cells": written,
@@ -117,6 +128,11 @@ def export_template(
             "_unplaced_facts",
             "_review_queue",
             "_applied_actions",
+            "_derived_facts",
+            "_classification_audit",
+            "_period_role_audit",
+            "_benchmark_summary",
+            "_gap_explanations",
         ],
         "source_facts": "facts_deduped",
         "unplaced_count": len(unplaced_rows),
@@ -125,28 +141,7 @@ def export_template(
 
 
 def determine_unplaced_reason(fact: FactRecord, export_rules: Dict[str, Any]) -> str:
-    allowed_statuses = set(export_rules.get("allowed_statuses", ["observed", "repaired", "accepted", "accepted_with_rule_support", "accepted_with_validation_support"]))
-    if not fact.mapping_code:
-        return "unmapped"
-    if fact.status == "suppressed":
-        return fact.suppression_reason or "suppressed"
-    if fact.mapping_review_required:
-        return "mapping_review_required"
-    if fact.value_num is None:
-        return "non_numeric_or_blank"
-    if not fact.report_date_norm or fact.report_date_norm == "unknown_date":
-        return "unknown_date"
-    if not fact.period_role_norm or fact.period_role_norm == "unknown":
-        return "unknown_period_role"
-    if fact.period_key.startswith("unknown_date__") or fact.period_key.endswith("__unknown"):
-        return "unresolved_period_key"
-    if fact.status not in allowed_statuses:
-        return f"status_blocked:{fact.status}"
-    if fact.conflict_decision in {"review_required", "unresolved"}:
-        return f"conflict_{fact.conflict_decision}"
-    if fact.duplicate_group_id and fact.kept_fact_id and fact.kept_fact_id != fact.fact_id:
-        return "dropped_by_dedupe"
-    return ""
+    return classify_export_blocker(fact, export_rules)
 
 
 def select_export_fact(group_items: List[FactRecord]) -> Tuple[FactRecord | None, List[Dict[str, Any]]]:
@@ -178,6 +173,7 @@ def select_export_fact(group_items: List[FactRecord]) -> Tuple[FactRecord | None
 
 def export_fact_score(fact: FactRecord) -> Tuple[int, ...]:
     return (
+        1 if fact.source_kind != "derived_formula" else 0,
         1 if fact.conflict_decision == "accepted_with_validation_support" else 0,
         1 if fact.conflict_decision == "accepted_with_rule_support" else 0,
         1 if fact.comparison_status == "accepted" else 0,
@@ -291,4 +287,21 @@ def serialize_sheet_value(value: Any) -> Any:
 def rewrite_meta_summary(output_path: Path, run_summary: Dict[str, Any]) -> None:
     workbook = load_workbook(output_path)
     replace_sheet_with_key_values(workbook, "_meta_summary", run_summary or {})
+    workbook.save(output_path)
+
+
+def rewrite_stage5_helper_sheets(
+    output_path: Path,
+    benchmark_summary: Dict[str, Any] | None = None,
+    gap_rows: List[Dict[str, Any]] | None = None,
+    derived_facts: List[FactRecord] | None = None,
+    classification_audit: List[Dict[str, Any]] | None = None,
+    period_role_audit: List[Dict[str, Any]] | None = None,
+) -> None:
+    workbook = load_workbook(output_path)
+    replace_sheet_with_key_values(workbook, "_benchmark_summary", benchmark_summary or {})
+    replace_sheet_with_rows(workbook, "_gap_explanations", gap_rows or [])
+    replace_sheet_with_rows(workbook, "_derived_facts", derived_facts or [])
+    replace_sheet_with_rows(workbook, "_classification_audit", classification_audit or [])
+    replace_sheet_with_rows(workbook, "_period_role_audit", period_role_audit or [])
     workbook.save(output_path)

@@ -1,0 +1,9 @@
+statement_types:
+  - income_statement
+  - cash_flow
+generic_headers:
+  - 金额
+  - 本期金额
+  - 本年累计数
+  - 本年累计
+inferred_role: 本期

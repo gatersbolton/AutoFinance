@@ -9,12 +9,14 @@ from ..models import AliasRecord, MappingCandidateRecord, RelationRecord, Templa
 from ..normalize.text import clean_text, normalize_label_for_matching
 
 
-PREFIX_RE = re.compile(r"^(其中|减|加|其中:|减:|加:|其中：|减：|加：)")
+PREFIX_RE = re.compile(r"^(其中|减|加|注|其中:|减:|加:|注:|其中：|减：|加：|注：)")
+ENUMERATION_RE = re.compile(r"^\s*(?:[一二三四五六七八九十]+[、,，.]|[(（]?\d+[)）.]?)")
 PAREN_RE = re.compile(r"[（(][^()（）]{1,20}[)）]$")
 
 
 def normalize_subject_label(value: object) -> str:
     text = normalize_label_for_matching(value)
+    text = ENUMERATION_RE.sub("", text)
     text = PREFIX_RE.sub("", text)
     text = PAREN_RE.sub("", text)
     return text.strip()
@@ -110,7 +112,12 @@ def build_candidate_records(
     fact,
     candidates: Iterable[Tuple[TemplateSubject, float, str, str, bool]],
 ) -> List[MappingCandidateRecord]:
-    normalized_label = normalize_subject_label(fact.row_label_std or fact.row_label_raw)
+    normalized_label = normalize_subject_label(
+        getattr(fact, "row_label_canonical_candidate", "")
+        or getattr(fact, "row_label_norm", "")
+        or fact.row_label_std
+        or fact.row_label_raw
+    )
     rows: List[MappingCandidateRecord] = []
     for rank, (subject, score, method, relation_type, review_required) in enumerate(candidates, start=1):
         rows.append(

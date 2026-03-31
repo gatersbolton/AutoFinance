@@ -88,6 +88,9 @@ class StatementMeta:
     statement_group_key: str = ""
     source_level: str = ""
     reason: str = ""
+    statement_type_source: str = ""
+    statement_type_score: float = 0.0
+    statement_type_reason: str = ""
 
 
 @dataclass
@@ -147,6 +150,8 @@ class FactRecord:
     table_semantic_key: str
     row_label_raw: str
     row_label_std: str
+    row_label_norm: str
+    row_label_canonical_candidate: str
     col_header_raw: str
     col_header_path: List[str]
     column_semantic_key: str
@@ -190,6 +195,12 @@ class FactRecord:
     override_source: str = ""
     parent_review_id: str = ""
     parent_task_id: str = ""
+    normalization_rule_ids: List[str] = field(default_factory=list)
+    statement_type_source: str = ""
+    statement_type_score: float = 0.0
+    statement_type_reason: str = ""
+    period_role_inference_reason: str = ""
+    period_role_inference_source: str = ""
 
 
 @dataclass

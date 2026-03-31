@@ -35,7 +35,7 @@ def apply_subject_mapping(
             else:
                 stats["mapped_by_alias"] += 1
             continue
-        label = fact.row_label_std or fact.row_label_raw
+        label = fact.row_label_canonical_candidate or fact.row_label_norm or fact.row_label_std or fact.row_label_raw
         normalized_label = normalize_subject_label(label)
         if not normalized_label:
             continue

@@ -1,0 +1,66 @@
+title_keywords:
+  balance_sheet:
+    - 资产负债表
+  income_statement:
+    - 利润表
+    - 损益表
+    - 利润及利润分配表
+  cash_flow:
+    - 现金流量表
+  changes_in_equity:
+    - 所有者权益变动表
+    - 股东权益变动表
+  note:
+    - 财务报表附注
+    - 附注
+note_titles:
+  - 财务报表附注
+  - 附注
+note_detail_markers:
+  - 利润表有关项目注释
+  - 资产负债表有关项目注释
+  - 现金流量表有关项目注释
+header_signatures:
+  balance_sheet:
+    - [项目, 行次, 期初数, 期末数]
+    - [项目, 期初数, 期末数]
+  income_statement:
+    - [项目, 行次, 上年同期数, 本年累计数]
+    - [项目, 行次, 上期, 本期]
+    - [项目, 行次, 金额]
+  cash_flow:
+    - [项目, 行次, 金额]
+  changes_in_equity:
+    - [项目, 本年金额, 上年金额]
+row_patterns:
+  balance_sheet:
+    - 资产总计
+    - 负债合计
+    - 所有者权益合计
+    - 流动资产合计
+    - 流动负债合计
+  income_statement:
+    - 营业收入
+    - 营业成本
+    - 营业利润
+    - 利润总额
+    - 净利润
+    - 主营业务收入
+    - 主营业务成本
+    - 主营业务利润
+  cash_flow:
+    - 经营活动产生的现金流量净额
+    - 投资活动产生的现金流量净额
+    - 筹资活动产生的现金流量净额
+    - 现金及现金等价物净增加额
+  changes_in_equity:
+    - 实收资本
+    - 资本公积
+    - 盈余公积
+    - 未分配利润
+main_statement_numbering:
+  income_statement_prefixes: [一, 二, 三, 四, 五]
+  cash_flow_prefixes: [一, 二, 三, 四, 五]
+main_statement_page_cutoff: 10
+classification_min_score: 12
+classification_margin: 4

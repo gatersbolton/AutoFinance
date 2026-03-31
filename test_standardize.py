@@ -9,13 +9,18 @@ from PIL import Image, ImageDraw
 from openpyxl import load_workbook
 
 from standardize import cli
+from standardize.benchmark import compare_benchmark_workbook, explain_benchmark_gaps
+from standardize.curation import build_alias_acceptance_candidates, build_formula_rule_impact, prune_reocr_tasks, split_unmapped_facts
 from standardize.dedupe import assign_fact_ids, dedupe_facts
+from standardize.derive import derive_formula_facts
 from standardize.feedback import apply_review_actions, build_delta_reports, export_review_actions_template, parse_review_actions_file
 from standardize.integrity import run_artifact_integrity
+from standardize.manifest import generate_run_id, write_run_manifest
 from standardize.mapping.review import apply_subject_mapping
-from standardize.models import AliasRecord, CellRecord, ConflictRecord, FactRecord, ProviderCell, ProviderPage, ReOCRTaskRecord, RelationRecord, StatementMeta, TemplateSubject, ValidationResultRecord
+from standardize.models import AliasRecord, CellRecord, ConflictRecord, FactRecord, ProviderCell, ProviderPage, ReOCRTaskRecord, RelationRecord, ReviewQueueRecord, StatementMeta, TemplateSubject, ValidationResultRecord
 from standardize.normalize.conflicts import enrich_conflicts, resolve_conflicts
 from standardize.normalize.export import export_template
+from standardize.normalize.labels import apply_label_canonicalization
 from standardize.normalize.mapping import load_template_subjects
 from standardize.normalize.numbers import analyze_numeric_text
 from standardize.normalize.periods import apply_period_normalization
@@ -27,6 +32,7 @@ from standardize.providers.aliyun import extract_aliyun_data
 from standardize.review import build_review_queue
 from standardize.routing.page_selector import build_page_selection
 from standardize.routing.secondary_ocr import materialize_reocr_inputs
+from standardize.statement import resolve_single_period_annual_roles, run_full_run_contract, specialize_statement_types
 from standardize.validation import run_validation
 
 
@@ -973,9 +979,351 @@ class StandardizeTests(unittest.TestCase):
             self.assertIn("_applied_actions", workbook.sheetnames)
             self.assertEqual(workbook["_applied_actions"].cell(row=1, column=1).value, "action_id")
 
+    def test_label_canonicalization(self):
+        facts = [
+            self.make_fact(statement_type="income_statement", row_label_raw="一、主营业务收入", row_label_std="一、主营业务收入"),
+            self.make_fact(statement_type="income_statement", row_label_raw="减:主营业务成本", row_label_std="减:主营业务成本"),
+            self.make_fact(statement_type="note", row_label_raw="其中:应付利息", row_label_std="其中:应付利息"),
+        ]
+        facts, audit_rows, summary = apply_label_canonicalization(
+            facts,
+            {
+                "general_prefixes": ["加:", "减:", "其中:"],
+                "statement_rules": {
+                    "income_statement": {"prefixes": ["加:", "减:", "其中:"], "synonyms": {"主营业务收入": "营业收入", "主营业务成本": "营业成本"}},
+                    "note": {"prefixes": ["其中:"], "synonyms": {}},
+                },
+            },
+            enabled=True,
+        )
+        self.assertEqual(facts[0].row_label_norm, "主营业务收入")
+        self.assertEqual(facts[0].row_label_canonical_candidate, "营业收入")
+        self.assertEqual(facts[1].row_label_norm, "主营业务成本")
+        self.assertEqual(facts[2].row_label_norm, "应付利息")
+        self.assertTrue(facts[0].normalization_rule_ids)
+        self.assertEqual(summary["rows_changed"], 3)
+        self.assertEqual(len(audit_rows), 3)
+
+    def test_stage6_statement_specialization(self):
+        facts = assign_fact_ids(
+            [
+                self.make_fact(doc_id="demo", page_no=5, statement_type="unknown", row_label_raw="一、主营业务收入", row_label_std="一、主营业务收入", row_label_norm="主营业务收入", row_label_canonical_candidate="营业收入"),
+                self.make_fact(doc_id="demo", page_no=5, statement_type="unknown", row_label_raw="减：主营业务成本", row_label_std="减：主营业务成本", row_label_norm="主营业务成本", row_label_canonical_candidate="营业成本"),
+                self.make_fact(doc_id="demo", page_no=5, statement_type="unknown", row_label_raw="四、利润总额", row_label_std="四、利润总额", row_label_norm="利润总额", row_label_canonical_candidate="利润总额"),
+            ]
+        )
+        pages = [
+            ProviderPage(
+                doc_id="demo",
+                page_no=5,
+                provider="aliyun_table",
+                source_file="page5.json",
+                source_kind="json",
+                page_text="利润及利润分配表 2022年度",
+                tables={},
+                context_lines=["利润及利润分配表", "2022年度"],
+            )
+        ]
+        facts, audit_rows, summary = specialize_statement_types(
+            facts,
+            pages,
+            {
+                "title_keywords": {"income_statement": ["利润及利润分配表"], "note": ["财务报表附注"]},
+                "row_patterns": {"income_statement": ["营业收入", "营业成本", "利润总额", "净利润", "主营业务收入", "主营业务成本"]},
+                "header_signatures": {},
+                "note_titles": ["财务报表附注"],
+                "note_detail_markers": [],
+                "main_statement_numbering": {"income_statement_prefixes": ["一", "二", "三", "四", "五"], "cash_flow_prefixes": ["一", "二", "三", "四", "五"]},
+                "classification_min_score": 12,
+                "classification_margin": 4,
+            },
+            enabled=True,
+        )
+        self.assertTrue(all(fact.statement_type == "income_statement" for fact in facts))
+        self.assertGreater(summary["unknown_statement_type_total_before"], summary["unknown_statement_type_total_after"])
+        self.assertTrue(audit_rows)
+
+    def test_single_period_annual_role_inference(self):
+        facts = [
+            self.make_fact(
+                statement_type="income_statement",
+                logical_subtable_id="5_sub1",
+                mapping_code="ZT_138",
+                mapping_name="营业收入",
+                report_date_norm="2022年度",
+                period_key="2022年度__unknown",
+                period_role_norm="unknown",
+                period_role_raw="unknown",
+                col_header_raw="金额",
+                column_semantic_key="金额",
+                col_header_path=["金额"],
+                value_num=100.0,
+            )
+        ]
+        facts, audit_rows, summary = resolve_single_period_annual_roles(
+            facts,
+            {"statement_types": ["income_statement", "cash_flow"], "generic_headers": ["金额"], "inferred_role": "本期"},
+            enabled=True,
+        )
+        self.assertEqual(facts[0].period_key, "2022年度__本期")
+        self.assertEqual(facts[0].period_role_norm, "本期")
+        self.assertTrue(audit_rows)
+        self.assertGreater(summary["unknown_period_role_export_blocking_total_before"], summary["unknown_period_role_export_blocking_total_after"])
+
+    def test_stage6_unmapped_split_and_alias_ranking(self):
+        facts = [
+            self.make_fact(
+                fact_id="F1",
+                statement_type="income_statement",
+                row_label_raw="一、主营业务收入",
+                row_label_std="一、主营业务收入",
+                row_label_norm="主营业务收入",
+                row_label_canonical_candidate="营业收入",
+                period_key="2022年度__本期",
+                value_num=100.0,
+                mapping_code="",
+                source_cell_ref="demo:1:aliyun_table:1:1-1:1-1",
+            ),
+            self.make_fact(
+                fact_id="F2",
+                statement_type="income_statement",
+                row_label_raw="说明",
+                row_label_std="说明",
+                row_label_norm="说明",
+                row_label_canonical_candidate="说明",
+                value_num=None,
+                mapping_code="",
+                source_cell_ref="demo:1:aliyun_table:1:2-2:1-1",
+            ),
+        ]
+        value_rows, blank_rows, summary = split_unmapped_facts(facts)
+        self.assertEqual(len(value_rows), 1)
+        self.assertEqual(len(blank_rows), 1)
+        candidates, candidate_summary = build_alias_acceptance_candidates(
+            value_bearing_rows=value_rows,
+            facts=facts,
+            mapping_candidates=[
+                type("Candidate", (), {
+                    "source_cell_ref": "demo:1:aliyun_table:1:1-1:1-1",
+                    "candidate_rank": 1,
+                    "candidate_score": 1.0,
+                    "candidate_code": "ZT_138",
+                    "candidate_name": "营业收入",
+                    "candidate_method": "exact_normalized_match",
+                })()
+            ],
+            benchmark_missing_rows=[
+                {
+                    "mapping_code": "ZT_138",
+                    "aligned_period_key": "2022年度__本期",
+                    "benchmark_value": 100.0,
+                }
+            ],
+            alias_rules={"safe_methods": ["exact_normalized_match"], "safe_min_evidence_count": 1},
+        )
+        self.assertTrue(candidates)
+        self.assertTrue(candidates[0]["safe_to_auto_accept"])
+        self.assertEqual(candidate_summary["safe_to_auto_accept_total"], 1)
+
+    def test_stage6_formula_impact_and_pruning(self):
+        derived_facts = [
+            self.make_fact(
+                fact_id="DF_1",
+                mapping_code="ZT_006",
+                mapping_name="应收票据及应收账款",
+                statement_type="balance_sheet",
+                period_key="2022-12-31__期末数",
+                value_num=100.0,
+                source_kind="derived_formula",
+                source_cell_ref="derived:ZT_006:2022-12-31__期末数:sum_ar_notes_and_receivables",
+                status="derived_resolved",
+                unplaced_reason="",
+            )
+        ]
+        impact_summary, placements = build_formula_rule_impact(derived_facts, [])
+        self.assertEqual(impact_summary["rule_impact"]["sum_ar_notes_and_receivables"]["newly_exportable_facts"], 1)
+        review_item = ReviewQueueRecord(
+            review_id="REV_1",
+            priority_score=5.0,
+            reason_codes=["mapping:unmapped"],
+            doc_id="demo",
+            page_no=1,
+            statement_type="income_statement",
+            row_label_raw="主营业务收入",
+            row_label_std="主营业务收入",
+            period_key="2022年度__本期",
+            value_raw="100",
+            value_num=100.0,
+            provider="aliyun_table",
+            source_file="page1.json",
+            bbox="",
+            related_fact_ids=["F1"],
+            related_conflict_ids=[],
+            related_validation_ids=[],
+            mapping_candidates="",
+            evidence_cell_path="",
+            evidence_row_path="",
+            evidence_table_path="",
+            meta_json="",
+        )
+        task = ReOCRTaskRecord(
+            task_id="REOCR_1",
+            granularity="row",
+            doc_id="demo",
+            page_no=1,
+            table_id="1",
+            logical_subtable_id="1_sub1",
+            bbox="",
+            reason_codes=["mapping:unmapped"],
+            suggested_provider="tencent_table_v3",
+            priority_score=5.0,
+            expected_benefit="improve_mapping_readability",
+            source_review_id="REV_1",
+            meta_json="",
+        )
+        pruned_rows, pruned_summary = prune_reocr_tasks([task], [review_item], {})
+        self.assertEqual(pruned_rows, [])
+        self.assertEqual(pruned_summary["dropped_mapping_only_total"], 1)
+
+    def test_full_run_contract_benchmark_missing_outputs_fails(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            workbook_path = base / "wb.xlsx"
+            template_path = Path(__file__).resolve().parent.parent / "会计报表.xlsx"
+            shutil.copy2(template_path, workbook_path)
+            summary = run_full_run_contract(
+                output_dir=base,
+                workbook_path=workbook_path,
+                run_id="RUN_TEST",
+                feature_flags={"emit_benchmark_report": True, "enable_derived_facts": False, "emit_run_manifest": False},
+                export_stats={"source_facts": "facts_deduped"},
+                required_helper_sheets=["_meta_summary"],
+            )
+            self.assertGreater(summary["contract_fail_total"], 0)
+
+    def test_derived_formula_and_conflict(self):
+        facts = assign_fact_ids(
+            [
+                self.make_fact(mapping_code="ZT_007", mapping_name="应收票据", row_label_std="应收票据", period_key="2022-12-31__期末数", report_date_norm="2022-12-31", period_role_norm="期末数", value_num=30.0, value_raw="30", statement_type="balance_sheet"),
+                self.make_fact(mapping_code="ZT_008", mapping_name="应收账款", row_label_std="应收账款", period_key="2022-12-31__期末数", report_date_norm="2022-12-31", period_role_norm="期末数", value_num=70.0, value_raw="70", statement_type="balance_sheet"),
+                self.make_fact(mapping_code="ZT_009", mapping_name="应收票据及应收账款", row_label_std="应收票据及应收账款", period_key="2022-12-31__期末数", report_date_norm="2022-12-31", period_role_norm="期末数", value_num=120.0, value_raw="120", statement_type="balance_sheet"),
+            ]
+        )
+        derived, audit_rows, summary, conflicts = derive_formula_facts(
+            facts=facts,
+            formula_rules={
+                "rules": [
+                    {
+                        "rule_id": "sum_receivables",
+                        "target_code": "ZT_009",
+                        "target_name": "应收票据及应收账款",
+                        "rule_type": "sum",
+                        "children": ["ZT_007", "ZT_008"],
+                        "statement_types": ["balance_sheet"],
+                        "enabled": True,
+                    }
+                ]
+            },
+            relation_records=[],
+            enabled=True,
+        )
+        self.assertEqual(summary["derived_facts_total"], 1)
+        self.assertEqual(derived[0].value_num, 100.0)
+        self.assertEqual(derived[0].source_kind, "derived_formula")
+        self.assertTrue(conflicts)
+        self.assertEqual(conflicts[0]["decision"], "prefer_observed")
+        self.assertTrue(audit_rows)
+
+    def test_benchmark_compare_and_gap_mining(self):
+        repo_root = Path(__file__).resolve().parent
+        template_path = repo_root.parent / "会计报表.xlsx"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            export_path = tmpdir_path / "auto.xlsx"
+            benchmark_path = tmpdir_path / "benchmark.xlsx"
+            facts = assign_fact_ids(
+                [
+                    self.make_fact(mapping_code="ZT_001", mapping_name="货币资金", row_label_std="货币资金", period_key="2022-12-31__期末数", report_date_norm="2022-12-31", period_role_norm="期末数", value_num=100.0, value_raw="100", statement_type="balance_sheet"),
+                ]
+            )
+            export_template(
+                template_path=template_path,
+                output_path=export_path,
+                facts=facts,
+                derived_facts=[],
+                run_summary={"run_id": "RUN_TEST", "unknown_date_total": 0},
+                issues=[],
+                validations=[],
+                duplicates=[],
+                conflicts=[],
+                review_queue=[],
+                applied_actions=[],
+                export_rules={"allowed_statuses": ["observed", "repaired", "derived_resolved"]},
+            )
+            shutil.copy2(template_path, benchmark_path)
+            wb = load_workbook(benchmark_path)
+            ws = wb[wb.sheetnames[0]]
+            ws.cell(row=4, column=4, value=100.0)
+            ws.cell(row=8, column=4, value=50.0)
+            wb.save(benchmark_path)
+
+            benchmark_payload = compare_benchmark_workbook(benchmark_path, export_path, {"numeric_tolerance": 0.01})
+            self.assertGreaterEqual(benchmark_payload["summary"]["matched_cells"], 1)
+            self.assertTrue(any(row["status"] == "missing_in_auto" for row in benchmark_payload["cell_rows"]))
+
+            unmapped_fact = self.make_fact(
+                mapping_code="",
+                mapping_name="",
+                row_label_raw="一、主营业务收入",
+                row_label_std="一、主营业务收入",
+                row_label_norm="主营业务收入",
+                row_label_canonical_candidate="营业收入",
+                period_key="2022-12-31__期末数",
+                report_date_norm="2022-12-31",
+                period_role_norm="期末数",
+                value_num=50.0,
+                value_raw="50",
+                statement_type="balance_sheet",
+            )
+            gap_payload = explain_benchmark_gaps(
+                benchmark_missing_rows=benchmark_payload["missing_rows"],
+                facts=[unmapped_fact],
+                unplaced_rows=[],
+                conflicts=[],
+                validations=[],
+                mapping_candidates=[
+                    type("Candidate", (), {"candidate_code": "ZT_005", "source_cell_ref": unmapped_fact.source_cell_ref})()
+                ],
+                derived_facts=[],
+            )
+            self.assertTrue(gap_payload["summary"]["gaps_total"] >= 1)
+
+    def test_run_manifest(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_dir = Path(tmpdir) / "normalized"
+            output_dir.mkdir(parents=True, exist_ok=True)
+            (output_dir / "run_summary.json").write_text(json.dumps({"run_id": "RUN_TEST"}), encoding="utf-8")
+            (output_dir / "artifact_integrity.json").write_text(json.dumps({"run_id": "RUN_TEST"}), encoding="utf-8")
+            run_id = generate_run_id(["--template", "foo.xlsx"])
+            payload = write_run_manifest(
+                run_id=run_id,
+                output_dir=output_dir,
+                cli_args=["--template", "foo.xlsx"],
+                input_dir=Path(tmpdir) / "outputs",
+                template_path=Path(tmpdir) / "foo.xlsx",
+                source_files=[],
+                run_summary={"run_id": run_id},
+                manifest_rules={"snapshot_root": "normalized_runs", "core_artifacts": ["run_summary.json", "artifact_integrity.json"]},
+            )
+            self.assertEqual(payload["manifest"]["run_id"], run_id)
+            self.assertTrue((output_dir / "run_manifest.json").exists())
+            self.assertTrue((output_dir / "artifact_manifest.csv").exists())
+            self.assertTrue(payload["artifact_rows"])
+
     def test_page_0004_end_to_end(self):
         repo_root = Path(__file__).resolve().parent
         template_path = repo_root.parent / "会计报表.xlsx"
+        benchmark_path = repo_root.parent / "会计报表_GPT5.4Pro填写.xlsx"
 
         with tempfile.TemporaryDirectory() as tmpdir:
             tmpdir_path = Path(tmpdir)
@@ -1009,6 +1357,16 @@ class StandardizeTests(unittest.TestCase):
                     "--emit-review-actions-template",
                     "--materialize-reocr-inputs",
                     "--emit-delta-report",
+                    "--benchmark-workbook",
+                    str(benchmark_path),
+                    "--emit-benchmark-report",
+                    "--enable-label-canonicalization",
+                    "--enable-derived-facts",
+                    "--emit-run-manifest",
+                    "--enable-main-statement-specialization",
+                    "--enable-single-period-role-inference",
+                    "--emit-stage6-kpis",
+                    "--strict-full-run-contract",
                 ]
             )
 
@@ -1036,6 +1394,22 @@ class StandardizeTests(unittest.TestCase):
                 "reocr_input_manifest.csv",
                 "reocr_input_manifest.json",
                 "artifact_integrity.json",
+                "run_manifest.json",
+                "artifact_manifest.csv",
+                "benchmark_summary.json",
+                "benchmark_missing_in_auto.csv",
+                "benchmark_gap_explanations.csv",
+                "derived_facts.csv",
+                "derived_formula_summary.json",
+                "statement_classification_summary.json",
+                "period_role_resolution_summary.json",
+                "unmapped_value_bearing.csv",
+                "alias_acceptance_candidates.csv",
+                "formula_rule_impact_summary.json",
+                "review_actionable.csv",
+                "reocr_task_pruned.csv",
+                "stage6_kpi_summary.json",
+                "full_run_contract_summary.json",
                 "run_summary.json",
                 "会计报表_填充结果.xlsx",
             ]:
@@ -1063,6 +1437,11 @@ class StandardizeTests(unittest.TestCase):
             self.assertIn("_conflicts", workbook.sheetnames)
             self.assertIn("_unplaced_facts", workbook.sheetnames)
             self.assertIn("_review_queue", workbook.sheetnames)
+            self.assertIn("_derived_facts", workbook.sheetnames)
+            self.assertIn("_benchmark_summary", workbook.sheetnames)
+            self.assertIn("_gap_explanations", workbook.sheetnames)
+            self.assertIn("_classification_audit", workbook.sheetnames)
+            self.assertIn("_period_role_audit", workbook.sheetnames)
 
             with (output_dir / "review_actions_template.csv").open("r", encoding="utf-8-sig", newline="") as handle:
                 action_rows = list(csv.DictReader(handle))
@@ -1105,6 +1484,16 @@ class StandardizeTests(unittest.TestCase):
                     "--apply-review-actions",
                     "--materialize-reocr-inputs",
                     "--emit-delta-report",
+                    "--benchmark-workbook",
+                    str(benchmark_path),
+                    "--emit-benchmark-report",
+                    "--enable-label-canonicalization",
+                    "--enable-derived-facts",
+                    "--emit-run-manifest",
+                    "--enable-main-statement-specialization",
+                    "--enable-single-period-role-inference",
+                    "--emit-stage6-kpis",
+                    "--strict-full-run-contract",
                 ]
             )
             self.assertEqual(second_exit_code, 0)
@@ -1208,6 +1597,8 @@ class StandardizeTests(unittest.TestCase):
             "table_semantic_key": "note|h:项目,上期发生额,本期发生额",
             "row_label_raw": "项目",
             "row_label_std": "项目",
+            "row_label_norm": "项目",
+            "row_label_canonical_candidate": "项目",
             "col_header_raw": "本期发生额",
             "col_header_path": ["本期发生额"],
             "column_semantic_key": "本期发生额",
@@ -1243,6 +1634,10 @@ class StandardizeTests(unittest.TestCase):
             "source_col_end": 1,
         }
         base.update(overrides)
+        if "row_label_norm" not in overrides:
+            base["row_label_norm"] = base.get("row_label_std") or base.get("row_label_raw") or ""
+        if "row_label_canonical_candidate" not in overrides:
+            base["row_label_canonical_candidate"] = base.get("row_label_norm") or ""
         return FactRecord(**base)
 
     def make_validation(self, **overrides):

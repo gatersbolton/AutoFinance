@@ -11,17 +11,31 @@ from typing import Any, Dict, Iterable, List, Sequence
 
 import yaml
 
+from .benchmark import compare_benchmark_workbook, explain_benchmark_gaps
+from .curation import (
+    build_actionable_backlog,
+    build_alias_acceptance_candidates,
+    build_benchmark_recall_rows,
+    build_formula_rule_impact,
+    build_stage6_kpis,
+    build_statement_coverage_rows,
+    prune_reocr_tasks,
+    split_unmapped_facts,
+)
 from .dedupe import assign_fact_ids, dedupe_facts
+from .derive import build_export_fact_view, derive_formula_facts
 from .discover import SUPPORTED_TABLE_PROVIDERS, TEXT_ONLY_PROVIDERS, discover_provider_sources, list_provider_dirs
 from .feedback import apply_review_actions, build_delta_reports, build_priority_backlog, export_review_actions_template, parse_review_actions_file
 from .feedback.audit import build_review_decision_summary
 from .feedback.delta import load_artifact_snapshot
 from .integrity import run_artifact_integrity
+from .manifest import collect_source_files, generate_run_id, write_run_manifest
 from .models import ArtifactIntegrityRecord, CellRecord, ConflictDecisionAuditRecord, ConflictRecord, DiscoveredSource, DuplicateRecord, FactRecord, IssueRecord
 from .models import MappingCandidateRecord, MappingReviewRecord, PageSelectionRecord, ProviderComparisonRecord, ReOCRTaskRecord, ReviewQueueRecord, SecondaryOCRCandidateRecord
 from .models import UnmappedLabelSummaryRecord, ValidationImpactRecord, ValidationResultRecord, dataclass_row
 from .normalize.conflicts import enrich_conflicts, resolve_conflicts
-from .normalize.export import export_template, rewrite_meta_summary
+from .normalize.export import export_template, rewrite_meta_summary, rewrite_stage5_helper_sheets
+from .normalize.labels import apply_label_canonicalization
 from .normalize.mapping import apply_subject_mapping, load_alias_mapping, load_relation_mapping, load_template_subjects
 from .normalize.periods import apply_period_normalization
 from .normalize.statements import classify_statement
@@ -32,6 +46,7 @@ from .providers import load_aliyun_page, load_tencent_page, load_xlsx_fallback_p
 from .quality_report import build_run_summary, build_top_suspicious_values, build_top_unknown_labels
 from .review import build_review_queue, export_review_workbook
 from .routing import build_page_selection, build_reocr_tasks, build_secondary_ocr_candidates, ingest_reocr_results, materialize_reocr_inputs
+from .statement import resolve_single_period_annual_roles, run_full_run_contract, specialize_statement_types
 from .validation import run_validation
 
 
@@ -67,6 +82,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--materialize-reocr-inputs", action="store_true", help="Materialize crop inputs for targeted re-OCR tasks.")
     parser.add_argument("--reocr-results-dir", default="", help="Optional directory containing returned re-OCR result json files keyed by task_id.")
     parser.add_argument("--emit-delta-report", action="store_true", help="Emit before/after delta reports when baseline artifacts exist.")
+    parser.add_argument("--benchmark-workbook", default="", help="Optional benchmark/reference workbook path for comparison-only reports.")
+    parser.add_argument("--emit-benchmark-report", action="store_true", help="Emit benchmark comparison and gap mining reports.")
+    parser.add_argument("--enable-label-canonicalization", action="store_true", help="Enable statement-aware row label normalization.")
+    parser.add_argument("--enable-derived-facts", action="store_true", help="Enable deterministic formula/relationship-derived facts.")
+    parser.add_argument("--emit-run-manifest", action="store_true", help="Emit run manifest, artifact hashes, and snapshot packaging.")
+    parser.add_argument("--output-run-subdir", default="", help="Optional run subdirectory under output-dir. Use auto for run_id.")
+    parser.add_argument("--enable-main-statement-specialization", action="store_true", help="Enable Stage 6 main-statement classification upgrade.")
+    parser.add_argument("--enable-single-period-role-inference", action="store_true", help="Enable Stage 6 single-period annual role inference.")
+    parser.add_argument("--emit-stage6-kpis", action="store_true", help="Emit Stage 6 KPI and coverage lift reports.")
+    parser.add_argument("--strict-full-run-contract", action="store_true", help="Fail the run when promised Stage 5/6 artifacts are missing.")
     parser.add_argument("--log-level", default="INFO", help="Logging level, e.g. INFO or DEBUG.")
     return parser
 
@@ -78,11 +103,15 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     input_dir = Path(args.input_dir).resolve()
     template_path = Path(args.template).resolve()
-    output_dir = Path(args.output_dir).resolve()
+    base_output_dir = Path(args.output_dir).resolve()
     source_image_dir = Path(args.source_image_dir).resolve() if args.source_image_dir else None
     review_actions_path = Path(args.review_actions_file).resolve() if args.review_actions_file else None
     reocr_results_dir = Path(args.reocr_results_dir).resolve() if args.reocr_results_dir else None
-    baseline_snapshot = load_artifact_snapshot(output_dir) if output_dir.exists() else {}
+    benchmark_workbook = Path(args.benchmark_workbook).resolve() if args.benchmark_workbook else None
+    run_id = generate_run_id(argv or [])
+    output_dir = resolve_output_dir(base_output_dir, args.output_run_subdir, run_id)
+    baseline_dir = output_dir if output_dir.exists() else (base_output_dir if base_output_dir.exists() else None)
+    baseline_snapshot = load_artifact_snapshot(baseline_dir) if baseline_dir else {}
     output_dir.mkdir(parents=True, exist_ok=True)
 
     if not input_dir.exists():
@@ -91,6 +120,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.error(f"Template workbook does not exist: {template_path}")
     if source_image_dir and not source_image_dir.exists():
         parser.error(f"Source image directory does not exist: {source_image_dir}")
+    if benchmark_workbook and not benchmark_workbook.exists():
+        parser.error(f"Benchmark workbook does not exist: {benchmark_workbook}")
     if args.apply_review_actions and not review_actions_path:
         parser.error("--apply-review-actions requires --review-actions-file")
     if review_actions_path and not review_actions_path.exists():
@@ -106,11 +137,45 @@ def main(argv: Sequence[str] | None = None) -> int:
     conflict_config = load_yaml(CONFIG_DIR / "conflict_rules.yml")
     review_config = load_yaml(CONFIG_DIR / "review_rules.yml")
     reocr_config = load_yaml(CONFIG_DIR / "reocr_rules.yml")
+    benchmark_rules = load_yaml(CONFIG_DIR / "benchmark_rules.yml")
+    formula_rules = load_yaml(CONFIG_DIR / "formula_rules.yml")
+    label_rules = load_yaml(CONFIG_DIR / "label_normalization_rules.yml")
+    manifest_rules = load_yaml(CONFIG_DIR / "manifest_rules.yml")
+    statement_rules = load_yaml(CONFIG_DIR / "statement_rules.yml")
+    annual_period_rules = load_yaml(CONFIG_DIR / "annual_period_rules.yml")
+    export_filter_rules = load_yaml(CONFIG_DIR / "export_filter_rules.yml")
+    alias_pack_rules = load_yaml(CONFIG_DIR / "alias_pack_rules.yml")
+    formula_pack_rules = load_yaml(CONFIG_DIR / "formula_pack_rules.yml")
+    stage6_targets = load_yaml(CONFIG_DIR / "stage6_targets.yml")
     manual_action_rules = load_yaml(CONFIG_DIR / "manual_action_rules.yml")
     priority_rules = load_yaml(CONFIG_DIR / "priority_rules.yml")
     override_rules = load_yaml(CONFIG_DIR / "override_rules.yml")
     reocr_merge_rules = load_yaml(CONFIG_DIR / "reocr_merge_rules.yml")
+    export_rules = {**export_rules, **export_filter_rules}
     ensure_override_store(CONFIG_DIR)
+    feature_flags = {
+        "enable_conflict_merge": bool(args.enable_conflict_merge),
+        "enable_period_normalization": bool(args.enable_period_normalization),
+        "enable_dedupe": bool(args.enable_dedupe),
+        "enable_validation": bool(args.enable_validation),
+        "enable_integrity_check": bool(args.enable_integrity_check),
+        "enable_mapping_suggestions": bool(args.enable_mapping_suggestions),
+        "enable_review_pack": bool(args.enable_review_pack),
+        "enable_validation_aware_conflicts": bool(args.enable_validation_aware_conflicts),
+        "emit_routing_plan": bool(args.emit_routing_plan),
+        "emit_reocr_tasks": bool(args.emit_reocr_tasks),
+        "emit_review_actions_template": bool(args.emit_review_actions_template),
+        "materialize_reocr_inputs": bool(args.materialize_reocr_inputs),
+        "emit_delta_report": bool(args.emit_delta_report),
+        "emit_benchmark_report": bool(args.emit_benchmark_report),
+        "benchmark_workbook_provided": bool(benchmark_workbook),
+        "enable_label_canonicalization": bool(args.enable_label_canonicalization),
+        "enable_derived_facts": bool(args.enable_derived_facts),
+        "emit_run_manifest": bool(args.emit_run_manifest),
+        "enable_main_statement_specialization": bool(args.enable_main_statement_specialization),
+        "enable_single_period_role_inference": bool(args.enable_single_period_role_inference),
+        "emit_stage6_kpis": bool(args.emit_stage6_kpis),
+    }
 
     applied_actions_rows: List[Dict[str, Any]] = []
     rejected_actions_rows: List[Dict[str, Any]] = []
@@ -206,6 +271,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
 
     assign_fact_ids(all_facts)
+    statement_classification_audit: List[Dict[str, Any]] = []
+    statement_classification_summary: Dict[str, Any] = {}
+    all_facts, statement_classification_audit, statement_classification_summary = specialize_statement_types(
+        facts=all_facts,
+        provider_pages=all_pages,
+        statement_rules=statement_rules,
+        enabled=args.enable_main_statement_specialization,
+    )
     all_facts = apply_period_normalization(
         facts=all_facts,
         provider_pages=all_pages,
@@ -215,6 +288,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         enabled=args.enable_period_normalization,
     )
     all_facts = apply_period_overrides(all_facts, period_override_entries)
+    all_facts, label_audit_rows, label_summary = apply_label_canonicalization(
+        facts=all_facts,
+        rules=label_rules,
+        enabled=args.enable_label_canonicalization,
+    )
+    period_role_audit_rows: List[Dict[str, Any]] = []
+    period_role_resolution_summary: Dict[str, Any] = {}
+    all_facts, period_role_audit_rows, period_role_resolution_summary = resolve_single_period_annual_roles(
+        facts=all_facts,
+        rules=annual_period_rules,
+        enabled=args.enable_single_period_role_inference,
+    )
 
     subjects, subject_sheet, header_row = load_template_subjects(template_path)
     alias_mapping = load_alias_mapping(CONFIG_DIR / "subject_aliases.yml", subjects)
@@ -362,6 +447,36 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         LOGGER.info("Materialized re-OCR crops: %s", reocr_manifest_summary.get("materialized_total", 0))
 
+    review_actionable_rows, review_nonactionable_rows, review_actionable_summary = build_actionable_backlog(
+        review_items=review_items,
+        stage6_targets=stage6_targets,
+    )
+    pruned_reocr_rows: List[Dict[str, Any]] = []
+    pruned_reocr_summary: Dict[str, Any] = {}
+    if args.emit_reocr_tasks:
+        pruned_reocr_rows, pruned_reocr_summary = prune_reocr_tasks(
+            tasks=reocr_tasks,
+            review_items=review_items,
+            stage6_targets=stage6_targets,
+        )
+
+    derived_facts: List[FactRecord] = []
+    derived_formula_audit: List[Dict[str, Any]] = []
+    derived_formula_summary: Dict[str, Any] = {}
+    derived_conflicts: List[Dict[str, Any]] = []
+    if args.enable_derived_facts:
+        derived_facts, derived_formula_audit, derived_formula_summary, derived_conflicts = derive_formula_facts(
+            facts=facts_deduped,
+            formula_rules=formula_rules,
+            relation_records=relation_mapping,
+            enabled=True,
+        )
+        LOGGER.info(
+            "Derived facts: %s total, %s conflicts.",
+            derived_formula_summary.get("derived_facts_total", 0),
+            derived_formula_summary.get("derived_conflicts_total", 0),
+        )
+
     unique_pages = {(page.doc_id, page.page_no) for page in all_pages}
     pages_total = len(unique_pages)
     docs_total = len({page.doc_id for page in all_pages})
@@ -388,11 +503,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         review_summary=review_summary,
         integrity_summary={},
     )
+    run_summary["run_id"] = run_id
+    run_summary["derived_facts_total"] = int(derived_formula_summary.get("derived_facts_total", 0))
+    run_summary["derived_conflicts_total"] = int(derived_formula_summary.get("derived_conflicts_total", 0))
 
     export_stats = export_template(
         template_path=template_path,
         output_path=output_dir / "会计报表_填充结果.xlsx",
         facts=facts_deduped,
+        derived_facts=derived_facts,
         run_summary=run_summary,
         issues=all_issues,
         validations=validation_results,
@@ -400,9 +519,64 @@ def main(argv: Sequence[str] | None = None) -> int:
         conflicts=conflicts_enriched,
         review_queue=review_items,
         applied_actions=applied_actions_rows,
+        classification_audit=with_run_id_rows(statement_classification_audit, run_id),
+        period_role_audit=with_run_id_rows(period_role_audit_rows, run_id),
         export_rules=export_rules,
     )
     LOGGER.info("Exported helper sheets: %s", ",".join(export_stats.get("helper_sheets", [])))
+
+    benchmark_payload: Dict[str, Any] = {}
+    benchmark_gap_payload: Dict[str, Any] = {}
+    if args.emit_benchmark_report and benchmark_workbook:
+        benchmark_payload = compare_benchmark_workbook(
+            benchmark_path=benchmark_workbook,
+            export_workbook_path=output_dir / "会计报表_填充结果.xlsx",
+            rules=benchmark_rules,
+        )
+        benchmark_gap_payload = explain_benchmark_gaps(
+            benchmark_missing_rows=benchmark_payload.get("missing_rows", []),
+            facts=facts_deduped,
+            unplaced_rows=export_stats.get("unplaced_rows", []),
+            conflicts=conflicts_enriched,
+            validations=validation_results,
+            mapping_candidates=mapping_candidates,
+            derived_facts=derived_facts,
+        )
+        rewrite_stage5_helper_sheets(
+            output_path=output_dir / "会计报表_填充结果.xlsx",
+            benchmark_summary={**benchmark_payload.get("summary", {}), "run_id": run_id},
+            gap_rows=with_run_id_rows(benchmark_gap_payload.get("explanations", []), run_id),
+            derived_facts=derived_facts,
+            classification_audit=with_run_id_rows(statement_classification_audit, run_id),
+            period_role_audit=with_run_id_rows(period_role_audit_rows, run_id),
+        )
+        LOGGER.info(
+            "Benchmark compare: missing_in_auto=%s, value_diff_cells=%s",
+            benchmark_payload.get("summary", {}).get("missing_in_auto", 0),
+            benchmark_payload.get("summary", {}).get("value_diff_cells", 0),
+        )
+    else:
+        rewrite_stage5_helper_sheets(
+            output_path=output_dir / "会计报表_填充结果.xlsx",
+            benchmark_summary={"run_id": run_id},
+            gap_rows=[],
+            derived_facts=derived_facts,
+            classification_audit=with_run_id_rows(statement_classification_audit, run_id),
+            period_role_audit=with_run_id_rows(period_role_audit_rows, run_id),
+        )
+
+    unmapped_value_bearing_rows, unmapped_blank_rows, mapping_lift_summary = split_unmapped_facts(facts_deduped)
+    alias_acceptance_candidates, alias_acceptance_summary = build_alias_acceptance_candidates(
+        value_bearing_rows=unmapped_value_bearing_rows,
+        facts=facts_deduped,
+        mapping_candidates=mapping_candidates,
+        benchmark_missing_rows=benchmark_payload.get("missing_rows", []),
+        alias_rules=alias_pack_rules,
+    )
+    formula_rule_impact_summary, candidate_formula_placements = build_formula_rule_impact(
+        derived_facts=derived_facts,
+        derived_conflicts=derived_conflicts,
+    )
 
     write_dataclass_csv(output_dir / "cells.csv", all_cells, CellRecord)
     write_dataclass_csv(output_dir / "facts_raw.csv", facts_raw, FactRecord)
@@ -414,9 +588,66 @@ def main(argv: Sequence[str] | None = None) -> int:
     write_dataclass_csv(output_dir / "conflict_decision_audit.csv", conflict_decision_audit, ConflictDecisionAuditRecord)
     write_dataclass_csv(output_dir / "validation_impact_of_conflicts.csv", validation_impact_of_conflicts, ValidationImpactRecord)
     write_dataclass_csv(output_dir / "mapping_review.csv", mapping_review, MappingReviewRecord)
+    write_dict_csv(
+        output_dir / "label_normalization_audit.csv",
+        with_run_id_rows(label_audit_rows, run_id),
+        list(label_audit_rows[0].keys()) if label_audit_rows else ["doc_id", "page_no", "statement_type", "row_label_raw", "row_label_std", "row_label_norm", "row_label_canonical_candidate", "normalization_rule_ids", "fact_id", "source_cell_ref", "run_id", "meta_json"],
+    )
+    write_json(output_dir / "label_normalization_summary.json", {"run_id": run_id, **label_summary})
+    write_dict_csv(
+        output_dir / "statement_classification_audit.csv",
+        with_run_id_rows(statement_classification_audit, run_id),
+        list(statement_classification_audit[0].keys()) if statement_classification_audit else ["doc_id", "page_no", "logical_subtable_id", "fact_id", "row_label_raw", "row_label_std", "value_num", "statement_type_before", "statement_type_after", "statement_type_source", "statement_type_score", "statement_type_reason", "meta_json", "run_id"],
+    )
+    write_json(output_dir / "statement_classification_summary.json", {"run_id": run_id, **statement_classification_summary})
+    write_dict_csv(
+        output_dir / "period_role_resolution_audit.csv",
+        with_run_id_rows(period_role_audit_rows, run_id),
+        list(period_role_audit_rows[0].keys()) if period_role_audit_rows else ["doc_id", "page_no", "logical_subtable_id", "fact_id", "statement_type", "original_period_key", "inferred_period_key", "original_period_role", "inferred_period_role", "inference_reason", "evidence_source", "header_text", "run_id"],
+    )
+    write_json(output_dir / "period_role_resolution_summary.json", {"run_id": run_id, **period_role_resolution_summary})
+    high_value_label_gaps = [
+        {
+            "run_id": run_id,
+            "fact_id": row["fact_id"],
+            "doc_id": row["doc_id"],
+            "page_no": row["page_no"],
+            "statement_type": row["statement_type"],
+            "row_label_raw": row["row_label_raw"],
+            "row_label_std": row["row_label_std"],
+            "row_label_norm": row["row_label_norm"],
+            "row_label_canonical_candidate": row["row_label_canonical_candidate"],
+            "period_key": row["period_key"],
+            "value_num": row["value_num"],
+            "source_cell_ref": row["source_cell_ref"],
+        }
+        for row in sorted(unmapped_value_bearing_rows, key=lambda item: abs(float(item.get("value_num") or 0.0)), reverse=True)
+    ]
+    write_dict_csv(
+        output_dir / "high_value_label_gaps.csv",
+        high_value_label_gaps,
+        list(high_value_label_gaps[0].keys()) if high_value_label_gaps else ["run_id", "fact_id", "doc_id", "page_no", "statement_type", "row_label_raw", "row_label_std", "row_label_norm", "row_label_canonical_candidate", "period_key", "value_num", "source_cell_ref"],
+    )
     if args.enable_mapping_suggestions:
         write_dataclass_csv(output_dir / "mapping_candidates.csv", mapping_candidates, MappingCandidateRecord)
         write_dataclass_csv(output_dir / "unmapped_labels_summary.csv", unmapped_labels_summary, UnmappedLabelSummaryRecord)
+    write_dict_csv(
+        output_dir / "unmapped_value_bearing.csv",
+        with_run_id_rows(unmapped_value_bearing_rows, run_id),
+        list(with_run_id_row(unmapped_value_bearing_rows[0], run_id).keys()) if unmapped_value_bearing_rows else ["run_id", "fact_id", "doc_id", "page_no", "statement_type", "row_label_raw", "row_label_std", "row_label_norm", "row_label_canonical_candidate", "period_key", "value_raw", "value_num", "source_cell_ref"],
+    )
+    write_dict_csv(
+        output_dir / "unmapped_blank_or_non_numeric.csv",
+        with_run_id_rows(unmapped_blank_rows, run_id),
+        list(with_run_id_row(unmapped_blank_rows[0], run_id).keys()) if unmapped_blank_rows else ["run_id", "fact_id", "doc_id", "page_no", "statement_type", "row_label_raw", "row_label_std", "row_label_norm", "row_label_canonical_candidate", "period_key", "value_raw", "value_num", "source_cell_ref"],
+    )
+    write_json(output_dir / "mapping_lift_summary.json", {"run_id": run_id, **mapping_lift_summary})
+    write_dict_csv(
+        output_dir / "alias_acceptance_candidates.csv",
+        with_run_id_rows(alias_acceptance_candidates, run_id),
+        list(with_run_id_row(alias_acceptance_candidates[0], run_id).keys()) if alias_acceptance_candidates else ["run_id", "candidate_alias", "canonical_code", "canonical_name", "statement_type", "evidence_count", "amount_coverage_gain", "benchmark_support", "safe_to_auto_accept", "review_required", "candidate_method", "average_candidate_score", "conflicting_target_count"],
+    )
+    write_json(output_dir / "alias_acceptance_summary.json", {"run_id": run_id, **alias_acceptance_summary})
     write_dataclass_csv(output_dir / "duplicates.csv", duplicates, DuplicateRecord)
     write_dataclass_csv(output_dir / "provider_comparison_summary.csv", provider_comparisons, ProviderComparisonRecord)
     write_dataclass_csv(output_dir / "validation_results.csv", validation_results, ValidationResultRecord)
@@ -428,6 +659,29 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.emit_reocr_tasks:
         write_dataclass_csv(output_dir / "reocr_tasks.csv", reocr_tasks, ReOCRTaskRecord)
         write_json(output_dir / "reocr_task_summary.json", reocr_summary)
+    derived_fact_rows = [with_run_id_row(dataclass_row(fact), run_id) for fact in derived_facts]
+    write_dict_csv(
+        output_dir / "derived_facts.csv",
+        derived_fact_rows,
+        list(derived_fact_rows[0].keys()) if derived_fact_rows else ["doc_id", "page_no", "provider", "statement_type", "statement_name_raw", "logical_subtable_id", "table_semantic_key", "row_label_raw", "row_label_std", "row_label_norm", "row_label_canonical_candidate", "col_header_raw", "col_header_path", "column_semantic_key", "period_role_raw", "report_date_raw", "period_key", "value_raw", "value_num", "value_type", "unit_raw", "unit_multiplier", "source_cell_ref", "status", "mapping_code", "mapping_name", "mapping_method", "mapping_confidence", "issue_flags", "fact_id", "report_date_norm", "period_role_norm", "period_source_level", "period_reason", "duplicate_group_id", "kept_fact_id", "comparison_status", "comparison_reason", "source_kind", "statement_group_key", "source_row_start", "source_row_end", "source_col_start", "source_col_end", "mapping_relation_type", "mapping_review_required", "conflict_id", "conflict_decision", "unplaced_reason", "review_id", "suppression_reason", "override_source", "parent_review_id", "parent_task_id", "run_id"],
+    )
+    write_dict_csv(
+        output_dir / "derived_formula_audit.csv",
+        with_run_id_rows(derived_formula_audit, run_id),
+        list(derived_formula_audit[0].keys()) if derived_formula_audit else ["rule_id", "target_code", "target_name", "statement_type", "period_key", "rule_type", "source_fact_ids", "derived_fact_id", "derived_value_num", "safety_level", "run_id", "meta_json"],
+    )
+    write_json(output_dir / "derived_formula_summary.json", {"run_id": run_id, **derived_formula_summary})
+    write_json(output_dir / "formula_rule_impact_summary.json", {"run_id": run_id, **formula_rule_impact_summary})
+    write_dict_csv(
+        output_dir / "candidate_formula_placements.csv",
+        with_run_id_rows(candidate_formula_placements, run_id),
+        list(with_run_id_row(candidate_formula_placements[0], run_id).keys()) if candidate_formula_placements else ["run_id", "rule_id", "fact_id", "mapping_code", "mapping_name", "statement_type", "period_key", "value_num", "exportable", "unplaced_reason"],
+    )
+    write_dict_csv(
+        output_dir / "derived_conflicts.csv",
+        with_run_id_rows(derived_conflicts, run_id),
+        list(derived_conflicts[0].keys()) if derived_conflicts else ["target_code", "target_name", "statement_type", "period_key", "rule_id", "observed_fact_id", "observed_value_num", "derived_fact_id", "derived_value_num", "decision", "run_id", "meta_json"],
+    )
     if export_stats.get("unplaced_rows"):
         write_dict_csv(output_dir / "unplaced_facts.csv", export_stats["unplaced_rows"], export_stats["unplaced_rows"][0].keys())
     if args.apply_review_actions or review_actions_path:
@@ -457,19 +711,64 @@ def main(argv: Sequence[str] | None = None) -> int:
             list(reocr_merge_audit_rows[0].keys()) if reocr_merge_audit_rows else ["task_id", "status", "reason", "result_file"],
         )
         write_json(output_dir / "reocr_merge_summary.json", reocr_merge_summary)
+    if benchmark_payload:
+        write_json(output_dir / "benchmark_summary.json", {**benchmark_payload["summary"], "run_id": run_id})
+        write_dict_csv(output_dir / "benchmark_summary.csv", [with_run_id_row(benchmark_payload["summary"], run_id)], list(with_run_id_row(benchmark_payload["summary"], run_id).keys()))
+        write_dict_csv(output_dir / "benchmark_cell_diff.csv", with_run_id_rows(benchmark_payload.get("cell_rows", []), run_id), list(benchmark_payload["cell_rows"][0].keys()) if benchmark_payload.get("cell_rows") else ["run_id", "mapping_code", "mapping_name", "benchmark_header", "aligned_period_key", "benchmark_value", "auto_value", "status", "reason"])
+        write_dict_csv(output_dir / "benchmark_missing_in_auto.csv", with_run_id_rows(benchmark_payload.get("missing_rows", []), run_id), list(benchmark_payload["missing_rows"][0].keys()) if benchmark_payload.get("missing_rows") else ["run_id", "mapping_code", "mapping_name", "benchmark_header", "aligned_period_key", "benchmark_value", "auto_value", "status", "reason"])
+        write_dict_csv(output_dir / "benchmark_extra_in_auto.csv", with_run_id_rows(benchmark_payload.get("extra_rows", []), run_id), list(benchmark_payload["extra_rows"][0].keys()) if benchmark_payload.get("extra_rows") else ["run_id", "mapping_code", "mapping_name", "benchmark_header", "aligned_period_key", "benchmark_value", "auto_value", "status", "reason"])
+        write_dict_csv(output_dir / "benchmark_value_diff.csv", with_run_id_rows(benchmark_payload.get("value_diff_rows", []), run_id), list(benchmark_payload["value_diff_rows"][0].keys()) if benchmark_payload.get("value_diff_rows") else ["run_id", "mapping_code", "mapping_name", "benchmark_header", "aligned_period_key", "benchmark_value", "auto_value", "status", "reason"])
+        write_dict_csv(output_dir / "benchmark_subject_gap.csv", with_run_id_rows(benchmark_payload.get("subject_gap_rows", []), run_id), list(benchmark_payload["subject_gap_rows"][0].keys()) if benchmark_payload.get("subject_gap_rows") else ["run_id", "mapping_code", "missing_cells"])
+        write_dict_csv(output_dir / "benchmark_period_gap.csv", with_run_id_rows(benchmark_payload.get("period_gap_rows", []), run_id), list(benchmark_payload["period_gap_rows"][0].keys()) if benchmark_payload.get("period_gap_rows") else ["run_id", "benchmark_header", "missing_cells"])
+    if benchmark_gap_payload:
+        write_dict_csv(output_dir / "benchmark_gap_explanations.csv", with_run_id_rows(benchmark_gap_payload.get("explanations", []), run_id), list(benchmark_gap_payload["explanations"][0].keys()) if benchmark_gap_payload.get("explanations") else ["run_id", "mapping_code", "mapping_name", "aligned_period_key", "benchmark_value", "gap_cause", "detail"])
+        write_json(output_dir / "benchmark_gap_summary.json", {**benchmark_gap_payload.get("summary", {}), "run_id": run_id})
+        write_dict_csv(output_dir / "suggested_aliases_from_benchmark.csv", with_run_id_rows(benchmark_gap_payload.get("alias_suggestions", []), run_id), list(benchmark_gap_payload["alias_suggestions"][0].keys()) if benchmark_gap_payload.get("alias_suggestions") else ["run_id", "mapping_code", "row_label_std", "period_key", "benchmark_value", "fact_id", "candidate_method"])
+        write_dict_csv(output_dir / "suggested_formula_rules.csv", with_run_id_rows(benchmark_gap_payload.get("formula_suggestions", []), run_id), list(benchmark_gap_payload["formula_suggestions"][0].keys()) if benchmark_gap_payload.get("formula_suggestions") else ["run_id", "rule_id", "mapping_code", "period_key", "benchmark_value", "derived_fact_id"])
+        write_dict_csv(output_dir / "benchmark_priority_actions.csv", with_run_id_rows(benchmark_gap_payload.get("priority_rows", []), run_id), list(benchmark_gap_payload["priority_rows"][0].keys()) if benchmark_gap_payload.get("priority_rows") else ["run_id", "mapping_code", "mapping_name", "aligned_period_key", "benchmark_value", "gap_cause", "priority_score"])
 
     top_unknown_labels = build_top_unknown_labels(facts_deduped)
     top_suspicious_values = build_top_suspicious_values(all_cells)
     write_dict_csv(output_dir / "top_unknown_labels.csv", top_unknown_labels, ["label", "count"])
     write_dict_csv(output_dir / "top_suspicious_values.csv", top_suspicious_values, ["text_raw", "reason", "count"])
-    write_json(output_dir / "validation_summary.json", validation_summary)
-    write_json(output_dir / "review_summary.json", review_summary)
+    write_json(output_dir / "validation_summary.json", {"run_id": run_id, **validation_summary})
+    write_json(output_dir / "review_summary.json", {"run_id": run_id, **review_summary})
+    write_dict_csv(
+        output_dir / "review_actionable.csv",
+        with_run_id_rows(review_actionable_rows, run_id),
+        list(with_run_id_row(review_actionable_rows[0], run_id).keys()) if review_actionable_rows else ["run_id", "review_id", "doc_id", "page_no", "statement_type", "row_label_std", "period_key", "value_num", "priority_score", "reason_codes", "category"],
+    )
+    write_dict_csv(
+        output_dir / "review_nonactionable.csv",
+        with_run_id_rows(review_nonactionable_rows, run_id),
+        list(with_run_id_row(review_nonactionable_rows[0], run_id).keys()) if review_nonactionable_rows else ["run_id", "review_id", "doc_id", "page_no", "statement_type", "row_label_std", "period_key", "value_num", "priority_score", "reason_codes", "category"],
+    )
+    write_json(output_dir / "review_actionable_summary.json", {"run_id": run_id, **review_actionable_summary})
+    if args.emit_reocr_tasks:
+        write_dict_csv(
+            output_dir / "reocr_task_pruned.csv",
+            with_run_id_rows(pruned_reocr_rows, run_id),
+            list(with_run_id_row(pruned_reocr_rows[0], run_id).keys()) if pruned_reocr_rows else ["run_id", "task_id", "granularity", "doc_id", "page_no", "table_id", "logical_subtable_id", "bbox", "reason_codes", "suggested_provider", "priority_score", "expected_benefit", "source_review_id", "category"],
+        )
+        write_json(output_dir / "reocr_task_pruned_summary.json", {"run_id": run_id, **pruned_reocr_summary})
     if args.enable_review_pack:
         export_review_workbook(output_dir / "review_workbook.xlsx", review_items)
     if pre_ocr_plan:
         write_json(output_dir / "pre_ocr_routing_plan.json", pre_ocr_plan)
     if post_ocr_plan:
         write_json(output_dir / "post_ocr_routing_plan.json", post_ocr_plan)
+    if args.emit_run_manifest:
+        write_run_manifest(
+            run_id=run_id,
+            output_dir=output_dir,
+            cli_args=list(argv or []),
+            input_dir=input_dir,
+            template_path=template_path,
+            source_files=collect_source_files(sources),
+            run_summary=run_summary,
+            feature_flags=feature_flags,
+            manifest_rules=manifest_rules,
+        )
 
     integrity_summary = {"integrity_fail_total": 0, "checks_total": 0, "integrity_pass_total": 0, "integrity_review_total": 0}
     integrity_records: List[ArtifactIntegrityRecord] = []
@@ -484,7 +783,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         integrity_records = integrity_result["records"]
         integrity_summary = integrity_result["summary"]
         write_dataclass_csv(output_dir / "artifact_integrity.csv", integrity_records, ArtifactIntegrityRecord)
-        write_json(output_dir / "artifact_integrity.json", integrity_summary)
+        write_json(output_dir / "artifact_integrity.json", {"run_id": run_id, **integrity_summary})
 
     run_summary = build_run_summary(
         docs_total=docs_total,
@@ -503,9 +802,57 @@ def main(argv: Sequence[str] | None = None) -> int:
         review_summary=review_summary,
         integrity_summary=integrity_summary,
     )
+    run_summary["run_id"] = run_id
+    run_summary["derived_facts_total"] = int(derived_formula_summary.get("derived_facts_total", 0))
+    run_summary["derived_conflicts_total"] = int(derived_formula_summary.get("derived_conflicts_total", 0))
+    run_summary["exportable_facts_total"] = int(export_stats.get("written_cells", 0))
+    if benchmark_payload:
+        run_summary["benchmark_missing_in_auto"] = int(benchmark_payload.get("summary", {}).get("missing_in_auto", 0))
+        run_summary["benchmark_value_diff_cells"] = int(benchmark_payload.get("summary", {}).get("value_diff_cells", 0))
+    stage6_kpi_summary = build_stage6_kpis(
+        run_summary=run_summary,
+        facts=facts_deduped,
+        review_items=review_items,
+        actionable_review_rows=review_actionable_rows,
+        reocr_tasks_total=len(reocr_tasks),
+        actionable_reocr_tasks_total=len(pruned_reocr_rows),
+        benchmark_payload=benchmark_payload,
+        baseline_summary=baseline_snapshot.get("run_summary", {}),
+    )
+    coverage_by_statement_rows = build_statement_coverage_rows(facts_deduped + derived_facts)
+    benchmark_recall_by_period, benchmark_recall_by_subject = build_benchmark_recall_rows(benchmark_payload) if benchmark_payload else ([], [])
     write_json(output_dir / "run_summary.json", run_summary)
     write_dict_csv(output_dir / "run_summary.csv", [run_summary], list(run_summary.keys()))
     rewrite_meta_summary(output_dir / "会计报表_填充结果.xlsx", run_summary)
+    if args.emit_run_manifest:
+        write_run_manifest(
+            run_id=run_id,
+            output_dir=output_dir,
+            cli_args=list(argv or []),
+            input_dir=input_dir,
+            template_path=template_path,
+            source_files=collect_source_files(sources),
+            run_summary=run_summary,
+            feature_flags=feature_flags,
+            manifest_rules=manifest_rules,
+        )
+    if args.emit_stage6_kpis:
+        write_json(output_dir / "stage6_kpi_summary.json", stage6_kpi_summary)
+        write_dict_csv(
+            output_dir / "export_coverage_by_statement.csv",
+            coverage_by_statement_rows,
+            list(coverage_by_statement_rows[0].keys()) if coverage_by_statement_rows else ["statement_type", "facts_total", "mapped_total", "exportable_total", "mapped_ratio", "amount_coverage_ratio"],
+        )
+        write_dict_csv(
+            output_dir / "benchmark_recall_by_period.csv",
+            benchmark_recall_by_period,
+            list(benchmark_recall_by_period[0].keys()) if benchmark_recall_by_period else ["period_key", "cells_total", "matched_cells", "recall"],
+        )
+        write_dict_csv(
+            output_dir / "benchmark_recall_by_subject.csv",
+            benchmark_recall_by_subject,
+            list(benchmark_recall_by_subject[0].keys()) if benchmark_recall_by_subject else ["mapping_code", "cells_total", "matched_cells", "recall"],
+        )
 
     if args.emit_review_actions_template:
         export_review_actions_template(
@@ -540,14 +887,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         after_snapshot = load_artifact_snapshot(output_dir)
         after_snapshot["run_summary"] = run_summary
         delta_payload = build_delta_reports(before=baseline_snapshot, after=after_snapshot)
-        write_json(output_dir / "coverage_delta.json", delta_payload["coverage_delta"])
+        write_json(output_dir / "coverage_delta.json", {"run_id": run_id, **delta_payload["coverage_delta"]})
         write_dict_csv(output_dir / "coverage_delta.csv", delta_payload["coverage_rows"], ["metric", "before", "after", "delta"])
         write_dict_csv(
             output_dir / "review_delta.csv",
             delta_payload["review_delta_rows"],
             ["review_id", "status", "before_priority_score", "after_priority_score", "row_label_std", "period_key"],
         )
-        write_json(output_dir / "export_delta_summary.json", delta_payload["export_delta_summary"])
+        write_json(output_dir / "export_delta_summary.json", {"run_id": run_id, **delta_payload["export_delta_summary"]})
         write_dict_csv(
             output_dir / "top_resolved_items.csv",
             delta_payload["top_resolved_items"],
@@ -565,6 +912,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
 
     summary = {
+        "run_id": run_id,
         "docs_processed": docs_total,
         "pages_discovered": len(sources),
         "providers_seen": provider_hits,
@@ -586,13 +934,69 @@ def main(argv: Sequence[str] | None = None) -> int:
         "review_decision_summary": review_decision_summary,
         "reocr_merge_summary": reocr_merge_summary,
         "reocr_manifest_summary": reocr_manifest_summary,
+        "benchmark_summary": benchmark_payload.get("summary", {}),
+        "derived_formula_summary": derived_formula_summary,
+        "statement_classification_summary": statement_classification_summary,
+        "period_role_resolution_summary": period_role_resolution_summary,
+        "review_actionable_summary": review_actionable_summary,
+        "reocr_task_pruned_summary": pruned_reocr_summary,
+        "mapping_lift_summary": mapping_lift_summary,
+        "alias_acceptance_summary": alias_acceptance_summary,
+        "formula_rule_impact_summary": formula_rule_impact_summary,
+        "stage6_kpi_summary": stage6_kpi_summary if args.emit_stage6_kpis else {},
     }
+    write_json(output_dir / "summary.json", summary)
+    full_run_contract_summary = run_full_run_contract(
+        output_dir=output_dir,
+        workbook_path=output_dir / "会计报表_填充结果.xlsx",
+        run_id=run_id,
+        feature_flags=feature_flags,
+        export_stats=export_stats,
+        required_helper_sheets=export_rules.get("required_helper_sheets", []),
+    )
+    write_json(output_dir / "full_run_contract_summary.json", full_run_contract_summary)
+    run_summary["full_run_contract_fail_total"] = int(full_run_contract_summary.get("contract_fail_total", 0))
+    summary["run_summary"] = run_summary
+    summary["full_run_contract_summary"] = full_run_contract_summary
+    write_json(output_dir / "run_summary.json", run_summary)
+    write_dict_csv(output_dir / "run_summary.csv", [run_summary], list(run_summary.keys()))
+    rewrite_meta_summary(output_dir / "会计报表_填充结果.xlsx", run_summary)
+    if args.emit_run_manifest:
+        write_run_manifest(
+            run_id=run_id,
+            output_dir=output_dir,
+            cli_args=list(argv or []),
+            input_dir=input_dir,
+            template_path=template_path,
+            source_files=collect_source_files(sources),
+            run_summary=run_summary,
+            feature_flags=feature_flags,
+            manifest_rules=manifest_rules,
+        )
     write_json(output_dir / "summary.json", summary)
     LOGGER.info("Review items queued: %s", review_summary.get("review_total", 0))
     LOGGER.info("Unplaced facts routed away from main sheet: %s", export_stats.get("unplaced_count", 0))
     LOGGER.info("Conflict decision breakdown: %s", json.dumps(run_summary.get("conflict_decision_breakdown", {}), ensure_ascii=False))
+    LOGGER.info("Derived facts count: %s", derived_formula_summary.get("derived_facts_total", 0))
+    LOGGER.info("Benchmark missing cells: %s", benchmark_payload.get("summary", {}).get("missing_in_auto", 0))
+    LOGGER.info("Benchmark value diff cells: %s", benchmark_payload.get("summary", {}).get("value_diff_cells", 0))
+    LOGGER.info(
+        "Unknown statement reduction: %s -> %s",
+        statement_classification_summary.get("unknown_statement_type_total_before", 0),
+        statement_classification_summary.get("unknown_statement_type_total_after", 0),
+    )
+    LOGGER.info(
+        "Unknown period-role reduction: %s -> %s",
+        period_role_resolution_summary.get("unknown_period_role_export_blocking_total_before", 0),
+        period_role_resolution_summary.get("unknown_period_role_export_blocking_total_after", 0),
+    )
+    LOGGER.info("Mapping lift candidates: %s", alias_acceptance_summary.get("candidates_total", 0))
+    LOGGER.info("Pruned re-OCR tasks: %s", pruned_reocr_summary.get("reocr_tasks_total_before", 0) - pruned_reocr_summary.get("reocr_tasks_total_after", 0))
     LOGGER.info("Integrity fail total: %s", integrity_summary.get("integrity_fail_total", 0))
     LOGGER.info("Wrote normalized outputs to %s", output_dir)
+    if args.strict_full_run_contract and int(full_run_contract_summary.get("contract_fail_total", 0)) > 0:
+        LOGGER.error("Strict full-run contract failed with %s errors.", full_run_contract_summary.get("contract_fail_total", 0))
+        return 1
     return 0
 
 
@@ -630,6 +1034,15 @@ def expand_provider_priority(spec: str, provider_config: Dict[str, Any]) -> List
         if provider not in deduped:
             deduped.append(provider)
     return deduped
+
+
+def resolve_output_dir(base_output_dir: Path, output_run_subdir: str, run_id: str) -> Path:
+    value = (output_run_subdir or "").strip()
+    if not value or value.lower() == "none":
+        return base_output_dir
+    if value.lower() == "auto":
+        return base_output_dir / run_id
+    return base_output_dir / value
 
 
 def load_provider_page(source: DiscoveredSource):
@@ -700,6 +1113,16 @@ def build_reason_breakdown(review_items: Sequence[ReviewQueueRecord]) -> Dict[st
         for reason in item.reason_codes:
             counter[reason] = counter.get(reason, 0) + 1
     return counter
+
+
+def with_run_id_row(row: Dict[str, Any], run_id: str) -> Dict[str, Any]:
+    payload = dict(row)
+    payload["run_id"] = run_id
+    return payload
+
+
+def with_run_id_rows(rows: List[Dict[str, Any]], run_id: str) -> List[Dict[str, Any]]:
+    return [with_run_id_row(row, run_id) for row in rows]
 
 
 if __name__ == "__main__":  # pragma: no cover

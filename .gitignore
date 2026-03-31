@@ -1,6 +1,7 @@
 secret
 outputs/
 normalized/
+normalized_runs/
 reocr_results/
 review_pack/
 .venv/

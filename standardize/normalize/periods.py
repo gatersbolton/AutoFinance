@@ -242,7 +242,7 @@ def preferred_date_kinds(fact: FactRecord) -> List[str]:
         return ["exact", "range", "annual"]
     if role in {"本期", "上期", "本年累计", "上年累计"}:
         return ["range", "annual", "exact"]
-    if fact.statement_type in {"income_statement", "cash_flow", "equity_statement"}:
+    if fact.statement_type in {"income_statement", "cash_flow", "equity_statement", "changes_in_equity"}:
         return ["range", "annual", "exact"]
     return ["exact", "annual", "range"]
 
@@ -410,7 +410,7 @@ def canonical_statement_name(statement_type: str, normalized_name: str) -> str:
         return "利润表"
     if statement_type == "cash_flow":
         return "现金流量表"
-    if statement_type == "equity_statement":
+    if statement_type in {"equity_statement", "changes_in_equity"}:
         return "所有者权益变动表"
     return normalized_name
 

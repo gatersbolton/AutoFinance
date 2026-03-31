@@ -1,0 +1,13 @@
+snapshot_root: normalized_runs
+core_artifacts:
+  - run_summary.json
+  - artifact_integrity.json
+  - full_run_contract_summary.json
+  - coverage_delta.json
+  - stage6_kpi_summary.json
+  - 会计报表_填充结果.xlsx
+  - review_summary.json
+  - benchmark_summary.json
+  - derived_formula_summary.json
+  - run_manifest.json
+  - artifact_manifest.csv

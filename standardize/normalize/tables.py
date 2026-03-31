@@ -197,6 +197,8 @@ def extract_facts(subtables: List[LogicalSubtable], keyword_config: Dict[str, An
                         table_semantic_key=row_table_semantic_key,
                         row_label_raw=row_label_raw,
                         row_label_std=row_label_std,
+                        row_label_norm="",
+                        row_label_canonical_candidate="",
                         col_header_raw=joined_header_path(header_path),
                         col_header_path=header_path,
                         column_semantic_key=column_semantic_key,

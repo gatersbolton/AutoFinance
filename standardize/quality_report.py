@@ -30,6 +30,8 @@ def build_run_summary(
     active_facts = [fact for fact in facts_deduped if fact.status != "suppressed"]
     mapped_facts_total = sum(1 for fact in active_facts if fact.mapping_code)
     unknown_date_total = sum(1 for fact in active_facts if fact.report_date_norm == "unknown_date")
+    unknown_statement_type_total = sum(1 for fact in active_facts if fact.statement_type == "unknown")
+    unknown_period_role_total = sum(1 for fact in active_facts if (fact.period_role_norm or "") == "unknown")
     suspicious_cells_total = sum(1 for cell in cells if cell.is_suspicious)
     repaired_facts_total = sum(1 for fact in active_facts if fact.status == "repaired" or "repaired_numeric" in fact.issue_flags)
     review_facts_total = sum(1 for fact in active_facts if fact.status == "review")
@@ -96,6 +98,8 @@ def build_run_summary(
         "review_total": int(review_summary.get("review_total", review_facts_total)),
         "integrity_fail_total": int(integrity_summary.get("integrity_fail_total", 0)),
         "suppressed_total": sum(1 for fact in facts_deduped if fact.status == "suppressed"),
+        "unknown_statement_type_total": unknown_statement_type_total,
+        "unknown_period_role_total": unknown_period_role_total,
     }
     return summary_dict
 

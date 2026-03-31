@@ -54,6 +54,9 @@ def classify_statement(page: ProviderPage, keyword_config: Dict[str, Any]) -> St
         report_date_norm=report_date_norm,
         unit_raw=unit_raw,
         unit_multiplier=unit_multiplier,
+        statement_type_source="title_match" if statement_type != "unknown" else "unclassified",
+        statement_type_score=1.0 if statement_type != "unknown" else 0.0,
+        statement_type_reason=statement_name_raw if statement_name_raw else "no_statement_title_match",
     )
 
 

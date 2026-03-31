@@ -1,0 +1,36 @@
+rules:
+  - rule_id: sum_ar_notes_and_receivables
+    target_code: ZT_006
+    target_name: 应收票据及应收账款
+    rule_type: sum_if_present
+    children:
+      - ZT_007
+      - ZT_008
+    statement_types:
+      - balance_sheet
+    enabled: true
+    safety_level: deterministic
+
+  - rule_id: sum_ap_notes_and_payables
+    target_code: ZT_074
+    target_name: 应付票据及应付账款
+    rule_type: sum_if_present
+    children:
+      - ZT_075
+      - ZT_076
+    statement_types:
+      - balance_sheet
+    enabled: true
+    safety_level: deterministic
+
+  - rule_id: owners_equity_total
+    target_code: ZT_136
+    target_name: 所有者权益合计
+    rule_type: sum_if_present
+    children:
+      - ZT_134
+      - ZT_135
+    statement_types:
+      - balance_sheet
+    enabled: true
+    safety_level: deterministic

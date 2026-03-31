@@ -36,8 +36,8 @@ def build_delta_reports(before: Dict[str, Any], after: Dict[str, Any]) -> Dict[s
     ]
     unresolved_before = unresolved_conflicts_total(before.get("conflict_rows", []))
     unresolved_after = unresolved_conflicts_total(after.get("conflict_rows", []))
-    exportable_before = exportable_facts_total(before.get("facts_rows", []))
-    exportable_after = exportable_facts_total(after.get("facts_rows", []))
+    exportable_before = before_summary.get("exportable_facts_total", exportable_facts_total(before.get("facts_rows", [])))
+    exportable_after = after_summary.get("exportable_facts_total", exportable_facts_total(after.get("facts_rows", [])))
     reocr_before = len(before.get("reocr_rows", []))
     reocr_after = len(after.get("reocr_rows", []))
 

@@ -32,6 +32,33 @@ def run_artifact_integrity(
 
     add_record(records, "required_helper_sheets", "error", all(sheet in workbook.sheetnames for sheet in required_sheets), "Workbook helper sheet contract check.", {"required_sheets": required_sheets, "actual_sheets": workbook.sheetnames})
     add_record(records, "duplicate_main_period_columns", "error", len(period_columns) == len(set(period_columns)), "Main sheet must not contain duplicate period columns.", {"period_columns": period_columns})
+    meta_rows = read_sheet_rows(workbook["_meta_summary"]) if "_meta_summary" in workbook.sheetnames else []
+    meta_map = {row.get("key", ""): row.get("value", "") for row in meta_rows}
+    if run_summary.get("run_id"):
+        add_record(
+            records,
+            "meta_summary_run_id_matches",
+            "error",
+            str(meta_map.get("run_id", "")) == str(run_summary.get("run_id", "")),
+            "Workbook _meta_summary run_id must match run_summary run_id.",
+            {"workbook_run_id": meta_map.get("run_id", ""), "summary_run_id": run_summary.get("run_id", "")},
+        )
+        artifact_run_id_mismatches = []
+        for artifact_name in ("benchmark_summary.json", "derived_formula_summary.json", "run_manifest.json"):
+            artifact_path = output_dir / artifact_name
+            if not artifact_path.exists():
+                continue
+            payload = parse_json(artifact_path.read_text(encoding="utf-8"))
+            if payload.get("run_id", "") != run_summary.get("run_id", ""):
+                artifact_run_id_mismatches.append({"artifact": artifact_name, "artifact_run_id": payload.get("run_id", "")})
+        add_record(
+            records,
+            "artifact_run_ids_match_summary",
+            "error",
+            not artifact_run_id_mismatches,
+            "All major artifacts with run_id must match the current run_summary run_id.",
+            {"mismatches": artifact_run_id_mismatches},
+        )
 
     if int(run_summary.get("unknown_date_total", 0)) == 0:
         add_record(

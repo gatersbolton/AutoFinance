@@ -1,0 +1,5 @@
+kpi_thresholds:
+  max_mapping_only_reocr_ratio: 0.15
+  page_level_reocr_reduction_target: 0.5
+  unknown_statement_type_warning: 50
+  unknown_period_role_warning: 50

@@ -1,0 +1,13 @@
+blocked_statement_types:
+  - unknown
+blocked_period_roles:
+  - unknown
+blocked_report_dates:
+  - unknown_date
+allowed_statuses:
+  - observed
+  - repaired
+  - accepted
+  - accepted_with_rule_support
+  - accepted_with_validation_support
+  - derived_resolved

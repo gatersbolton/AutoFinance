@@ -1,0 +1,4 @@
+safe_methods:
+  - exact_normalized_match
+  - alias_table
+safe_min_evidence_count: 2

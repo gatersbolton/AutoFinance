@@ -1,0 +1,7 @@
+numeric_tolerance: 0.01
+legacy_role_map:
+  期初: 期初数
+  期末: 期末数
+  本期: 本期
+  上期: 上期
+  本年累计: 本年累计

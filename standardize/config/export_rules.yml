@@ -7,11 +7,26 @@ required_helper_sheets:
   - _unplaced_facts
   - _review_queue
   - _applied_actions
+  - _derived_facts
+  - _benchmark_summary
+  - _gap_explanations
+  - _classification_audit
+  - _period_role_audit
 allowed_statuses:
   - observed
   - repaired
+  - derived_resolved
+  - accepted
+  - accepted_with_rule_support
+  - accepted_with_validation_support
 allowed_conflict_decisions:
   - ""
   - accepted
   - accepted_with_rule_support
   - accepted_with_validation_support
+blocked_statement_types:
+  - unknown
+blocked_period_roles:
+  - unknown
+blocked_report_dates:
+  - unknown_date
