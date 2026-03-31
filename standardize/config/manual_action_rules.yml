@@ -1,0 +1,12 @@
+supported_action_types:
+  - accept_mapping_alias
+  - set_mapping_override
+  - set_conflict_winner
+  - set_period_override
+  - suppress_false_positive
+  - mark_not_financial_fact
+  - request_reocr
+  - accept_relation_review_only
+  - ignore
+  - defer
+default_review_status: pending

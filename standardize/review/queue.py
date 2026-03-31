@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Dict, List, Sequence, Tuple
 
 from ..models import CellRecord, ConflictRecord, FactRecord, IssueRecord, MappingCandidateRecord, ReviewQueueRecord, ValidationResultRecord, compact_json
+from ..stable_ids import review_id_parts, stable_id
 from ..validation.rules import has_amount_legality_issue
 from .evidence import attach_review_evidence
 
@@ -65,6 +66,8 @@ def build_review_queue(
                 ensure_item(fact, f"validation:{validation.rule_name}:{validation.status}", validation_id=validation.validation_id)
 
     for fact in facts:
+        if fact.status == "suppressed":
+            continue
         if not fact.mapping_code:
             ensure_item(fact, "mapping:unmapped")
         if fact.unplaced_reason:
@@ -84,14 +87,15 @@ def build_review_queue(
 
     weights = review_config.get("reason_weights", {}) if isinstance(review_config, dict) else {}
     review_items: List[ReviewQueueRecord] = []
-    for index, bucket in enumerate(sorted(buckets.values(), key=lambda item: (item["fact"].doc_id, item["fact"].page_no, item["fact"].fact_id)), start=1):
+    for bucket in sorted(buckets.values(), key=lambda item: (item["fact"].doc_id, item["fact"].page_no, item["fact"].fact_id)):
         fact = bucket["fact"]
         reason_codes = sorted(bucket["reason_codes"])
         priority_score = round(sum(float(weights.get(reason_code, weights.get(reason_code.split(":")[0], 1.0))) for reason_code in reason_codes), 6)
         mapping_text = candidate_map.get(fact.row_label_std or fact.row_label_raw, "")
+        review_id = stable_id("REV_", review_id_parts(fact.fact_id or fact.source_cell_ref, reason_codes))
         review_items.append(
             ReviewQueueRecord(
-                review_id=f"REV{index:05d}",
+                review_id=review_id,
                 priority_score=priority_score,
                 reason_codes=reason_codes,
                 doc_id=fact.doc_id,
@@ -112,7 +116,19 @@ def build_review_queue(
                 evidence_cell_path="",
                 evidence_row_path="",
                 evidence_table_path="",
-                meta_json=compact_json({"source_cell_ref": fact.source_cell_ref}),
+                meta_json=compact_json(
+                    {
+                        "fact_id": fact.fact_id,
+                        "source_cell_ref": fact.source_cell_ref,
+                        "logical_subtable_id": fact.logical_subtable_id,
+                        "table_semantic_key": fact.table_semantic_key,
+                        "column_semantic_key": fact.column_semantic_key,
+                        "source_row_start": fact.source_row_start,
+                        "source_row_end": fact.source_row_end,
+                        "source_col_start": fact.source_col_start,
+                        "source_col_end": fact.source_col_end,
+                    }
+                ),
             )
         )
         fact.review_id = review_items[-1].review_id

@@ -44,6 +44,7 @@ def export_template(
     duplicates: List[DuplicateRecord] | None = None,
     conflicts: List[ConflictRecord] | None = None,
     review_queue: List[ReviewQueueRecord] | None = None,
+    applied_actions: List[Dict[str, Any]] | None = None,
     export_rules: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     export_rules = export_rules or {}
@@ -98,6 +99,7 @@ def export_template(
     replace_sheet_with_rows(workbook, "_conflicts", conflicts or [], model_cls=ConflictRecord)
     replace_sheet_with_rows(workbook, "_review_queue", review_queue or [], model_cls=ReviewQueueRecord)
     replace_sheet_with_rows(workbook, "_unplaced_facts", unplaced_rows, headers=UNPLACED_HEADERS)
+    replace_sheet_with_rows(workbook, "_applied_actions", applied_actions or [])
     workbook.save(output_path)
     return {
         "written_cells": written,
@@ -114,9 +116,11 @@ def export_template(
             "_conflicts",
             "_unplaced_facts",
             "_review_queue",
+            "_applied_actions",
         ],
         "source_facts": "facts_deduped",
         "unplaced_count": len(unplaced_rows),
+        "unplaced_rows": unplaced_rows,
     }
 
 
@@ -124,6 +128,8 @@ def determine_unplaced_reason(fact: FactRecord, export_rules: Dict[str, Any]) ->
     allowed_statuses = set(export_rules.get("allowed_statuses", ["observed", "repaired", "accepted", "accepted_with_rule_support", "accepted_with_validation_support"]))
     if not fact.mapping_code:
         return "unmapped"
+    if fact.status == "suppressed":
+        return fact.suppression_reason or "suppressed"
     if fact.mapping_review_required:
         return "mapping_review_required"
     if fact.value_num is None:

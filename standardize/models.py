@@ -186,6 +186,10 @@ class FactRecord:
     conflict_decision: str = ""
     unplaced_reason: str = ""
     review_id: str = ""
+    suppression_reason: str = ""
+    override_source: str = ""
+    parent_review_id: str = ""
+    parent_task_id: str = ""
 
 
 @dataclass

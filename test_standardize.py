@@ -10,18 +10,23 @@ from openpyxl import load_workbook
 
 from standardize import cli
 from standardize.dedupe import assign_fact_ids, dedupe_facts
+from standardize.feedback import apply_review_actions, build_delta_reports, export_review_actions_template, parse_review_actions_file
 from standardize.integrity import run_artifact_integrity
 from standardize.mapping.review import apply_subject_mapping
-from standardize.models import AliasRecord, CellRecord, ConflictRecord, FactRecord, ProviderCell, ProviderPage, RelationRecord, StatementMeta, TemplateSubject, ValidationResultRecord
+from standardize.models import AliasRecord, CellRecord, ConflictRecord, FactRecord, ProviderCell, ProviderPage, ReOCRTaskRecord, RelationRecord, StatementMeta, TemplateSubject, ValidationResultRecord
 from standardize.normalize.conflicts import enrich_conflicts, resolve_conflicts
 from standardize.normalize.export import export_template
 from standardize.normalize.mapping import load_template_subjects
 from standardize.normalize.numbers import analyze_numeric_text
 from standardize.normalize.periods import apply_period_normalization
 from standardize.normalize.tables import standardize_page
+from standardize.overrides.periods import apply_period_overrides
+from standardize.overrides.storage import ensure_override_store
+from standardize.overrides.suppression import apply_suppression_overrides
 from standardize.providers.aliyun import extract_aliyun_data
 from standardize.review import build_review_queue
 from standardize.routing.page_selector import build_page_selection
+from standardize.routing.secondary_ocr import materialize_reocr_inputs
 from standardize.validation import run_validation
 
 
@@ -806,6 +811,168 @@ class StandardizeTests(unittest.TestCase):
             self.assertFalse(by_page[2].is_candidate_table_page)
             self.assertEqual(plan["pages_total"], 2)
 
+    def test_review_action_parsing_and_application(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            config_dir = base / "config"
+            ensure_override_store(config_dir)
+            action_csv = base / "review_actions.csv"
+            rows = [
+                {
+                    "review_id": "REV_demo_1",
+                    "action_type": "accept_mapping_alias",
+                    "candidate_mapping_code": "ZT_001",
+                    "candidate_mapping_name": "货币资金",
+                    "row_label_std": "货币资金",
+                    "row_label_raw": "货币资金",
+                    "action_value": "",
+                    "reviewer_note": "accepted",
+                    "reviewer_name": "tester",
+                },
+                {
+                    "review_id": "REV_demo_1",
+                    "action_type": "unsupported_action",
+                    "candidate_mapping_code": "",
+                    "candidate_mapping_name": "",
+                    "row_label_std": "货币资金",
+                    "row_label_raw": "货币资金",
+                    "action_value": "",
+                    "reviewer_note": "",
+                    "reviewer_name": "",
+                },
+            ]
+            with action_csv.open("w", encoding="utf-8-sig", newline="") as handle:
+                writer = csv.DictWriter(handle, fieldnames=list(rows[0].keys()))
+                writer.writeheader()
+                writer.writerows(rows)
+
+            parsed = parse_review_actions_file(action_csv)
+            applied, rejected, audit_rows, summary = apply_review_actions(parsed, ["REV_demo_1"], config_dir)
+
+            self.assertEqual(len(applied), 1)
+            self.assertEqual(len(rejected), 1)
+            self.assertEqual(summary["applied_total"], 1)
+            self.assertTrue((config_dir / "manual_overrides" / "mapping_overrides.yml").exists())
+            self.assertEqual(audit_rows[0]["action_type"], "accept_mapping_alias")
+
+    def test_period_override_and_suppression_affect_fact_state(self):
+        facts = assign_fact_ids(
+            [
+                self.make_fact(
+                    period_key="2022年度__本期",
+                    report_date_norm="2022年度",
+                    period_role_norm="本期",
+                    value_raw="100",
+                    value_num=100.0,
+                )
+            ]
+        )
+        fact_id = facts[0].fact_id
+        facts = apply_period_overrides(
+            facts,
+            [{"fact_id": fact_id, "period_key": "2022-12-31__期末数", "report_date_norm": "2022-12-31", "period_role_norm": "期末数", "note": "manual"}],
+        )
+        facts = apply_suppression_overrides(
+            facts,
+            [{"fact_id": fact_id, "action_type": "suppress_false_positive", "note": "false_positive"}],
+        )
+        self.assertEqual(facts[0].period_key, "2022-12-31__期末数")
+        self.assertEqual(facts[0].report_date_norm, "2022-12-31")
+        self.assertEqual(facts[0].status, "suppressed")
+
+    def test_delta_reporting(self):
+        before = {
+            "run_summary": {"mapped_facts_ratio": 0.1, "amount_coverage_ratio": 0.2, "review_total": 10, "validation_fail_total": 3, "provider_conflict_pairs": 2},
+            "review_rows": [{"review_id": "REV1", "priority_score": "5", "row_label_std": "货币资金", "period_key": "2022-12-31__期末数"}],
+            "unmapped_rows": [{"row_label_std": "未知科目", "occurrences": "3", "amount_abs_total": "100"}],
+            "reocr_rows": [{"task_id": "REOCR1"}],
+            "conflict_rows": [{"decision": "review_required"}],
+            "facts_rows": [{"mapping_code": "ZT_001", "value_num": "1", "report_date_norm": "2022-12-31", "period_role_norm": "期末数", "status": "observed", "conflict_decision": "", "unplaced_reason": ""}],
+            "unplaced_rows": [{"fact_id": "F1"}],
+        }
+        after = {
+            "run_summary": {"mapped_facts_ratio": 0.2, "amount_coverage_ratio": 0.25, "review_total": 4, "validation_fail_total": 1, "provider_conflict_pairs": 1},
+            "review_rows": [],
+            "unmapped_rows": [{"row_label_std": "未知科目", "occurrences": "1", "amount_abs_total": "10"}],
+            "reocr_rows": [],
+            "conflict_rows": [],
+            "facts_rows": [{"mapping_code": "ZT_001", "value_num": "1", "report_date_norm": "2022-12-31", "period_role_norm": "期末数", "status": "observed", "conflict_decision": "", "unplaced_reason": ""}],
+            "unplaced_rows": [],
+        }
+        payload = build_delta_reports(before, after)
+        metric_map = {row["metric"]: row for row in payload["coverage_rows"]}
+        self.assertEqual(metric_map["mapped_facts_ratio"]["delta"], 0.1)
+        self.assertEqual(metric_map["review_total"]["delta"], -6.0)
+        self.assertTrue(any(row["status"] == "resolved" for row in payload["review_delta_rows"]))
+
+    def test_materialize_reocr_inputs(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            source_dir = base / "data"
+            output_dir = base / "normalized"
+            source_dir.mkdir(parents=True, exist_ok=True)
+            image = Image.new("RGB", (300, 300), "white")
+            draw = ImageDraw.Draw(image)
+            draw.rectangle((50, 50, 200, 120), outline="black", width=3)
+            (source_dir / "demo.pdf").parent.mkdir(parents=True, exist_ok=True)
+            image.save(source_dir / "demo.pdf", "PDF")
+            task = ReOCRTaskRecord(
+                task_id="REOCR_demo",
+                granularity="cell",
+                doc_id="demo",
+                page_no=1,
+                table_id="1",
+                logical_subtable_id="1_sub1",
+                bbox=json.dumps([50, 50, 200, 120], ensure_ascii=False),
+                reason_codes=["quality:suspicious_numeric"],
+                suggested_provider="tencent_table_v3",
+                priority_score=5.0,
+                expected_benefit="improve_numeric_legibility",
+                source_review_id="REV_demo",
+                meta_json="",
+            )
+
+            manifest_rows, summary = materialize_reocr_inputs([task], source_dir, output_dir)
+
+            self.assertEqual(summary["materialized_total"], 1)
+            self.assertTrue(Path(manifest_rows[0]["crop_path"]).exists())
+
+    def test_export_writes_applied_actions_sheet(self):
+        repo_root = Path(__file__).resolve().parent
+        template_path = repo_root.parent / "会计报表.xlsx"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_dir = Path(tmpdir)
+            facts = assign_fact_ids(
+                [
+                    self.make_fact(
+                        mapping_code="ZT_001",
+                        mapping_name="货币资金",
+                        row_label_std="货币资金",
+                        period_key="2022-12-31__期末数",
+                        report_date_norm="2022-12-31",
+                        period_role_norm="期末数",
+                        value_raw="100",
+                        value_num=100.0,
+                    )
+                ]
+            )
+            export_template(
+                template_path=template_path,
+                output_path=output_dir / "会计报表_填充结果.xlsx",
+                facts=facts,
+                run_summary={"unknown_date_total": 0},
+                issues=[],
+                validations=[],
+                duplicates=[],
+                conflicts=[],
+                review_queue=[],
+                applied_actions=[{"action_id": "ACT_1", "review_id": "REV_1", "action_type": "accept_mapping_alias"}],
+                export_rules={"allowed_statuses": ["observed", "repaired"], "required_helper_sheets": ["_applied_actions"]},
+            )
+            workbook = load_workbook(output_dir / "会计报表_填充结果.xlsx")
+            self.assertIn("_applied_actions", workbook.sheetnames)
+            self.assertEqual(workbook["_applied_actions"].cell(row=1, column=1).value, "action_id")
+
     def test_page_0004_end_to_end(self):
         repo_root = Path(__file__).resolve().parent
         template_path = repo_root.parent / "会计报表.xlsx"
@@ -839,6 +1006,9 @@ class StandardizeTests(unittest.TestCase):
                     "--enable-validation-aware-conflicts",
                     "--emit-routing-plan",
                     "--emit-reocr-tasks",
+                    "--emit-review-actions-template",
+                    "--materialize-reocr-inputs",
+                    "--emit-delta-report",
                 ]
             )
 
@@ -861,6 +1031,10 @@ class StandardizeTests(unittest.TestCase):
                 "review_workbook.xlsx",
                 "reocr_tasks.csv",
                 "reocr_task_summary.json",
+                "review_actions_template.xlsx",
+                "review_actions_template.csv",
+                "reocr_input_manifest.csv",
+                "reocr_input_manifest.json",
                 "artifact_integrity.json",
                 "run_summary.json",
                 "会计报表_填充结果.xlsx",
@@ -889,6 +1063,66 @@ class StandardizeTests(unittest.TestCase):
             self.assertIn("_conflicts", workbook.sheetnames)
             self.assertIn("_unplaced_facts", workbook.sheetnames)
             self.assertIn("_review_queue", workbook.sheetnames)
+
+            with (output_dir / "review_actions_template.csv").open("r", encoding="utf-8-sig", newline="") as handle:
+                action_rows = list(csv.DictReader(handle))
+            self.assertTrue(action_rows)
+            sample_action_file = output_dir / "review_actions_filled.csv"
+            sample_row = action_rows[0]
+            sample_row["action_type"] = "ignore"
+            sample_row["reviewer_name"] = "tester"
+            sample_row["review_status"] = "done"
+            with sample_action_file.open("w", encoding="utf-8-sig", newline="") as handle:
+                writer = csv.DictWriter(handle, fieldnames=action_rows[0].keys())
+                writer.writeheader()
+                writer.writerow(sample_row)
+
+            second_exit_code = cli.main(
+                [
+                    "--input-dir",
+                    str(input_dir),
+                    "--template",
+                    str(template_path),
+                    "--output-dir",
+                    str(output_dir),
+                    "--source-image-dir",
+                    str(repo_root / "data"),
+                    "--provider-priority",
+                    "aliyun,tencent",
+                    "--enable-conflict-merge",
+                    "--enable-period-normalization",
+                    "--enable-dedupe",
+                    "--enable-validation",
+                    "--enable-integrity-check",
+                    "--enable-mapping-suggestions",
+                    "--enable-review-pack",
+                    "--enable-validation-aware-conflicts",
+                    "--emit-routing-plan",
+                    "--emit-reocr-tasks",
+                    "--emit-review-actions-template",
+                    "--review-actions-file",
+                    str(sample_action_file),
+                    "--apply-review-actions",
+                    "--materialize-reocr-inputs",
+                    "--emit-delta-report",
+                ]
+            )
+            self.assertEqual(second_exit_code, 0)
+            for filename in [
+                "applied_review_actions.csv",
+                "override_audit.csv",
+                "review_decision_summary.json",
+                "coverage_delta.json",
+                "coverage_delta.csv",
+                "review_delta.csv",
+                "export_delta_summary.json",
+                "top_resolved_items.csv",
+                "review_priority_backlog.csv",
+                "mapping_opportunities.csv",
+            ]:
+                self.assertTrue((output_dir / filename).exists(), filename)
+            workbook = load_workbook(output_dir / "会计报表_填充结果.xlsx")
+            self.assertIn("_applied_actions", workbook.sheetnames)
 
     def copy_sample_page_0004(self, repo_root: Path, input_dir: Path) -> None:
         doc_name = "债务人审计报告-2022年"

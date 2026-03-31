@@ -1,10 +1,16 @@
 from __future__ import annotations
 
+import io
 import json
 from collections import Counter, defaultdict
+from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
+from OCR import discover_pdf_files, render_pdf_pages
+from PIL import Image
+
 from ..models import ConflictRecord, IssueRecord, FactRecord, ProviderComparisonRecord, ReOCRTaskRecord, ReviewQueueRecord, SecondaryOCRCandidateRecord, ValidationResultRecord, compact_json
+from ..stable_ids import stable_id, task_id_parts
 
 
 def build_secondary_ocr_candidates(
@@ -30,21 +36,22 @@ def build_secondary_ocr_candidates(
     records: List[SecondaryOCRCandidateRecord] = []
     for page_key in sorted(set(list(facts_by_page) + list(issues_by_page) + list(comparison_map))):
         page_facts = facts_by_page.get(page_key, [])
+        active_page_facts = [fact for fact in page_facts if fact.status != "suppressed"]
         page_issues = issues_by_page.get(page_key, [])
         page_validations = validations_by_page.get(page_key, [])
         comparison = comparison_map.get(page_key)
-        providers_present = sorted({fact.provider for fact in page_facts})
+        providers_present = sorted({fact.provider for fact in active_page_facts})
         compared_pairs = comparison.compared_pairs if comparison else 0
         aligned_groups = comparison.aligned_groups if comparison else 0
         coverage = float(compared_pairs) / float(aligned_groups) if aligned_groups else 0.0
-        review_ratio = safe_ratio(sum(1 for fact in page_facts if fact.status == "review"), len(page_facts))
-        unknown_date_ratio = safe_ratio(sum(1 for fact in page_facts if fact.report_date_norm == "unknown_date"), len(page_facts))
+        review_ratio = safe_ratio(sum(1 for fact in active_page_facts if fact.status == "review"), len(active_page_facts))
+        unknown_date_ratio = safe_ratio(sum(1 for fact in active_page_facts if fact.report_date_norm == "unknown_date"), len(active_page_facts))
         suspicious_count = sum(1 for issue in page_issues if issue.issue_type == "suspicious_value")
         validation_fail_count = sum(1 for result in page_validations if result.status == "fail")
-        statement_counter = Counter(fact.statement_type for fact in page_facts)
+        statement_counter = Counter(fact.statement_type for fact in active_page_facts)
         dominant_statement = statement_counter.most_common(1)[0][0] if statement_counter else "unknown"
-        mapped_fact_count = sum(1 for fact in page_facts if fact.mapping_code)
-        has_xlsx_fallback = any(fact.source_kind == "xlsx_fallback" for fact in page_facts)
+        mapped_fact_count = sum(1 for fact in active_page_facts if fact.mapping_code)
+        has_xlsx_fallback = any(fact.source_kind == "xlsx_fallback" for fact in active_page_facts)
 
         trigger_score = 0.0
         trigger_reasons: List[str] = []
@@ -116,16 +123,16 @@ def build_reocr_tasks(
 ) -> Tuple[List[ReOCRTaskRecord], Dict[str, Any]]:
     config = reocr_config.get("reocr", {})
     tasks: List[ReOCRTaskRecord] = []
-    for index, item in enumerate(sorted(review_items, key=lambda row: (-row.priority_score, row.doc_id, row.page_no, row.review_id)), start=1):
+    for item in sorted(review_items, key=lambda row: (-row.priority_score, row.doc_id, row.page_no, row.review_id)):
         bbox_payload = parse_bbox_payload(item.bbox)
         granularity = choose_granularity(item, bbox_payload)
         suggested_provider = choose_provider(item.provider)
         task_bbox = select_bbox_for_granularity(bbox_payload, granularity)
         meta = parse_meta(item.meta_json)
-        table_id, logical_subtable_id = parse_source_ref(meta.get("source_cell_ref", ""))
+        table_id, logical_subtable_id = parse_source_ref(meta.get("source_cell_ref", ""), meta.get("logical_subtable_id", ""))
         tasks.append(
             ReOCRTaskRecord(
-                task_id=f"REOCR{index:05d}",
+                task_id=stable_id("REOCR_", task_id_parts(item.review_id, granularity, task_bbox)),
                 granularity=granularity,
                 doc_id=item.doc_id,
                 page_no=item.page_no,
@@ -142,6 +149,7 @@ def build_reocr_tasks(
                         "provider": item.provider,
                         "has_bbox": bool(task_bbox),
                         "conflict_ids": item.related_conflict_ids,
+                        "fact_ids": item.related_fact_ids,
                     }
                 ),
             )
@@ -231,11 +239,182 @@ def parse_meta(value: str) -> Dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
-def parse_source_ref(source_ref: str) -> Tuple[str, str]:
+def parse_source_ref(source_ref: str, logical_subtable_id: str = "") -> Tuple[str, str]:
     parts = source_ref.split(":")
     if len(parts) < 4:
-        return "", ""
-    return parts[3], ""
+        return "", logical_subtable_id
+    return parts[3], logical_subtable_id
+
+
+def materialize_reocr_inputs(
+    tasks: List[ReOCRTaskRecord],
+    source_image_dir: Path | None,
+    output_dir: Path,
+) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    manifest_rows: List[Dict[str, Any]] = []
+    inputs_dir = output_dir / "reocr_inputs"
+    inputs_dir.mkdir(parents=True, exist_ok=True)
+    rendered_cache: Dict[str, Dict[int, Image.Image]] = {}
+
+    for task in tasks:
+        bbox = select_task_bbox(task.bbox)
+        crop_path = ""
+        status = "missing_source_image"
+        if source_image_dir and bbox:
+            page_images = rendered_cache.setdefault(task.doc_id, render_doc_images(source_image_dir, task.doc_id))
+            page_image = page_images.get(task.page_no)
+            if page_image is not None:
+                filename = f"{task.task_id}__{task.doc_id}__p{task.page_no:04d}__{task.granularity}.png"
+                crop_path = save_task_crop(page_image, bbox, inputs_dir / filename)
+                status = "ok" if crop_path else "invalid_bbox"
+            else:
+                status = "page_image_missing"
+        elif not bbox:
+            status = "missing_bbox"
+
+        manifest_rows.append(
+            {
+                "task_id": task.task_id,
+                "doc_id": task.doc_id,
+                "page_no": task.page_no,
+                "granularity": task.granularity,
+                "table_id": task.table_id,
+                "logical_subtable_id": task.logical_subtable_id,
+                "bbox": task.bbox,
+                "suggested_provider": task.suggested_provider,
+                "source_review_id": task.source_review_id,
+                "crop_path": crop_path,
+                "status": status,
+            }
+        )
+
+    summary = {
+        "tasks_total": len(tasks),
+        "materialized_total": sum(1 for row in manifest_rows if row["crop_path"]),
+        "missing_bbox_total": sum(1 for row in manifest_rows if row["status"] == "missing_bbox"),
+        "missing_source_image_total": sum(1 for row in manifest_rows if row["status"] == "missing_source_image"),
+    }
+    return manifest_rows, summary
+
+
+def ingest_reocr_results(
+    tasks: List[ReOCRTaskRecord],
+    results_dir: Path | None,
+    review_items: List[ReviewQueueRecord],
+    facts: List[FactRecord],
+    merge_config: Dict[str, Any] | None = None,
+) -> Tuple[List[FactRecord], List[Dict[str, Any]], Dict[str, Any]]:
+    merge_config = merge_config or {}
+    if not results_dir or not results_dir.exists():
+        return facts, [], {"results_found_total": 0, "merged_total": 0, "ignored_total": 0}
+
+    task_map = {task.task_id: task for task in tasks}
+    review_map = {item.review_id: item for item in review_items}
+    fact_map = {fact.fact_id: fact for fact in facts}
+    audits: List[Dict[str, Any]] = []
+    merged_total = 0
+    ignored_total = 0
+
+    for result_path in sorted(results_dir.glob("*.json")):
+        payload = parse_meta(result_path.read_text(encoding="utf-8"))
+        task_id = str(payload.get("task_id", "")).strip()
+        task = task_map.get(task_id)
+        if not task:
+            audits.append({"task_id": task_id, "status": "ignored", "reason": "task_not_found", "result_file": str(result_path)})
+            ignored_total += 1
+            continue
+        review = review_map.get(task.source_review_id)
+        target_fact_ids = review.related_fact_ids if review else []
+        merged_here = False
+        for fact_id in target_fact_ids:
+            fact = fact_map.get(fact_id)
+            if fact is None:
+                continue
+            if fact.status not in {"review", "conflict", "blank", "inferred"} and fact.value_num is not None:
+                audits.append(
+                    {
+                        "task_id": task_id,
+                        "fact_id": fact_id,
+                        "status": "ignored",
+                        "reason": "strong_resolved_fact_exists",
+                        "result_file": str(result_path),
+                    }
+                )
+                ignored_total += 1
+                continue
+            if payload.get("period_key"):
+                fact.period_key = str(payload["period_key"]).strip()
+                if "__" in fact.period_key:
+                    report_date_norm, period_role_norm = fact.period_key.split("__", 1)
+                    fact.report_date_norm = report_date_norm
+                    fact.period_role_norm = period_role_norm
+                    fact.period_source_level = "reocr"
+            if payload.get("value_raw"):
+                fact.value_raw = str(payload["value_raw"])
+            if payload.get("value_num") not in ("", None):
+                try:
+                    fact.value_num = float(payload["value_num"])
+                    if fact.status in {"review", "conflict", "blank", "inferred"}:
+                        fact.status = "observed"
+                except (TypeError, ValueError):
+                    pass
+            fact.source_kind = "reocr"
+            fact.issue_flags = sorted(set(fact.issue_flags + ["reocr_merged"]))
+            merged_total += 1
+            merged_here = True
+            audits.append(
+                {
+                    "task_id": task_id,
+                    "fact_id": fact_id,
+                    "review_id": task.source_review_id,
+                    "status": "merged",
+                    "reason": "merged_into_unresolved_fact",
+                    "result_file": str(result_path),
+                    "new_period_key": fact.period_key,
+                    "new_value_num": fact.value_num,
+                }
+            )
+        if not merged_here and review is None:
+            audits.append({"task_id": task_id, "status": "ignored", "reason": "review_not_found", "result_file": str(result_path)})
+            ignored_total += 1
+
+    summary = {
+        "results_found_total": len(list(results_dir.glob("*.json"))),
+        "merged_total": merged_total,
+        "ignored_total": ignored_total,
+    }
+    return facts, audits, summary
+
+
+def render_doc_images(source_image_dir: Path, doc_id: str) -> Dict[int, Image.Image]:
+    pdf_path = next((path for path in discover_pdf_files(source_image_dir) if path.stem == doc_id), None)
+    if pdf_path is None:
+        return {}
+    images: Dict[int, Image.Image] = {}
+    for rendered in render_pdf_pages(pdf_path):
+        images[rendered.page_number] = Image.open(io.BytesIO(rendered.image_bytes)).copy()
+    return images
+
+
+def select_task_bbox(payload: str) -> List[int]:
+    if not payload:
+        return []
+    try:
+        parsed = json.loads(payload)
+    except json.JSONDecodeError:
+        return []
+    return parsed if isinstance(parsed, list) else []
+
+
+def save_task_crop(image: Image.Image, bbox: List[int], path: Path) -> str:
+    if not bbox or len(bbox) != 4:
+        return ""
+    x1, y1, x2, y2 = [int(value) for value in bbox]
+    crop_box = (max(0, x1), max(0, y1), min(image.size[0], x2), min(image.size[1], y2))
+    if crop_box[0] >= crop_box[2] or crop_box[1] >= crop_box[3]:
+        return ""
+    image.crop(crop_box).save(path)
+    return str(path)
 
 
 def safe_ratio(numerator: float, denominator: int) -> float:

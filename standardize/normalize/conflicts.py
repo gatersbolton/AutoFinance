@@ -7,6 +7,7 @@ from itertools import combinations
 from typing import Dict, Iterable, List, Tuple
 
 from ..models import ConflictDecisionAuditRecord, ConflictRecord, FactRecord, ProviderComparisonRecord, ValidationImpactRecord, compact_json
+from ..stable_ids import conflict_id_parts, stable_id
 from ..validation import run_validation
 
 
@@ -38,7 +39,6 @@ def resolve_conflicts(
         }
     )
 
-    conflict_counter = 0
     for key, items in grouped.items():
         page_key = (key[0], key[1])
         providers = {item.provider for item in items}
@@ -70,8 +70,17 @@ def resolve_conflicts(
             continue
 
         page_metrics[page_key]["conflict_pairs"] += len(comparable_pairs)
-        conflict_counter += 1
-        conflict_id = f"CF{conflict_counter:05d}"
+        conflict_id = stable_id(
+            "CF_",
+            conflict_id_parts(
+                doc_id=key[0],
+                page_no=key[1],
+                table_semantic_key=key[2],
+                row_label_std=key[3],
+                column_semantic_key=key[4],
+                period_key=items[0].period_key,
+            ),
+        )
         chosen = choose_fact(items, priority_index)
         provider_values = serialize_provider_values(items)
         magnitude_ratio = compute_group_magnitude_ratio(items)

@@ -1,0 +1,6 @@
+allow_freeform_amount_override: false
+default_mapping_override_scope: local_fact
+default_conflict_override_scope: conflict
+default_period_override_scope: fact_period
+suppression_affects_export: true
+suppression_affects_review_backlog: true

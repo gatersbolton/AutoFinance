@@ -1,5 +1,10 @@
 secret
 outputs/
+normalized/
+reocr_results/
+review_pack/
 .venv/
 __pycache__/
 .pytest_cache/
+*.pyc
+!tests/fixtures/

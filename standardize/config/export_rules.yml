@@ -6,6 +6,7 @@ required_helper_sheets:
   - _conflicts
   - _unplaced_facts
   - _review_queue
+  - _applied_actions
 allowed_statuses:
   - observed
   - repaired

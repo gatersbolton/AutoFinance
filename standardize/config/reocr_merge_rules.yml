@@ -1,0 +1,4 @@
+allow_value_merge_when_existing_unresolved: true
+allow_period_merge: true
+allow_row_label_merge: false
+respect_strong_resolved_facts: true

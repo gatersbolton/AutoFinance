@@ -4,12 +4,12 @@ from collections import defaultdict
 from typing import Dict, List, Tuple
 
 from .models import DuplicateRecord, FactRecord, compact_json
+from .stable_ids import fact_id_parts, stable_id
 
 
 def assign_fact_ids(facts: List[FactRecord]) -> List[FactRecord]:
-    for index, fact in enumerate(facts, start=1):
-        if not fact.fact_id:
-            fact.fact_id = f"F{index:06d}"
+    for fact in facts:
+        fact.fact_id = stable_id("F_", fact_id_parts(fact))
     return facts
 
 

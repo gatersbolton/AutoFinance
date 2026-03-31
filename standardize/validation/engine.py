@@ -46,7 +46,7 @@ def run_balance_equation(
     results: List[ValidationResultRecord] = []
     grouped: Dict[Tuple[str, str], List[FactRecord]] = defaultdict(list)
     for fact in facts:
-        if fact.period_key and fact.value_num is not None and fact.status not in {"review", "conflict"}:
+        if fact.period_key and fact.value_num is not None and fact.status not in {"review", "conflict", "suppressed"}:
             grouped[(fact.doc_id, fact.period_key)].append(fact)
 
     for (doc_id, period_key), items in grouped.items():
@@ -119,7 +119,7 @@ def run_subtotal_checks(
     min_detail_rows = int(config.get("min_detail_rows", 2))
     grouped: Dict[Tuple[str, int, str, str, str], List[FactRecord]] = defaultdict(list)
     for fact in facts:
-        if fact.value_num is None or fact.status in {"review", "conflict"}:
+        if fact.value_num is None or fact.status in {"review", "conflict", "suppressed"}:
             continue
         grouped[(fact.doc_id, fact.page_no, fact.logical_subtable_id, fact.period_key, fact.column_semantic_key)].append(fact)
 
@@ -189,7 +189,7 @@ def run_ratio_checks(
     expected_total = float(config.get("expected_total", 1.0))
     grouped: Dict[Tuple[str, int, str, str], List[FactRecord]] = defaultdict(list)
     for fact in facts:
-        if fact.value_num is None or fact.status in {"review", "conflict"}:
+        if fact.value_num is None or fact.status in {"review", "conflict", "suppressed"}:
             continue
         if not is_ratio_fact(fact):
             continue
@@ -232,6 +232,8 @@ def run_amount_legality_checks(
     results: List[ValidationResultRecord] = []
     for fact in facts:
         if not has_amount_legality_issue(fact):
+            continue
+        if fact.status == "suppressed":
             continue
         status = config.get("status_when_noise_detected", "review")
         results.append(

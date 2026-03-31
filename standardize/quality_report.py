@@ -27,32 +27,33 @@ def build_run_summary(
     review_summary = review_summary or {}
     integrity_summary = integrity_summary or {}
 
-    mapped_facts_total = sum(1 for fact in facts_deduped if fact.mapping_code)
-    unknown_date_total = sum(1 for fact in facts_deduped if fact.report_date_norm == "unknown_date")
+    active_facts = [fact for fact in facts_deduped if fact.status != "suppressed"]
+    mapped_facts_total = sum(1 for fact in active_facts if fact.mapping_code)
+    unknown_date_total = sum(1 for fact in active_facts if fact.report_date_norm == "unknown_date")
     suspicious_cells_total = sum(1 for cell in cells if cell.is_suspicious)
-    repaired_facts_total = sum(1 for fact in facts_deduped if fact.status == "repaired" or "repaired_numeric" in fact.issue_flags)
-    review_facts_total = sum(1 for fact in facts_deduped if fact.status == "review")
+    repaired_facts_total = sum(1 for fact in active_facts if fact.status == "repaired" or "repaired_numeric" in fact.issue_flags)
+    review_facts_total = sum(1 for fact in active_facts if fact.status == "review")
     validation_status = Counter(result.status for result in validations)
     comparison_totals = {
         "provider_compared_pairs": sum(record.compared_pairs for record in provider_comparisons),
         "provider_equal_pairs": sum(record.equal_pairs for record in provider_comparisons),
         "provider_conflict_pairs": sum(record.conflict_pairs for record in provider_comparisons),
     }
-    statement_type_breakdown = Counter(fact.statement_type for fact in facts_deduped)
-    period_key_breakdown = Counter(fact.period_key for fact in facts_deduped)
+    statement_type_breakdown = Counter(fact.statement_type for fact in active_facts)
+    period_key_breakdown = Counter(fact.period_key for fact in active_facts)
     review_reason_breakdown = Counter()
-    for fact in facts_deduped:
+    for fact in active_facts:
         if fact.status == "review":
             review_reason_breakdown.update(fact.issue_flags or ["review"])
 
-    amount_total = sum(abs(float(fact.value_num or 0.0)) for fact in facts_deduped if fact.value_num is not None)
+    amount_total = sum(abs(float(fact.value_num or 0.0)) for fact in active_facts if fact.value_num is not None)
     mapped_amount_total = sum(
         abs(float(fact.value_num or 0.0))
-        for fact in facts_deduped
+        for fact in active_facts
         if fact.value_num is not None and fact.mapping_code and fact.status not in {"review", "conflict"}
     )
     conflict_decision_breakdown = Counter(conflict.decision for conflict in conflicts or [])
-    unmapped_total = sum(1 for fact in facts_deduped if not fact.mapping_code)
+    unmapped_total = sum(1 for fact in active_facts if not fact.mapping_code)
 
     summary = RunSummaryRecord(
         docs_total=docs_total,
@@ -64,9 +65,9 @@ def build_run_summary(
         facts_raw_total=len(facts_raw),
         facts_deduped_total=len(facts_deduped),
         mapped_facts_total=mapped_facts_total,
-        mapped_facts_ratio=safe_ratio(mapped_facts_total, len(facts_deduped)),
+        mapped_facts_ratio=safe_ratio(mapped_facts_total, len(active_facts)),
         unknown_date_total=unknown_date_total,
-        unknown_date_ratio=safe_ratio(unknown_date_total, len(facts_deduped)),
+        unknown_date_ratio=safe_ratio(unknown_date_total, len(active_facts)),
         suspicious_cells_total=suspicious_cells_total,
         repaired_facts_total=repaired_facts_total,
         review_facts_total=review_facts_total,
@@ -89,11 +90,12 @@ def build_run_summary(
         "mapped_by_alias": int(mapping_stats.get("mapped_by_alias", 0)),
         "mapped_by_relation": int(mapping_stats.get("mapped_by_relation", 0)),
         "unmapped_total": unmapped_total,
-        "unmapped_ratio": safe_ratio(unmapped_total, len(facts_deduped)),
+        "unmapped_ratio": safe_ratio(unmapped_total, len(active_facts)),
         "amount_coverage_ratio": safe_ratio(mapped_amount_total, amount_total),
         "conflict_decision_breakdown": dict(conflict_decision_breakdown),
         "review_total": int(review_summary.get("review_total", review_facts_total)),
         "integrity_fail_total": int(integrity_summary.get("integrity_fail_total", 0)),
+        "suppressed_total": sum(1 for fact in facts_deduped if fact.status == "suppressed"),
     }
     return summary_dict
 

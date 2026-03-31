@@ -25,6 +25,16 @@ def apply_subject_mapping(
     stats = Counter()
 
     for fact in facts:
+        if fact.mapping_code:
+            if fact.mapping_method == "exact":
+                stats["mapped_by_exact"] += 1
+            elif "alias" in (fact.mapping_method or "") or fact.mapping_method == "manual_alias":
+                stats["mapped_by_alias"] += 1
+            elif fact.mapping_relation_type:
+                stats["mapped_by_relation"] += 1
+            else:
+                stats["mapped_by_alias"] += 1
+            continue
         label = fact.row_label_std or fact.row_label_raw
         normalized_label = normalize_subject_label(label)
         if not normalized_label:

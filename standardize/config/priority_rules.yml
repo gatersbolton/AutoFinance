@@ -1,0 +1,8 @@
+weights:
+  amount_scale: 0.000001
+  occurrence: 1.25
+  statement_criticality: 3.0
+  strong_mapping_candidate: 2.0
+  reocr_exists: 1.0
+  base_review_priority: 1.0
+high_priority_threshold: 10.0
