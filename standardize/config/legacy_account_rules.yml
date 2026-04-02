@@ -1,0 +1,19 @@
+aliases:
+  - canonical_code: ZT_024
+    canonical_name: 应交税费
+    alias: 应交税金
+    alias_type: legacy_alias
+    enabled: true
+    note: legacy_account_seed
+  - canonical_code: ZT_083
+    canonical_name: 其他应付款项
+    alias: 其他应付款
+    alias_type: legacy_alias
+    enabled: true
+    note: legacy_account_seed
+  - canonical_code: ZT_014
+    canonical_name: 其他应收款项
+    alias: 其他应收款
+    alias_type: legacy_alias
+    enabled: true
+    note: legacy_account_seed

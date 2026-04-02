@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Tuple
 
 from .align import align_benchmark_headers
 from .loader import load_workbook_main_sheet
+from .metrics import build_benchmark_metric_summary, is_numeric
 
 
 def compare_benchmark_workbook(
@@ -80,29 +81,16 @@ def compare_benchmark_workbook(
                     }
                 )
 
-    matched_cells = sum(1 for row in cell_rows if row["status"] == "match")
     missing_in_auto = sum(1 for row in cell_rows if row["status"] == "missing_in_auto")
-    extra_in_auto = len(extra_rows)
-    value_diff_cells = sum(1 for row in cell_rows if row["status"] == "value_diff")
-    benchmark_filled = sum(1 for row in cell_rows if row["benchmark_value"] not in (None, ""))
-    auto_filled = sum(1 for row in cell_rows if row["auto_value"] not in (None, ""))
-    amount_rows = [row for row in cell_rows if is_numeric(row["benchmark_value"]) or is_numeric(row["auto_value"])]
-    amount_matches = sum(1 for row in amount_rows if row["status"] == "match")
-    amount_missing = sum(1 for row in amount_rows if row["status"] == "missing_in_auto")
-
-    summary = {
-        "run_id": "",
-        "benchmark_workbook": str(benchmark_path),
-        "matched_cells": matched_cells,
-        "missing_in_auto": missing_in_auto,
-        "extra_in_auto": extra_in_auto,
-        "value_diff_cells": value_diff_cells,
-        "exact_match_ratio": safe_ratio(matched_cells, len(cell_rows)),
-        "recall_against_benchmark": safe_ratio(matched_cells, benchmark_filled),
-        "precision_against_benchmark": safe_ratio(matched_cells, auto_filled),
-        "amount_match_ratio": safe_ratio(amount_matches, len(amount_rows)),
-        "amount_missing_ratio": safe_ratio(amount_missing, len(amount_rows)),
-    }
+    summary = build_benchmark_metric_summary(
+        cell_rows=cell_rows,
+        benchmark_workbook=str(benchmark_path),
+        extra_in_auto=len(extra_rows),
+        missing_in_auto_raw=missing_in_auto,
+        missing_in_auto_true=missing_in_auto,
+        alignment_only_gap_total=0,
+        ambiguous_alignment_total=sum(1 for row in cell_rows if row["reason"] == "ambiguous_period_alignment"),
+    )
 
     subject_gap_rows = [
         {"run_id": "", "mapping_code": code, "missing_cells": count}
@@ -122,6 +110,9 @@ def compare_benchmark_workbook(
         "subject_gap_rows": subject_gap_rows,
         "period_gap_rows": period_gap_rows,
         "alignment": alignment,
+        "export_period_headers": export_period_headers,
+        "export_rows_map": export_rows,
+        "benchmark_rows": benchmark["rows"],
     }
 
 
@@ -141,19 +132,33 @@ def compare_values(benchmark_value: Any, auto_value: Any, alignment_reason: str,
     if str(benchmark_value).strip() == str(auto_value).strip():
         return "match", "exact_text_match"
     return "value_diff", "text_mismatch"
-
-
-def is_numeric(value: Any) -> bool:
-    if value in (None, ""):
-        return False
-    try:
-        float(value)
-        return True
-    except (TypeError, ValueError):
-        return False
-
-
-def safe_ratio(numerator: float, denominator: float) -> float:
-    if denominator <= 0:
-        return 0.0
-    return float(numerator) / float(denominator)
+def build_benchmark_delta_summary(before: Dict[str, Any] | None, after: Dict[str, Any] | None) -> Dict[str, Any]:
+    before = before or {}
+    after = after or {}
+    metric_names = [
+        "benchmark_missing_true_total",
+        "missing_in_auto_true",
+        "alignment_only_gap_total",
+        "benchmark_precision_ratio",
+        "benchmark_recall_ratio",
+        "amount_match_ratio",
+        "amount_missing_ratio",
+    ]
+    rows: List[Dict[str, Any]] = []
+    for metric in metric_names:
+        before_value = before.get(metric, 0)
+        after_value = after.get(metric, 0)
+        rows.append(
+            {
+                "metric": metric,
+                "before": before_value,
+                "after": after_value,
+                "delta": round(float(after_value or 0.0) - float(before_value or 0.0), 6),
+            }
+        )
+    return {
+        "run_id": after.get("run_id", ""),
+        "baseline_run_id": before.get("run_id", ""),
+        "promoted_run_id": after.get("run_id", ""),
+        "metrics": rows,
+    }

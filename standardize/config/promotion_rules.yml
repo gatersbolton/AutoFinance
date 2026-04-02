@@ -1,0 +1,9 @@
+supported_action_types:
+  - promote_alias
+  - promote_legacy_alias
+  - promote_formula_rule
+  - promote_target_rule
+  - reject
+  - defer
+template_default_status: pending
+default_alias_type: exact_alias

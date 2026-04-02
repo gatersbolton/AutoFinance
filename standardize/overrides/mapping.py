@@ -24,6 +24,7 @@ def build_manual_alias_records(entries: Sequence[Dict[str, object]], subjects: S
                 alias=alias,
                 alias_type=str(entry.get("alias_type", "exact_alias")).strip() or "exact_alias",
                 enabled=bool(entry.get("enabled", True)),
+                statement_types=[str(value).strip() for value in entry.get("statement_types", []) if str(value).strip()],
                 note=str(entry.get("note", "")).strip(),
             )
         )

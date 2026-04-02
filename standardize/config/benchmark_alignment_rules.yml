@@ -1,0 +1,28 @@
+legacy_role_map:
+  期初: 期初数
+  期末: 期末数
+  本期: 本期
+  上期: 上期
+  本年累计: 本年累计
+legacy_amount_headers:
+  - 金额
+annual_amount_statement_types:
+  - income_statement
+  - cash_flow
+annual_amount_period_roles:
+  - 本期
+income_statement_keywords:
+  - 收入
+  - 成本
+  - 利润
+  - 费用
+  - 税金
+  - 所得税
+cash_flow_keywords:
+  - 现金流
+  - 经营活动
+  - 投资活动
+  - 筹资活动
+exact_date_preferred: true
+prefer_exact_date_for_legacy_roles: true
+numeric_tolerance: 0.01

@@ -1,0 +1,36 @@
+target_scopes:
+  exportable:
+    - main_export_target
+    - derived_target
+  note_review:
+    - note_detail
+    - note_aggregation
+  suppressed:
+    - non_target_noise
+non_target_patterns:
+  company_like:
+    - 公司
+    - 银行
+    - 分行
+    - 有限公司
+    - 股份有限公司
+  aging_bucket:
+    - 1年以内
+    - 1-2年
+    - 2-3年
+    - 3年以上
+    - 1至2年
+    - 2至3年
+  note_noise:
+    - 单位名称
+    - 比例
+    - 账龄
+note_aggregation_keywords:
+  - 合计
+  - 总计
+  - 小计
+benchmark_target_statement_types:
+  - balance_sheet
+  - income_statement
+  - cash_flow
+  - changes_in_equity

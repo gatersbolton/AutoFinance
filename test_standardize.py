@@ -5,12 +5,13 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import yaml
 from PIL import Image, ImageDraw
 from openpyxl import load_workbook
 
 from standardize import cli
 from standardize.benchmark import compare_benchmark_workbook, explain_benchmark_gaps
-from standardize.curation import build_alias_acceptance_candidates, build_formula_rule_impact, prune_reocr_tasks, split_unmapped_facts
+from standardize.curation import build_alias_acceptance_candidates, build_formula_rule_impact, load_curated_alias_records, load_curated_formula_rules, load_legacy_alias_records, prune_reocr_tasks, split_unmapped_facts
 from standardize.dedupe import assign_fact_ids, dedupe_facts
 from standardize.derive import derive_formula_facts
 from standardize.feedback import apply_review_actions, build_delta_reports, export_review_actions_template, parse_review_actions_file
@@ -28,11 +29,13 @@ from standardize.normalize.tables import standardize_page
 from standardize.overrides.periods import apply_period_overrides
 from standardize.overrides.storage import ensure_override_store
 from standardize.overrides.suppression import apply_suppression_overrides
+from standardize.promotion import apply_promotions, build_promotion_delta, export_promotion_actions_template, parse_promotion_actions_file
 from standardize.providers.aliyun import extract_aliyun_data
 from standardize.review import build_review_queue
 from standardize.routing.page_selector import build_page_selection
 from standardize.routing.secondary_ocr import materialize_reocr_inputs
 from standardize.statement import resolve_single_period_annual_roles, run_full_run_contract, specialize_statement_types
+from standardize.target import build_stage7_kpis, build_target_kpis, build_target_review_backlogs, investigate_no_source_gaps, repair_benchmark_alignment, scope_facts_to_targets
 from standardize.validation import run_validation
 
 
@@ -1298,6 +1301,282 @@ class StandardizeTests(unittest.TestCase):
             )
             self.assertTrue(gap_payload["summary"]["gaps_total"] >= 1)
 
+    def test_stage7_benchmark_alignment_repair(self):
+        facts = [
+            self.make_fact(
+                mapping_code="ZT_138",
+                mapping_name="营业收入",
+                statement_type="income_statement",
+                period_key="2022年度__本期",
+                report_date_norm="2022年度",
+                period_role_norm="本期",
+                value_num=100.0,
+                value_raw="100",
+            )
+        ]
+        payload = {
+            "summary": {"missing_in_auto": 3},
+            "cell_rows": [
+                {
+                    "mapping_code": "ZT_138",
+                    "mapping_name": "营业收入",
+                    "benchmark_header": "金额",
+                    "aligned_period_key": "",
+                    "benchmark_value": 100.0,
+                    "auto_value": "",
+                    "status": "missing_in_auto",
+                    "reason": "legacy_header_unsupported",
+                },
+                {
+                    "mapping_code": "ZT_014",
+                    "mapping_name": "其他应收款项",
+                    "benchmark_header": "期末",
+                    "aligned_period_key": "2022-12-31__期末数",
+                    "benchmark_value": 200.0,
+                    "auto_value": "",
+                    "status": "missing_in_auto",
+                    "reason": "legacy_role_exact_date_match",
+                },
+                {
+                    "mapping_code": "ZT_175",
+                    "mapping_name": "营业外收入",
+                    "benchmark_header": "金额",
+                    "aligned_period_key": "",
+                    "benchmark_value": 50.0,
+                    "auto_value": "",
+                    "status": "missing_in_auto",
+                    "reason": "legacy_header_unsupported",
+                },
+            ],
+            "export_period_headers": ["2022年度__本期", "2023年度__本期", "2022-12-31__期末数"],
+            "export_rows_map": {
+                "ZT_138": {"mapping_code": "ZT_138", "values": {"2022年度__本期": 100.0}},
+                "ZT_014": {"mapping_code": "ZT_014", "values": {"2022-12-31__期末数": ""}},
+            },
+        }
+        repaired = repair_benchmark_alignment(payload, facts, {"legacy_amount_headers": ["金额"], "annual_amount_statement_types": ["income_statement", "cash_flow"]})
+        income_row = next(row for row in repaired["cell_rows"] if row["mapping_code"] == "ZT_138")
+        self.assertEqual(income_row["aligned_period_key"], "2022年度__本期")
+        self.assertEqual(income_row["status"], "match")
+        self.assertEqual(repaired["summary"]["missing_in_auto_true"], 1)
+        self.assertEqual(repaired["summary"]["alignment_only_gap_total"], 1)
+        self.assertEqual(repaired["summary"]["ambiguous_alignment_total"], 1)
+
+    def test_stage7_target_scoping_and_backlog_split(self):
+        facts, scope_rows, summary = scope_facts_to_targets(
+            facts=[
+                self.make_fact(
+                    fact_id="F_MAIN",
+                    statement_type="income_statement",
+                    mapping_code="ZT_138",
+                    mapping_name="营业收入",
+                    row_label_raw="一、主营业务收入",
+                    row_label_std="主营业务收入",
+                    row_label_norm="主营业务收入",
+                    row_label_canonical_candidate="营业收入",
+                ),
+                self.make_fact(
+                    fact_id="F_NOTE",
+                    statement_type="note",
+                    mapping_code="",
+                    mapping_name="",
+                    row_label_raw="1年以内",
+                    row_label_std="1年以内",
+                    row_label_norm="1年以内",
+                    row_label_canonical_candidate="1年以内",
+                ),
+            ],
+            benchmark_payload={"rows": [{"mapping_code": "ZT_138"}]},
+            rules={
+                "main_statement_types": ["income_statement", "balance_sheet", "cash_flow", "changes_in_equity"],
+                "note_detail_patterns": {"aging_bucket": ["1年以内"], "company_like": [], "note_detail_headers": []},
+                "note_aggregation_keywords": ["合计"],
+                "promoted_rules": [],
+            },
+        )
+        self.assertEqual(facts[0].target_scope, "main_export_target")
+        self.assertEqual(facts[1].target_scope, "note_detail")
+        self.assertEqual(summary["scope_breakdown"]["main_export_target"], 1)
+        review_items = [
+            ReviewQueueRecord(
+                review_id="REV_MAIN",
+                priority_score=5.0,
+                reason_codes=["mapping:unmapped"],
+                doc_id="demo",
+                page_no=1,
+                statement_type="income_statement",
+                row_label_raw="主营业务收入",
+                row_label_std="主营业务收入",
+                period_key="2022年度__本期",
+                value_raw="100",
+                value_num=100.0,
+                provider="aliyun_table",
+                source_file="page1.json",
+                bbox="",
+                related_fact_ids=["F_MAIN"],
+                related_conflict_ids=[],
+                related_validation_ids=[],
+                mapping_candidates="",
+                evidence_cell_path="",
+                evidence_row_path="",
+                evidence_table_path="",
+                meta_json="",
+            ),
+            ReviewQueueRecord(
+                review_id="REV_NOTE",
+                priority_score=1.0,
+                reason_codes=["mapping:unmapped"],
+                doc_id="demo",
+                page_no=2,
+                statement_type="note",
+                row_label_raw="1年以内",
+                row_label_std="1年以内",
+                period_key="2022-12-31__期末数",
+                value_raw="",
+                value_num=None,
+                provider="aliyun_table",
+                source_file="page2.json",
+                bbox="",
+                related_fact_ids=["F_NOTE"],
+                related_conflict_ids=[],
+                related_validation_ids=[],
+                mapping_candidates="",
+                evidence_cell_path="",
+                evidence_row_path="",
+                evidence_table_path="",
+                meta_json="",
+            ),
+        ]
+        main_rows, note_rows, suppressed_rows, backlog_summary = build_target_review_backlogs(review_items, facts)
+        self.assertEqual(len(main_rows), 1)
+        self.assertEqual(len(note_rows), 1)
+        self.assertEqual(len(suppressed_rows), 1)
+        self.assertEqual(backlog_summary["main_target_review_total"], 1)
+
+    def test_stage7_promotion_workflow(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_dir = Path(tmpdir)
+            (config_dir / "curated_alias_pack.yml").write_text("aliases: []\n", encoding="utf-8")
+            (config_dir / "curated_formula_pack.yml").write_text("rules: []\n", encoding="utf-8")
+            (config_dir / "target_scope_rules.yml").write_text("promoted_rules: []\n", encoding="utf-8")
+            rows = [
+                {
+                    "promotion_id": "PROM_1",
+                    "candidate_alias": "固定资产原价",
+                    "canonical_code": "ZT_046",
+                    "canonical_name": "固定资产原值",
+                    "statement_type": "balance_sheet",
+                    "action_type": "promote_alias",
+                    "action_value": "",
+                },
+                {
+                    "promotion_id": "PROM_2",
+                    "rule_id": "sum_receivables",
+                    "formula_payload_json": json.dumps(
+                        {
+                            "rule_id": "sum_receivables",
+                            "rule_type": "sum",
+                            "target_code": "ZT_009",
+                            "target_name": "应收票据及应收账款",
+                            "children": ["ZT_007", "ZT_008"],
+                            "statement_types": ["balance_sheet"],
+                            "enabled": True,
+                        },
+                        ensure_ascii=False,
+                    ),
+                    "action_type": "promote_formula_rule",
+                    "action_value": "",
+                },
+                {
+                    "promotion_id": "PROM_3",
+                    "action_type": "reject",
+                    "action_value": "not safe",
+                },
+            ]
+            applied, rejected, audit_rows, summary = apply_promotions(rows, config_dir, {"supported_action_types": ["promote_alias", "promote_formula_rule", "reject"]})
+            self.assertEqual(len(applied), 2)
+            self.assertEqual(len(rejected), 1)
+            self.assertTrue(audit_rows)
+            alias_payload = json.loads(json.dumps(yaml.safe_load((config_dir / "curated_alias_pack.yml").read_text(encoding="utf-8"))))
+            self.assertTrue(any(item.get("alias") == "固定资产原价" for item in alias_payload.get("aliases", [])))
+            formula_payload = json.loads(json.dumps(yaml.safe_load((config_dir / "curated_formula_pack.yml").read_text(encoding="utf-8"))))
+            self.assertTrue(any(item.get("rule_id") == "sum_receivables" for item in formula_payload.get("rules", [])))
+            delta = build_promotion_delta(
+                before={"target_missing_total": 10, "target_mapped_ratio": 0.1, "target_amount_coverage_ratio": 0.2, "exportable_facts_total": 5, "benchmark_missing_true_total": 8},
+                after={"run_id": "RUN_TEST", "target_missing_total": 8, "target_mapped_ratio": 0.2, "target_amount_coverage_ratio": 0.3, "exportable_facts_total": 6, "benchmark_missing_true_total": 6},
+            )
+            self.assertEqual(delta["rows"][0]["metric"], "target_missing_total")
+
+    def test_stage7_no_source_investigation(self):
+        gap_rows = [
+            {"mapping_code": "ZT_001", "mapping_name": "货币资金", "aligned_period_key": "2022-12-31__期末数", "benchmark_value": 100.0},
+            {"mapping_code": "ZT_002", "mapping_name": "交易性金融资产", "aligned_period_key": "2022-12-31__期末数", "benchmark_value": 50.0},
+        ]
+        result = investigate_no_source_gaps(
+            benchmark_missing_true_rows=gap_rows,
+            facts_raw=[],
+            facts_deduped=[],
+            unplaced_rows=[{"mapping_code": "ZT_001", "period_key": "2022-12-31__期末数", "fact_id": "F1"}],
+            derived_facts=[],
+            review_items=[],
+            issues=[],
+        )
+        causes = {row["mapping_code"]: row["gap_cause"] for row in result["rows"]}
+        self.assertEqual(causes["ZT_001"], "source_exists_but_unplaced")
+        self.assertEqual(causes["ZT_002"], "truly_no_source")
+        self.assertEqual(result["backfill_summary"]["tasks_total"], 1)
+
+    def test_stage7_export_blocks_note_detail_and_writes_helper_sheets(self):
+        repo_root = Path(__file__).resolve().parent
+        template_path = repo_root.parent / "会计报表.xlsx"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_dir = Path(tmpdir)
+            facts = assign_fact_ids(
+                [
+                    self.make_fact(
+                        mapping_code="ZT_001",
+                        mapping_name="货币资金",
+                        row_label_std="货币资金",
+                        period_key="2022-12-31__期末数",
+                        report_date_norm="2022-12-31",
+                        period_role_norm="期末数",
+                        value_raw="100",
+                        value_num=100.0,
+                        target_scope="main_export_target",
+                    ),
+                    self.make_fact(
+                        mapping_code="ZT_014",
+                        mapping_name="其他应收款项",
+                        row_label_std="账龄1年以内",
+                        period_key="2022-12-31__期末数",
+                        report_date_norm="2022-12-31",
+                        period_role_norm="期末数",
+                        value_raw="50",
+                        value_num=50.0,
+                        target_scope="note_detail",
+                    ),
+                ]
+            )
+            stats = export_template(
+                template_path=template_path,
+                output_path=output_dir / "会计报表_填充结果.xlsx",
+                facts=facts,
+                run_summary={"unknown_date_total": 0},
+                issues=[],
+                validations=[],
+                duplicates=[],
+                conflicts=[],
+                review_queue=[],
+                applied_actions=[],
+                export_rules={"allowed_statuses": ["observed", "repaired"], "required_helper_sheets": ["_benchmark_alignment", "_target_gap_backlog", "_promotions"], "blocked_target_scopes": ["note_detail"]},
+            )
+            workbook = load_workbook(output_dir / "会计报表_填充结果.xlsx")
+            self.assertIn("_benchmark_alignment", workbook.sheetnames)
+            self.assertIn("_target_gap_backlog", workbook.sheetnames)
+            self.assertIn("_promotions", workbook.sheetnames)
+            self.assertEqual(stats["unplaced_count"], 1)
+            self.assertEqual(stats["unplaced_rows"][0]["unplaced_reason"], "target_scope_blocked:note_detail")
+
     def test_run_manifest(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             output_dir = Path(tmpdir) / "normalized"
@@ -1328,7 +1607,7 @@ class StandardizeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             tmpdir_path = Path(tmpdir)
             input_dir = tmpdir_path / "outputs"
-            output_dir = tmpdir_path / "normalized"
+            output_root = tmpdir_path / "normalized_archive"
 
             self.copy_sample_page_0004(repo_root, input_dir)
 
@@ -1339,7 +1618,7 @@ class StandardizeTests(unittest.TestCase):
                     "--template",
                     str(template_path),
                     "--output-dir",
-                    str(output_dir),
+                    str(output_root),
                     "--source-image-dir",
                     str(repo_root / "data"),
                     "--provider-priority",
@@ -1366,11 +1645,18 @@ class StandardizeTests(unittest.TestCase):
                     "--enable-main-statement-specialization",
                     "--enable-single-period-role-inference",
                     "--emit-stage6-kpis",
+                    "--enable-benchmark-alignment-repair",
+                    "--enable-export-target-scoping",
+                    "--emit-promotion-template",
+                    "--emit-stage7-kpis",
                     "--strict-full-run-contract",
                 ]
             )
 
             self.assertEqual(exit_code, 0)
+            run_dirs = self.list_cli_run_dirs(output_root)
+            self.assertEqual(len(run_dirs), 1)
+            output_dir = run_dirs[0]
             for filename in [
                 "cells.csv",
                 "facts_raw.csv",
@@ -1398,6 +1684,10 @@ class StandardizeTests(unittest.TestCase):
                 "artifact_manifest.csv",
                 "benchmark_summary.json",
                 "benchmark_missing_in_auto.csv",
+                "benchmark_missing_true.csv",
+                "benchmark_alignment_audit.csv",
+                "benchmark_alignment_summary.json",
+                "benchmark_alignment_only.csv",
                 "benchmark_gap_explanations.csv",
                 "derived_facts.csv",
                 "derived_formula_summary.json",
@@ -1409,6 +1699,20 @@ class StandardizeTests(unittest.TestCase):
                 "review_actionable.csv",
                 "reocr_task_pruned.csv",
                 "stage6_kpi_summary.json",
+                "export_target_scope.csv",
+                "export_target_kpi_summary.json",
+                "main_target_review_queue.csv",
+                "note_detail_review_queue.csv",
+                "target_gap_backlog.csv",
+                "target_gap_summary.json",
+                "promotion_actions_template.xlsx",
+                "promotion_actions_template.csv",
+                "no_source_gap_investigation.csv",
+                "no_source_gap_summary.json",
+                "target_backfill_tasks.csv",
+                "target_backfill_summary.json",
+                "stage7_kpi_summary.json",
+                "curated_alias_pack_summary.json",
                 "full_run_contract_summary.json",
                 "run_summary.json",
                 "会计报表_填充结果.xlsx",
@@ -1440,6 +1744,9 @@ class StandardizeTests(unittest.TestCase):
             self.assertIn("_derived_facts", workbook.sheetnames)
             self.assertIn("_benchmark_summary", workbook.sheetnames)
             self.assertIn("_gap_explanations", workbook.sheetnames)
+            self.assertIn("_benchmark_alignment", workbook.sheetnames)
+            self.assertIn("_target_gap_backlog", workbook.sheetnames)
+            self.assertIn("_promotions", workbook.sheetnames)
             self.assertIn("_classification_audit", workbook.sheetnames)
             self.assertIn("_period_role_audit", workbook.sheetnames)
 
@@ -1456,47 +1763,82 @@ class StandardizeTests(unittest.TestCase):
                 writer.writeheader()
                 writer.writerow(sample_row)
 
-            second_exit_code = cli.main(
-                [
-                    "--input-dir",
-                    str(input_dir),
-                    "--template",
-                    str(template_path),
-                    "--output-dir",
-                    str(output_dir),
-                    "--source-image-dir",
-                    str(repo_root / "data"),
-                    "--provider-priority",
-                    "aliyun,tencent",
-                    "--enable-conflict-merge",
-                    "--enable-period-normalization",
-                    "--enable-dedupe",
-                    "--enable-validation",
-                    "--enable-integrity-check",
-                    "--enable-mapping-suggestions",
-                    "--enable-review-pack",
-                    "--enable-validation-aware-conflicts",
-                    "--emit-routing-plan",
-                    "--emit-reocr-tasks",
-                    "--emit-review-actions-template",
-                    "--review-actions-file",
-                    str(sample_action_file),
-                    "--apply-review-actions",
-                    "--materialize-reocr-inputs",
-                    "--emit-delta-report",
-                    "--benchmark-workbook",
-                    str(benchmark_path),
-                    "--emit-benchmark-report",
-                    "--enable-label-canonicalization",
-                    "--enable-derived-facts",
-                    "--emit-run-manifest",
-                    "--enable-main-statement-specialization",
-                    "--enable-single-period-role-inference",
-                    "--emit-stage6-kpis",
-                    "--strict-full-run-contract",
-                ]
-            )
+            with (output_dir / "promotion_actions_template.csv").open("r", encoding="utf-8-sig", newline="") as handle:
+                promotion_rows = list(csv.DictReader(handle))
+            self.assertTrue(promotion_rows)
+            promotion_row = next((row for row in promotion_rows if row.get("candidate_alias")), promotion_rows[0])
+            promotion_row["action_type"] = "promote_alias" if promotion_row.get("candidate_alias") else "reject"
+            promotion_row["reviewer_name"] = "tester"
+            promotion_row["review_status"] = "done"
+            promotion_file = output_dir / "promotion_actions_filled.csv"
+            with promotion_file.open("w", encoding="utf-8-sig", newline="") as handle:
+                writer = csv.DictWriter(handle, fieldnames=promotion_rows[0].keys())
+                writer.writeheader()
+                writer.writerow(promotion_row)
+
+            config_dir = repo_root / "standardize" / "config"
+            curated_paths = [
+                config_dir / "curated_alias_pack.yml",
+                config_dir / "curated_formula_pack.yml",
+                config_dir / "target_scope_rules.yml",
+                config_dir / "manual_overrides" / "placement_overrides.yml",
+            ]
+            curated_backup = {path: path.read_text(encoding="utf-8") for path in curated_paths}
+            try:
+                second_exit_code = cli.main(
+                    [
+                        "--input-dir",
+                        str(input_dir),
+                        "--template",
+                        str(template_path),
+                        "--output-dir",
+                        str(output_root),
+                        "--source-image-dir",
+                        str(repo_root / "data"),
+                        "--provider-priority",
+                        "aliyun,tencent",
+                        "--enable-conflict-merge",
+                        "--enable-period-normalization",
+                        "--enable-dedupe",
+                        "--enable-validation",
+                        "--enable-integrity-check",
+                        "--enable-mapping-suggestions",
+                        "--enable-review-pack",
+                        "--enable-validation-aware-conflicts",
+                        "--emit-routing-plan",
+                        "--emit-reocr-tasks",
+                        "--emit-review-actions-template",
+                        "--review-actions-file",
+                        str(sample_action_file),
+                        "--apply-review-actions",
+                        "--materialize-reocr-inputs",
+                        "--emit-delta-report",
+                        "--benchmark-workbook",
+                        str(benchmark_path),
+                        "--emit-benchmark-report",
+                        "--enable-label-canonicalization",
+                        "--enable-derived-facts",
+                        "--emit-run-manifest",
+                        "--enable-main-statement-specialization",
+                        "--enable-single-period-role-inference",
+                        "--emit-stage6-kpis",
+                        "--enable-benchmark-alignment-repair",
+                        "--enable-export-target-scoping",
+                        "--emit-promotion-template",
+                        "--promotion-actions-file",
+                        str(promotion_file),
+                        "--apply-promotions",
+                        "--emit-stage7-kpis",
+                        "--strict-full-run-contract",
+                    ]
+                )
+            finally:
+                for path, content in curated_backup.items():
+                    path.write_text(content, encoding="utf-8")
             self.assertEqual(second_exit_code, 0)
+            second_run_dirs = self.list_cli_run_dirs(output_root)
+            self.assertEqual(len(second_run_dirs), 2)
+            second_output_dir = next(path for path in second_run_dirs if path != output_dir)
             for filename in [
                 "applied_review_actions.csv",
                 "override_audit.csv",
@@ -1508,10 +1850,31 @@ class StandardizeTests(unittest.TestCase):
                 "top_resolved_items.csv",
                 "review_priority_backlog.csv",
                 "mapping_opportunities.csv",
+                "applied_promotions.csv",
+                "rejected_promotions.csv",
+                "promotion_audit.csv",
+                "promotion_delta.json",
+                "promotion_delta.csv",
+                "promoted_aliases.csv",
+                "promoted_formula_rules.csv",
+                "stage7_kpi_summary.json",
             ]:
-                self.assertTrue((output_dir / filename).exists(), filename)
-            workbook = load_workbook(output_dir / "会计报表_填充结果.xlsx")
+                self.assertTrue((second_output_dir / filename).exists(), filename)
+            workbook = load_workbook(second_output_dir / "会计报表_填充结果.xlsx")
             self.assertIn("_applied_actions", workbook.sheetnames)
+            self.assertIn("_promotions", workbook.sheetnames)
+
+    def list_cli_run_dirs(self, output_root: Path) -> list[Path]:
+        if not output_root.exists():
+            return []
+        return sorted(
+            [
+                path
+                for path in output_root.iterdir()
+                if path.is_dir() and not path.name.startswith("_") and (path / "run_summary.json").exists()
+            ],
+            key=lambda path: path.stat().st_mtime,
+        )
 
     def copy_sample_page_0004(self, repo_root: Path, input_dir: Path) -> None:
         doc_name = "债务人审计报告-2022年"

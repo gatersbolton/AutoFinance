@@ -4,6 +4,10 @@ blocked_period_roles:
   - unknown
 blocked_report_dates:
   - unknown_date
+blocked_target_scopes:
+  - note_detail
+  - note_aggregation
+  - non_target_noise
 allowed_statuses:
   - observed
   - repaired

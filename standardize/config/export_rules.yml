@@ -10,6 +10,9 @@ required_helper_sheets:
   - _derived_facts
   - _benchmark_summary
   - _gap_explanations
+  - _benchmark_alignment
+  - _target_gap_backlog
+  - _promotions
   - _classification_audit
   - _period_role_audit
 allowed_statuses:

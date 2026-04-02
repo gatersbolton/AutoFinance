@@ -20,6 +20,7 @@ def classify_export_blocker(fact: FactRecord, export_rules: Dict[str, Any] | Non
     blocked_statement_types = set(export_rules.get("blocked_statement_types", ["unknown"]))
     blocked_period_roles = set(export_rules.get("blocked_period_roles", ["unknown"]))
     blocked_report_dates = set(export_rules.get("blocked_report_dates", ["unknown_date"]))
+    blocked_target_scopes = set(export_rules.get("blocked_target_scopes", ["note_detail", "note_aggregation", "non_target_noise"]))
     allowed_statuses = set(export_rules.get("allowed_statuses", sorted(DEFAULT_ALLOWED_STATUSES)))
 
     if not fact.mapping_code:
@@ -32,6 +33,8 @@ def classify_export_blocker(fact: FactRecord, export_rules: Dict[str, Any] | Non
         return "non_numeric_or_blank"
     if fact.statement_type in blocked_statement_types:
         return f"statement_type_blocked:{fact.statement_type}"
+    if fact.target_scope and fact.target_scope in blocked_target_scopes:
+        return f"target_scope_blocked:{fact.target_scope}"
     if not fact.report_date_norm or fact.report_date_norm in blocked_report_dates:
         return "unknown_date"
     if not fact.period_role_norm or fact.period_role_norm in blocked_period_roles:

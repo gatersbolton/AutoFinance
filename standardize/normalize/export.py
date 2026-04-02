@@ -49,6 +49,9 @@ def export_template(
     applied_actions: List[Dict[str, Any]] | None = None,
     classification_audit: List[Dict[str, Any]] | None = None,
     period_role_audit: List[Dict[str, Any]] | None = None,
+    benchmark_alignment_rows: List[Dict[str, Any]] | None = None,
+    target_gap_backlog_rows: List[Dict[str, Any]] | None = None,
+    promotion_rows: List[Dict[str, Any]] | None = None,
     export_rules: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     export_rules = export_rules or {}
@@ -111,6 +114,9 @@ def export_template(
     replace_sheet_with_rows(workbook, "_period_role_audit", period_role_audit or [])
     replace_sheet_with_key_values(workbook, "_benchmark_summary", {})
     replace_sheet_with_rows(workbook, "_gap_explanations", [])
+    replace_sheet_with_rows(workbook, "_benchmark_alignment", benchmark_alignment_rows or [])
+    replace_sheet_with_rows(workbook, "_target_gap_backlog", target_gap_backlog_rows or [])
+    replace_sheet_with_rows(workbook, "_promotions", promotion_rows or [])
     workbook.save(output_path)
     return {
         "written_cells": written,
@@ -133,6 +139,9 @@ def export_template(
             "_period_role_audit",
             "_benchmark_summary",
             "_gap_explanations",
+            "_benchmark_alignment",
+            "_target_gap_backlog",
+            "_promotions",
         ],
         "source_facts": "facts_deduped",
         "unplaced_count": len(unplaced_rows),
@@ -297,6 +306,9 @@ def rewrite_stage5_helper_sheets(
     derived_facts: List[FactRecord] | None = None,
     classification_audit: List[Dict[str, Any]] | None = None,
     period_role_audit: List[Dict[str, Any]] | None = None,
+    benchmark_alignment_rows: List[Dict[str, Any]] | None = None,
+    target_gap_backlog_rows: List[Dict[str, Any]] | None = None,
+    promotion_rows: List[Dict[str, Any]] | None = None,
 ) -> None:
     workbook = load_workbook(output_path)
     replace_sheet_with_key_values(workbook, "_benchmark_summary", benchmark_summary or {})
@@ -304,4 +316,7 @@ def rewrite_stage5_helper_sheets(
     replace_sheet_with_rows(workbook, "_derived_facts", derived_facts or [])
     replace_sheet_with_rows(workbook, "_classification_audit", classification_audit or [])
     replace_sheet_with_rows(workbook, "_period_role_audit", period_role_audit or [])
+    replace_sheet_with_rows(workbook, "_benchmark_alignment", benchmark_alignment_rows or [])
+    replace_sheet_with_rows(workbook, "_target_gap_backlog", target_gap_backlog_rows or [])
+    replace_sheet_with_rows(workbook, "_promotions", promotion_rows or [])
     workbook.save(output_path)

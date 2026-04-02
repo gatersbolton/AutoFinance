@@ -201,6 +201,10 @@ class FactRecord:
     statement_type_reason: str = ""
     period_role_inference_reason: str = ""
     period_role_inference_source: str = ""
+    target_scope: str = ""
+    target_scope_reason: str = ""
+    benchmark_alignment_status: str = ""
+    benchmark_alignment_reason: str = ""
 
 
 @dataclass
@@ -418,6 +422,7 @@ class AliasRecord:
     alias: str
     alias_type: str
     enabled: bool
+    statement_types: List[str] = field(default_factory=list)
     note: str = ""
 
 

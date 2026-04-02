@@ -1,4 +1,4 @@
-snapshot_root: normalized_runs
+snapshot_root: _snapshots
 core_artifacts:
   - run_summary.json
   - artifact_integrity.json

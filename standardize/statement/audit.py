@@ -32,11 +32,22 @@ def run_full_run_contract(
             "benchmark_summary.json",
             "benchmark_summary.csv",
             "benchmark_missing_in_auto.csv",
+            "benchmark_missing_true.csv",
+            "benchmark_alignment_audit.csv",
+            "benchmark_alignment_summary.json",
             "benchmark_value_diff.csv",
             "benchmark_gap_explanations.csv",
             "benchmark_gap_summary.json",
         }
         add_check(checks, "benchmark_outputs_present", required.issubset(produced), {"required": sorted(required), "produced": sorted(produced)})
+    if feature_flags.get("enable_benchmark_alignment_repair"):
+        required = {
+            "benchmark_alignment_audit.csv",
+            "benchmark_alignment_summary.json",
+            "benchmark_missing_true.csv",
+            "benchmark_alignment_only.csv",
+        }
+        add_check(checks, "benchmark_alignment_outputs_present", required.issubset(produced), {"required": sorted(required), "produced": sorted(produced)})
     if feature_flags.get("enable_derived_facts"):
         required = {
             "derived_facts.csv",
@@ -45,6 +56,30 @@ def run_full_run_contract(
             "derived_conflicts.csv",
         }
         add_check(checks, "derived_outputs_present", required.issubset(produced), {"required": sorted(required), "produced": sorted(produced)})
+    if feature_flags.get("enable_export_target_scoping"):
+        required = {
+            "export_target_scope.csv",
+            "export_target_kpi_summary.json",
+            "main_target_review_queue.csv",
+            "note_detail_review_queue.csv",
+            "target_gap_backlog.csv",
+            "target_gap_summary.json",
+        }
+        add_check(checks, "target_scope_outputs_present", required.issubset(produced), {"required": sorted(required), "produced": sorted(produced)})
+    if feature_flags.get("emit_promotion_template"):
+        required = {"promotion_actions_template.xlsx", "promotion_actions_template.csv"}
+        add_check(checks, "promotion_template_outputs_present", required.issubset(produced), {"required": sorted(required), "produced": sorted(produced)})
+    if feature_flags.get("apply_promotions"):
+        required = {
+            "applied_promotions.csv",
+            "rejected_promotions.csv",
+            "promotion_audit.csv",
+            "promotion_delta.json",
+            "promotion_delta.csv",
+            "promoted_aliases.csv",
+            "promoted_formula_rules.csv",
+        }
+        add_check(checks, "promotion_outputs_present", required.issubset(produced), {"required": sorted(required), "produced": sorted(produced)})
     if feature_flags.get("emit_run_manifest"):
         required = {"run_manifest.json", "artifact_manifest.csv"}
         add_check(checks, "manifest_outputs_present", required.issubset(produced), {"required": sorted(required), "produced": sorted(produced)})
@@ -85,8 +120,16 @@ def build_required_artifacts(feature_flags: Dict[str, Any]) -> List[str]:
     required = ["run_summary.json", "summary.json", "会计报表_填充结果.xlsx"]
     if feature_flags.get("emit_benchmark_report"):
         required.extend(["benchmark_summary.json", "benchmark_gap_summary.json"])
+    if feature_flags.get("enable_benchmark_alignment_repair"):
+        required.extend(["benchmark_alignment_summary.json", "benchmark_missing_true.csv"])
     if feature_flags.get("enable_derived_facts"):
         required.extend(["derived_formula_summary.json", "derived_facts.csv"])
+    if feature_flags.get("enable_export_target_scoping"):
+        required.extend(["export_target_kpi_summary.json", "target_gap_backlog.csv"])
+    if feature_flags.get("emit_promotion_template"):
+        required.extend(["promotion_actions_template.xlsx", "promotion_actions_template.csv"])
+    if feature_flags.get("apply_promotions"):
+        required.extend(["applied_promotions.csv", "promotion_delta.json"])
     if feature_flags.get("emit_run_manifest"):
         required.extend(["run_manifest.json", "artifact_manifest.csv"])
     return required

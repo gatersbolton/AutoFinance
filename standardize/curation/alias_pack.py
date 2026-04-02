@@ -1,9 +1,14 @@
 from __future__ import annotations
 
 from collections import Counter, defaultdict
+from pathlib import Path
 from typing import Any, Dict, List, Sequence, Tuple
 
+import yaml
+
 from ..models import FactRecord, MappingCandidateRecord
+from ..models import AliasRecord, TemplateSubject
+from ..normalize.text import normalize_label_for_matching
 
 
 def split_unmapped_facts(facts: Sequence[FactRecord]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], Dict[str, Any]]:
@@ -147,3 +152,58 @@ def build_benchmark_support(benchmark_missing_rows: Sequence[Dict[str, Any]]) ->
             continue
         support[(row.get("mapping_code", ""), row.get("aligned_period_key", ""), amount)] += 1
     return support
+
+
+def load_curated_alias_records(config_path: Path, subjects: Sequence[TemplateSubject]) -> Tuple[List[AliasRecord], List[Dict[str, Any]], Dict[str, Any]]:
+    if not config_path.exists():
+        return [], [], {"run_id": "", "entries_total": 0, "enabled_total": 0}
+    payload = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+    subject_by_code = {subject.code: subject for subject in subjects}
+    subject_by_name = {normalize_label_for_matching(subject.canonical_name): subject for subject in subjects}
+    records: List[AliasRecord] = []
+    audit_rows: List[Dict[str, Any]] = []
+    enabled_total = 0
+    for item in payload.get("aliases", []):
+        if not isinstance(item, dict):
+            continue
+        subject = None
+        canonical_code = str(item.get("canonical_code", "")).strip()
+        canonical_name = str(item.get("canonical_name", "")).strip()
+        if canonical_code and canonical_code in subject_by_code:
+            subject = subject_by_code[canonical_code]
+        elif canonical_name:
+            subject = subject_by_name.get(normalize_label_for_matching(canonical_name))
+        if subject is None:
+            continue
+        alias_type = str(item.get("alias_type", "exact_alias")).strip() or "exact_alias"
+        enabled = bool(item.get("enabled", True))
+        record = AliasRecord(
+            canonical_code=subject.code,
+            canonical_name=subject.canonical_name,
+            alias=str(item.get("alias", "")).strip(),
+            alias_type=alias_type,
+            enabled=enabled,
+            statement_types=[str(value).strip() for value in item.get("statement_types", []) if str(value).strip()],
+            note=str(item.get("note", "")).strip(),
+        )
+        records.append(record)
+        if enabled:
+            enabled_total += 1
+        audit_rows.append(
+            {
+                "run_id": "",
+                "canonical_code": subject.code,
+                "canonical_name": subject.canonical_name,
+                "alias": record.alias,
+                "alias_type": alias_type,
+                "enabled": enabled,
+                "statement_types": list(record.statement_types),
+                "note": record.note,
+            }
+        )
+    return records, audit_rows, {
+        "run_id": "",
+        "entries_total": len(audit_rows),
+        "enabled_total": enabled_total,
+        "review_required_total": sum(1 for row in audit_rows if str(row.get("alias_type", "")).endswith("review_required_alias")),
+    }

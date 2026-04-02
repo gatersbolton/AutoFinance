@@ -51,7 +51,11 @@ def apply_subject_mapping(
             stats["mapped_by_exact"] += 1
             continue
 
-        alias_matches = alias_lookup.get(normalized_label, [])
+        alias_matches = [
+            item
+            for item in alias_lookup.get(normalized_label, [])
+            if not item[0].statement_types or fact.statement_type in item[0].statement_types
+        ]
         if alias_matches:
             alias_record, subject = sorted(alias_matches, key=lambda item: (0 if item[0].alias_type == "exact_alias" else 1, item[1].code))[0]
             fact.mapping_code = subject.code

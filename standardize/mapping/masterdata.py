@@ -82,6 +82,7 @@ def load_alias_records(config_path: Path, subjects: List[TemplateSubject]) -> Li
                         alias=str(alias).strip(),
                         alias_type="exact_alias",
                         enabled=True,
+                        statement_types=[],
                         note="migrated_from_stage2_dict",
                     )
                 )
@@ -109,6 +110,7 @@ def load_alias_records(config_path: Path, subjects: List[TemplateSubject]) -> Li
                 alias=str(item.get("alias", "")).strip(),
                 alias_type=str(item.get("alias_type", "exact_alias")).strip() or "exact_alias",
                 enabled=bool(item.get("enabled", True)),
+                statement_types=[str(value).strip() for value in item.get("statement_types", []) if str(value).strip()],
                 note=str(item.get("note", "")).strip(),
             )
         )

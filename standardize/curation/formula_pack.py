@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from pathlib import Path
 from typing import Any, Dict, List, Sequence, Tuple
+
+import yaml
 
 from ..models import FactRecord
 
@@ -51,3 +54,11 @@ def extract_rule_id(fact: FactRecord) -> str:
     if len(parts) >= 4:
         return parts[3]
     return fact.source_cell_ref or "derived_formula"
+
+
+def load_curated_formula_rules(config_path: Path) -> Dict[str, Any]:
+    if not config_path.exists():
+        return {"rules": []}
+    payload = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+    rules = [rule for rule in payload.get("rules", []) if isinstance(rule, dict)]
+    return {"rules": rules}
