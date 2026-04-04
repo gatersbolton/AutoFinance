@@ -4,6 +4,7 @@ import json
 from typing import Any, Dict, List, Sequence, Tuple
 
 from ..models import ReOCRTaskRecord, ReviewQueueRecord
+from ..stable_ids import stable_id
 
 
 def build_actionable_backlog(
@@ -87,6 +88,10 @@ def prune_reocr_tasks(
             }
         )
     kept = drop_redundant_page_tasks(kept)
+    dedupe_input_total = len(kept)
+    duplicate_groups_before = count_duplicate_groups(kept)
+    kept = dedupe_reocr_rows(kept)
+    duplicate_groups_after = count_duplicate_groups(kept)
     return kept, {
         "reocr_tasks_total_before": len(tasks),
         "reocr_tasks_total_after": len(kept),
@@ -94,6 +99,9 @@ def prune_reocr_tasks(
         "dropped_note_detail_total": dropped_note_detail,
         "page_level_total_after": sum(1 for row in kept if row["granularity"] == "page"),
         "category_breakdown": count_by_key(kept, "category"),
+        "duplicate_groups_before": duplicate_groups_before,
+        "duplicate_groups_after": duplicate_groups_after,
+        "merged_task_count": max(dedupe_input_total - len(kept), 0),
     }
 
 
@@ -117,6 +125,92 @@ def categorize_review_item(item: ReviewQueueRecord | None) -> str:
 def drop_redundant_page_tasks(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     non_page_keys = {(row["doc_id"], row["page_no"]) for row in rows if row["granularity"] in {"cell", "row", "table"}}
     return [row for row in rows if not (row["granularity"] == "page" and (row["doc_id"], row["page_no"]) in non_page_keys)]
+
+
+def dedupe_reocr_rows(rows: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    grouped: Dict[Tuple[str, int, str, str, str, str], List[Dict[str, Any]]] = {}
+    for row in rows:
+        cluster_key = (
+            str(row.get("doc_id", "")).strip(),
+            int(row.get("page_no", 0) or 0),
+            normalize_bbox(row.get("bbox", "")),
+            str(row.get("logical_subtable_id", "") or row.get("table_id", "")).strip(),
+            str(row.get("category", "")).strip(),
+            str(row.get("expected_benefit", "")).strip(),
+        )
+        grouped.setdefault(cluster_key, []).append(dict(row))
+
+    deduped: List[Dict[str, Any]] = []
+    for cluster_key, cluster_rows in grouped.items():
+        ordered = sorted(
+            cluster_rows,
+            key=lambda row: (
+                granularity_rank(str(row.get("granularity", "")).strip()),
+                -float(row.get("priority_score", 0.0) or 0.0),
+                str(row.get("task_id", "")),
+            ),
+        )
+        selected = dict(ordered[0])
+        merged_task_ids = [str(row.get("task_id", "")).strip() for row in ordered]
+        merged_review_ids = [str(row.get("source_review_id", "")).strip() for row in ordered if str(row.get("source_review_id", "")).strip()]
+        selected["cluster_id"] = stable_id("REOCR_CLUSTER_", list(cluster_key) + merged_task_ids)
+        selected["merged_task_ids"] = json.dumps(merged_task_ids, ensure_ascii=False)
+        selected["merged_review_ids"] = json.dumps(sorted(set(merged_review_ids)), ensure_ascii=False)
+        selected["merged_task_count"] = len(merged_task_ids) - 1
+        selected["bbox_normalized"] = cluster_key[2]
+        deduped.append(selected)
+
+    deduped.sort(
+        key=lambda row: (
+            -float(row.get("priority_score", 0.0) or 0.0),
+            str(row.get("doc_id", "")),
+            int(row.get("page_no", 0) or 0),
+            str(row.get("task_id", "")),
+        )
+    )
+    return deduped
+
+
+def count_duplicate_groups(rows: Sequence[Dict[str, Any]]) -> int:
+    counter: Dict[Tuple[str, int, str, str, str, str], int] = {}
+    for row in rows:
+        cluster_key = (
+            str(row.get("doc_id", "")).strip(),
+            int(row.get("page_no", 0) or 0),
+            normalize_bbox(row.get("bbox", "")),
+            str(row.get("logical_subtable_id", "") or row.get("table_id", "")).strip(),
+            str(row.get("category", "")).strip(),
+            str(row.get("expected_benefit", "")).strip(),
+        )
+        counter[cluster_key] = counter.get(cluster_key, 0) + 1
+    return sum(1 for count in counter.values() if count > 1)
+
+
+def normalize_bbox(value: Any) -> str:
+    if isinstance(value, list):
+        parts = value
+    else:
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        try:
+            parts = json.loads(text)
+        except json.JSONDecodeError:
+            return text
+    if not isinstance(parts, list):
+        return str(parts)
+    normalized = []
+    for item in parts[:4]:
+        try:
+            normalized.append(str(int(round(float(item)))))
+        except (TypeError, ValueError):
+            normalized.append(str(item))
+    return ",".join(normalized)
+
+
+def granularity_rank(value: str) -> int:
+    order = {"cell": 0, "row": 1, "table": 2, "page": 3}
+    return order.get(value, 9)
 
 
 def count_by_key(rows: Sequence[Dict[str, Any]], key: str) -> Dict[str, int]:

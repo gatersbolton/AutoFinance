@@ -125,7 +125,12 @@ def repair_single_row(
     statement_type_hint = fact_index["statement_by_code"].get(row.get("mapping_code", ""), "")
 
     if raw_status == "missing_in_auto" and raw_reason in ALIGNMENT_REASONS:
-        if raw_reason == "legacy_header_unsupported":
+        runtime_override = lookup_runtime_alignment_override(row, rules)
+        if runtime_override:
+            repaired_period = runtime_override
+            repaired_reason = "runtime_alignment_override"
+            alignment_status = "alignment_only_gap"
+        elif raw_reason == "legacy_header_unsupported":
             repaired_period, repaired_reason, alignment_status = align_legacy_header(
                 row=row,
                 statement_type_hint=statement_type_hint,
@@ -176,6 +181,32 @@ def repair_single_row(
         "statement_type_hint": statement_type_hint,
     }
     return repaired, audit_row
+
+
+def lookup_runtime_alignment_override(row: Dict[str, Any], rules: Dict[str, Any]) -> str:
+    overrides = list(rules.get("runtime_alignment_overrides", []) or [])
+    mapping_code = str(row.get("mapping_code", "")).strip()
+    benchmark_header = str(row.get("benchmark_header", "")).strip()
+    benchmark_value = row.get("benchmark_value")
+    for item in overrides:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("mapping_code", "")).strip() != mapping_code:
+            continue
+        override_header = str(item.get("benchmark_header", "")).strip()
+        if override_header and override_header != benchmark_header:
+            continue
+        override_value = item.get("benchmark_value")
+        if override_value not in ("", None) and benchmark_value not in ("", None):
+            try:
+                if round(float(override_value), 6) != round(float(benchmark_value), 6):
+                    continue
+            except (TypeError, ValueError):
+                continue
+        aligned_period_key = str(item.get("aligned_period_key", "")).strip()
+        if aligned_period_key:
+            return aligned_period_key
+    return ""
 
 
 def align_legacy_header(

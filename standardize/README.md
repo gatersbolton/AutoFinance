@@ -28,6 +28,8 @@ python -m standardize.cli \
 - `conflicts.csv`: 多 provider 冲突与裁决
 - `mapping_review.csv`: 无法自动落模板的映射候选
 - `summary.json`: 本次运行摘要
+- `run_manifest.json` / `artifact_manifest_core.csv`: 运行 provenance 与核心 artifact 清单
+- `pipeline_stage_timings.json` / `pipeline_stage_status.json` / `pipeline_completion_summary.json`: 阶段耗时与完成诊断
 - `会计报表_填充结果.xlsx`: 模板副本和动态期间列
 
 ## 设计边界

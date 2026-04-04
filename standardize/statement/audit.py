@@ -7,6 +7,8 @@ from typing import Any, Dict, List, Sequence
 
 from openpyxl import load_workbook
 
+from ..metadata import scan_summary_run_ids
+
 
 def run_full_run_contract(
     output_dir: Path,
@@ -20,6 +22,7 @@ def run_full_run_contract(
     actual_sheets = list(workbook.sheetnames)
     checks: List[Dict[str, Any]] = []
     produced = {path.name for path in output_dir.iterdir() if path.is_file()}
+    required_summary_files = build_required_summary_files(feature_flags)
 
     add_check(
         checks,
@@ -81,7 +84,9 @@ def run_full_run_contract(
         }
         add_check(checks, "promotion_outputs_present", required.issubset(produced), {"required": sorted(required), "produced": sorted(produced)})
     if feature_flags.get("emit_run_manifest"):
-        required = {"run_manifest.json", "artifact_manifest.csv"}
+        required = {"run_manifest.json", "artifact_manifest_core.csv", "artifact_manifest.csv"}
+        if str(feature_flags.get("artifact_manifest_mode", "core")).strip().lower() == "full":
+            required.add("artifact_manifest_full.csv")
         add_check(checks, "manifest_outputs_present", required.issubset(produced), {"required": sorted(required), "produced": sorted(produced)})
         manifest = read_json(output_dir / "run_manifest.json")
         add_check(
@@ -90,7 +95,7 @@ def run_full_run_contract(
             str(manifest.get("run_id", "")) == run_id,
             {"expected_run_id": run_id, "manifest_run_id": manifest.get("run_id", "")},
         )
-        artifact_rows = read_csv_rows(output_dir / "artifact_manifest.csv")
+        artifact_rows = read_csv_rows(output_dir / "artifact_manifest_core.csv")
         artifact_run_ids = sorted({row.get("run_id", "") for row in artifact_rows if row.get("run_id")})
         add_check(
             checks,
@@ -104,20 +109,49 @@ def run_full_run_contract(
         str(export_stats.get("source_facts", "")) == "facts_deduped",
         {"source_facts": export_stats.get("source_facts", "")},
     )
+    metadata_contract = scan_summary_run_ids(
+        output_dir=output_dir,
+        expected_run_id=run_id,
+        required_summary_files=required_summary_files,
+    )
+    add_check(
+        checks,
+        "summary_run_ids_present_and_match",
+        bool(metadata_contract.get("pass", False)),
+        {
+            "required_summary_files": required_summary_files,
+            "checked_summary_files": metadata_contract.get("checked_summary_files", []),
+            "missing_run_id_files": metadata_contract.get("missing_run_id_files", []),
+            "mismatched_run_id_files": metadata_contract.get("mismatched_run_id_files", []),
+        },
+    )
     return {
         "run_id": run_id,
         "feature_flags": feature_flags,
         "required_artifacts": build_required_artifacts(feature_flags),
+        "required_summary_files": required_summary_files,
         "produced_artifacts": sorted(produced),
         "workbook_helper_sheets": actual_sheets,
         "checks_total": len(checks),
         "contract_fail_total": sum(1 for item in checks if item["status"] == "fail"),
+        "metadata_contract": metadata_contract,
         "checks": checks,
     }
 
 
 def build_required_artifacts(feature_flags: Dict[str, Any]) -> List[str]:
     required = ["run_summary.json", "summary.json", "会计报表_填充结果.xlsx"]
+    required.extend(
+        [
+            "pipeline_stage_timings.json",
+            "pipeline_stage_status.json",
+            "pipeline_completion_summary.json",
+            "pages_skipped_metric_audit.json",
+            "metadata_contract_summary.json",
+            "run_id_propagation_audit.json",
+            "hardening_summary.json",
+        ]
+    )
     if feature_flags.get("emit_benchmark_report"):
         required.extend(["benchmark_summary.json", "benchmark_gap_summary.json"])
     if feature_flags.get("enable_benchmark_alignment_repair"):
@@ -126,13 +160,80 @@ def build_required_artifacts(feature_flags: Dict[str, Any]) -> List[str]:
         required.extend(["derived_formula_summary.json", "derived_facts.csv"])
     if feature_flags.get("enable_export_target_scoping"):
         required.extend(["export_target_kpi_summary.json", "target_gap_backlog.csv"])
+        required.extend(["source_backed_gap_closure.csv", "source_backed_gap_closure_summary.json"])
+    if feature_flags.get("emit_reocr_tasks"):
+        required.extend(["reocr_task_pruned_deduped.csv", "reocr_dedupe_audit.json"])
     if feature_flags.get("emit_promotion_template"):
         required.extend(["promotion_actions_template.xlsx", "promotion_actions_template.csv"])
     if feature_flags.get("apply_promotions"):
         required.extend(["applied_promotions.csv", "promotion_delta.json"])
     if feature_flags.get("emit_run_manifest"):
-        required.extend(["run_manifest.json", "artifact_manifest.csv"])
+        required.extend(["run_manifest.json", "artifact_manifest_core.csv", "artifact_manifest.csv"])
+        if str(feature_flags.get("artifact_manifest_mode", "core")).strip().lower() == "full":
+            required.append("artifact_manifest_full.csv")
     return required
+
+
+def build_required_summary_files(feature_flags: Dict[str, Any]) -> List[str]:
+    required = [
+        "alias_acceptance_summary.json",
+        "coverage_opportunity_summary.json",
+        "curated_alias_pack_summary.json",
+        "hardening_summary.json",
+        "label_normalization_summary.json",
+        "mapping_lift_summary.json",
+        "metadata_contract_summary.json",
+        "pipeline_completion_summary.json",
+        "period_role_resolution_summary.json",
+        "review_actionable_summary.json",
+        "review_summary.json",
+        "run_summary.json",
+        "statement_classification_summary.json",
+        "summary.json",
+        "validation_summary.json",
+    ]
+    if feature_flags.get("emit_reocr_tasks"):
+        required.extend(
+            [
+                "reocr_task_pruned_summary.json",
+                "reocr_task_summary.json",
+            ]
+        )
+    if feature_flags.get("emit_benchmark_report"):
+        required.extend(
+            [
+                "benchmark_gap_summary.json",
+                "benchmark_summary.json",
+            ]
+        )
+    if feature_flags.get("enable_benchmark_alignment_repair"):
+        required.extend(
+            [
+                "benchmark_alignment_summary.json",
+                "benchmark_missing_true_summary.json",
+            ]
+        )
+    if feature_flags.get("enable_derived_facts"):
+        required.append("derived_formula_summary.json")
+    if feature_flags.get("enable_export_target_scoping"):
+        required.extend(
+            [
+                "export_target_kpi_summary.json",
+                "no_source_gap_summary.json",
+                "source_backed_gap_closure_summary.json",
+                "target_backfill_summary.json",
+                "target_gap_summary.json",
+            ]
+        )
+    if feature_flags.get("emit_delta_report"):
+        required.append("export_delta_summary.json")
+    if feature_flags.get("emit_stage6_kpis"):
+        required.append("stage6_kpi_summary.json")
+    if feature_flags.get("emit_stage7_kpis"):
+        required.append("stage7_kpi_summary.json")
+    if feature_flags.get("apply_promotions"):
+        pass
+    return sorted(set(required))
 
 
 def add_check(checks: List[Dict[str, Any]], name: str, ok: bool, meta: Dict[str, Any]) -> None:

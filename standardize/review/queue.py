@@ -22,6 +22,7 @@ def build_review_queue(
     output_dir: Path,
     review_config: Dict[str, object],
     generate_evidence: bool,
+    materialize_evidence_files: bool = True,
 ) -> Tuple[List[ReviewQueueRecord], Dict[str, object]]:
     fact_by_id = {fact.fact_id: fact for fact in facts}
     fact_by_source = defaultdict(list)
@@ -134,7 +135,14 @@ def build_review_queue(
         fact.review_id = review_items[-1].review_id
 
     if generate_evidence:
-        attach_review_evidence(review_items, cells, source_image_dir, output_dir, review_config)
+        attach_review_evidence(
+            review_items,
+            cells,
+            source_image_dir,
+            output_dir,
+            review_config,
+            materialize_files=materialize_evidence_files,
+        )
     summary = {
         "review_total": len(review_items),
         "reason_breakdown": dict(Counter(reason for item in review_items for reason in item.reason_codes)),

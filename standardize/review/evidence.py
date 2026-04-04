@@ -37,16 +37,22 @@ def attach_review_evidence(
     source_image_dir: Path | None,
     output_dir: Path,
     review_config: Dict[str, object],
+    *,
+    materialize_files: bool = True,
 ) -> List[Dict[str, str]]:
     pack_dir = output_dir / "review_pack"
-    pack_dir.mkdir(parents=True, exist_ok=True)
     index_rows: List[Dict[str, str]] = []
     if not review_items:
-        write_index(pack_dir / "index.csv", index_rows)
+        if materialize_files:
+            pack_dir.mkdir(parents=True, exist_ok=True)
+            write_index(pack_dir / "index.csv", index_rows)
         return index_rows
 
     by_ref, by_table, by_row = build_cell_index(cells)
     rendered_cache: Dict[str, Dict[int, Image.Image]] = {}
+
+    if materialize_files:
+        pack_dir.mkdir(parents=True, exist_ok=True)
 
     for item in review_items:
         try:
@@ -63,6 +69,9 @@ def attach_review_evidence(
         row_bbox = union_bbox([candidate.bbox_json for candidate in by_row.get(row_key, []) if candidate.bbox_json])
         table_bbox = union_bbox([candidate.bbox_json for candidate in by_table.get(table_key, []) if candidate.bbox_json])
         item.bbox = json.dumps({"cell_bbox": cell_bbox, "row_bbox": row_bbox, "table_bbox": table_bbox}, ensure_ascii=False)
+        if not materialize_files:
+            append_index(index_rows, item.review_id, "", "", "", "bbox_only")
+            continue
         if not source_image_dir:
             append_index(index_rows, item.review_id, "", "", "", "no_source_image")
             continue
@@ -76,7 +85,8 @@ def attach_review_evidence(
         item.evidence_table_path = save_crop(page_image, table_bbox, pack_dir / f"{item.review_id}_table.png", review_config)
         append_index(index_rows, item.review_id, item.evidence_cell_path, item.evidence_row_path, item.evidence_table_path, "ok")
 
-    write_index(pack_dir / "index.csv", index_rows)
+    if materialize_files:
+        write_index(pack_dir / "index.csv", index_rows)
     return index_rows
 
 

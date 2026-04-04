@@ -17,6 +17,7 @@ from standardize.derive import derive_formula_facts
 from standardize.feedback import apply_review_actions, build_delta_reports, export_review_actions_template, parse_review_actions_file
 from standardize.integrity import run_artifact_integrity
 from standardize.manifest import generate_run_id, write_run_manifest
+from standardize.metadata import evaluate_summary_payloads, prepare_nested_summary_payload, prepare_summary_payload, scan_summary_run_ids
 from standardize.mapping.review import apply_subject_mapping
 from standardize.models import AliasRecord, CellRecord, ConflictRecord, FactRecord, ProviderCell, ProviderPage, ReOCRTaskRecord, RelationRecord, ReviewQueueRecord, StatementMeta, TemplateSubject, ValidationResultRecord
 from standardize.normalize.conflicts import enrich_conflicts, resolve_conflicts
@@ -34,8 +35,19 @@ from standardize.providers.aliyun import extract_aliyun_data
 from standardize.review import build_review_queue
 from standardize.routing.page_selector import build_page_selection
 from standardize.routing.secondary_ocr import materialize_reocr_inputs
-from standardize.statement import resolve_single_period_annual_roles, run_full_run_contract, specialize_statement_types
-from standardize.target import build_stage7_kpis, build_target_kpis, build_target_review_backlogs, investigate_no_source_gaps, repair_benchmark_alignment, scope_facts_to_targets
+from standardize.statement import build_required_summary_files, resolve_single_period_annual_roles, run_full_run_contract, specialize_statement_types
+from standardize.target import (
+    apply_source_backed_gap_closures,
+    build_source_backed_gap_closure,
+    build_stage7_kpis,
+    build_target_kpis,
+    build_target_review_backlogs,
+    finalize_source_backed_gap_closure,
+    finalize_source_backed_gap_results,
+    investigate_no_source_gaps,
+    repair_benchmark_alignment,
+    scope_facts_to_targets,
+)
 from standardize.validation import run_validation
 
 
@@ -1204,6 +1216,204 @@ class StandardizeTests(unittest.TestCase):
             )
             self.assertGreater(summary["contract_fail_total"], 0)
 
+    def test_metadata_summary_helpers_and_scan(self):
+        payload = prepare_summary_payload({"run_id": "", "value": 1}, "RUN_TEST")
+        self.assertEqual(payload["run_id"], "RUN_TEST")
+        nested = prepare_nested_summary_payload(
+            {
+                "run_id": "",
+                "run_summary": {"run_id": "", "mapped_facts_ratio": 0.2},
+                "validation_summary": {"run_id": "", "validation_total": 3},
+            },
+            "RUN_TEST",
+        )
+        self.assertEqual(nested["run_id"], "RUN_TEST")
+        self.assertEqual(nested["run_summary"]["run_id"], "RUN_TEST")
+        self.assertEqual(nested["validation_summary"]["run_id"], "RUN_TEST")
+
+        issues = evaluate_summary_payloads(
+            [
+                ("a_summary.json", {"run_id": ""}),
+                ("b_summary.json", {"run_id": "RUN_OTHER"}),
+                ("c_summary.json", {"run_id": "RUN_TEST"}),
+            ],
+            "RUN_TEST",
+        )
+        self.assertEqual(issues["missing_run_id_files"], ["a_summary.json"])
+        self.assertEqual(issues["mismatched_run_id_files"][0]["file"], "b_summary.json")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            (base / "run_summary.json").write_text(json.dumps({"run_id": "RUN_TEST"}), encoding="utf-8")
+            (base / "review_summary.json").write_text(json.dumps({"run_id": ""}), encoding="utf-8")
+            scan = scan_summary_run_ids(base, "RUN_TEST", required_summary_files=["run_summary.json", "review_summary.json"])
+            self.assertFalse(scan["pass"])
+            self.assertIn("review_summary.json", scan["missing_run_id_files"])
+
+    def test_full_run_contract_fails_on_blank_summary_run_id(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            workbook_path = base / "wb.xlsx"
+            template_path = Path(__file__).resolve().parent.parent / "会计报表.xlsx"
+            shutil.copy2(template_path, workbook_path)
+            (base / "run_summary.json").write_text(json.dumps({"run_id": "RUN_TEST"}), encoding="utf-8")
+            (base / "summary.json").write_text(json.dumps({"run_id": "RUN_TEST"}), encoding="utf-8")
+            (base / "validation_summary.json").write_text(json.dumps({"run_id": "RUN_TEST"}), encoding="utf-8")
+            (base / "review_summary.json").write_text(json.dumps({"run_id": "RUN_TEST"}), encoding="utf-8")
+            (base / "alias_acceptance_summary.json").write_text(json.dumps({"run_id": "RUN_TEST"}), encoding="utf-8")
+            (base / "coverage_opportunity_summary.json").write_text(json.dumps({"run_id": "RUN_TEST"}), encoding="utf-8")
+            (base / "curated_alias_pack_summary.json").write_text(json.dumps({"run_id": ""}), encoding="utf-8")
+            (base / "hardening_summary.json").write_text(json.dumps({"run_id": "RUN_TEST"}), encoding="utf-8")
+            (base / "label_normalization_summary.json").write_text(json.dumps({"run_id": "RUN_TEST"}), encoding="utf-8")
+            (base / "mapping_lift_summary.json").write_text(json.dumps({"run_id": "RUN_TEST"}), encoding="utf-8")
+            (base / "metadata_contract_summary.json").write_text(json.dumps({"run_id": "RUN_TEST"}), encoding="utf-8")
+            (base / "period_role_resolution_summary.json").write_text(json.dumps({"run_id": "RUN_TEST"}), encoding="utf-8")
+            (base / "review_actionable_summary.json").write_text(json.dumps({"run_id": "RUN_TEST"}), encoding="utf-8")
+            (base / "statement_classification_summary.json").write_text(json.dumps({"run_id": "RUN_TEST"}), encoding="utf-8")
+            result = run_full_run_contract(
+                output_dir=base,
+                workbook_path=workbook_path,
+                run_id="RUN_TEST",
+                feature_flags={"emit_benchmark_report": False, "enable_derived_facts": False, "emit_run_manifest": False, "emit_reocr_tasks": False, "emit_stage6_kpis": False, "emit_stage7_kpis": False, "enable_export_target_scoping": False, "emit_delta_report": False, "apply_promotions": False},
+                export_stats={"source_facts": "facts_deduped"},
+                required_helper_sheets=["_meta_summary"],
+            )
+            failing_checks = {item["check_name"] for item in result["checks"] if item["status"] == "fail"}
+            self.assertIn("summary_run_ids_present_and_match", failing_checks)
+
+    def test_reocr_dedupe_clusters_keep_most_specific_task(self):
+        review_item = ReviewQueueRecord(
+            review_id="REV_1",
+            priority_score=10.0,
+            reason_codes=["validation:subtotal_check:review"],
+            doc_id="demo",
+            page_no=1,
+            statement_type="income_statement",
+            row_label_raw="财务费用",
+            row_label_std="财务费用",
+            period_key="2022年度__本期",
+            value_raw="100",
+            value_num=100.0,
+            provider="aliyun_table",
+            source_file="page1.json",
+            bbox="",
+            related_fact_ids=["F1"],
+            related_conflict_ids=[],
+            related_validation_ids=[],
+            mapping_candidates="",
+            evidence_cell_path="",
+            evidence_row_path="",
+            evidence_table_path="",
+            meta_json="",
+        )
+        tasks = [
+            ReOCRTaskRecord("REOCR_PAGE", "page", "demo", 1, "1", "1_sub1", "[10,10,40,40]", ["validation:subtotal_check:review"], "tencent_table_v3", 5.0, "reduce_validation_failures", "REV_1", ""),
+            ReOCRTaskRecord("REOCR_ROW", "row", "demo", 1, "1", "1_sub1", "[10,10,40,40]", ["validation:subtotal_check:review"], "tencent_table_v3", 8.0, "reduce_validation_failures", "REV_1", ""),
+            ReOCRTaskRecord("REOCR_CELL", "cell", "demo", 1, "1", "1_sub1", "[10,10,40,40]", ["validation:subtotal_check:review"], "tencent_table_v3", 9.0, "reduce_validation_failures", "REV_1", ""),
+        ]
+        pruned_rows, pruned_summary = prune_reocr_tasks(tasks, [review_item], {})
+        self.assertEqual(len(pruned_rows), 1)
+        self.assertEqual(pruned_rows[0]["granularity"], "cell")
+        self.assertEqual(pruned_summary["duplicate_groups_before"], 1)
+        self.assertEqual(pruned_summary["duplicate_groups_after"], 0)
+        self.assertEqual(pruned_rows[0]["merged_task_count"], 1)
+
+    def test_source_backed_closure_classification_and_apply(self):
+        raw_unmapped = self.make_fact(
+            fact_id="F_RAW_1",
+            mapping_code="",
+            mapping_name="",
+            statement_type="income_statement",
+            row_label_raw="营业外收入",
+            row_label_std="营业外收入",
+            row_label_norm="营业外收入",
+            row_label_canonical_candidate="营业外收入",
+            period_key="2022年度__本期",
+            report_date_norm="2022年度",
+            period_role_norm="本期",
+            value_num=50.0,
+            value_raw="50",
+        )
+        deduped_unplaced = self.make_fact(
+            fact_id="F_DEDUPED_1",
+            mapping_code="ZT_148",
+            mapping_name="财务费用",
+            statement_type="income_statement",
+            period_key="2022年度__本期",
+            report_date_norm="2022年度",
+            period_role_norm="本期",
+            value_num=200.0,
+            value_raw="200",
+            unplaced_reason="multiple_export_candidates",
+        )
+        deduped_period = self.make_fact(
+            fact_id="F_DEDUPED_2",
+            mapping_code="ZT_169",
+            mapping_name="其他业务利润",
+            statement_type="income_statement",
+            period_key="2022年度__本期",
+            report_date_norm="2022年度",
+            period_role_norm="本期",
+            value_num=300.0,
+            value_raw="300",
+        )
+        review_item = ReviewQueueRecord(
+            review_id="REV_1",
+            priority_score=5.0,
+            reason_codes=["mapping:unmapped"],
+            doc_id="demo",
+            page_no=1,
+            statement_type="income_statement",
+            row_label_raw="营业外收入",
+            row_label_std="营业外收入",
+            period_key="2022年度__本期",
+            value_raw="50",
+            value_num=50.0,
+            provider="aliyun_table",
+            source_file="page1.json",
+            bbox="",
+            related_fact_ids=["F_RAW_1"],
+            related_conflict_ids=[],
+            related_validation_ids=[],
+            mapping_candidates="",
+            evidence_cell_path="",
+            evidence_row_path="",
+            evidence_table_path="",
+            meta_json="",
+        )
+        benchmark_rows = [
+            {"mapping_code": "ZT_175", "mapping_name": "加:营业外收入", "aligned_period_key": "2022年度__本期", "benchmark_value": 50.0, "benchmark_header": "金额"},
+            {"mapping_code": "ZT_148", "mapping_name": "财务费用", "aligned_period_key": "2022年度__本期", "benchmark_value": 200.0, "benchmark_header": "金额"},
+            {"mapping_code": "ZT_169", "mapping_name": "其他业务利润", "aligned_period_key": "", "benchmark_value": 300.0, "benchmark_header": "金额"},
+        ]
+        investigation_rows = [
+            {"mapping_code": "ZT_175", "aligned_period_key": "2022年度__本期", "benchmark_value": 50.0, "gap_cause": "source_exists_but_unmapped", "evidence_refs": "F_RAW_1"},
+            {"mapping_code": "ZT_148", "aligned_period_key": "2022年度__本期", "benchmark_value": 200.0, "gap_cause": "source_exists_but_unplaced", "evidence_refs": "F_DEDUPED_1"},
+            {"mapping_code": "ZT_169", "aligned_period_key": "", "benchmark_value": 300.0, "gap_cause": "source_exists_but_period_misaligned", "evidence_refs": "F_DEDUPED_2"},
+        ]
+        closure_payload = build_source_backed_gap_closure(
+            benchmark_missing_true_rows=benchmark_rows,
+            investigation_rows=investigation_rows,
+            facts_raw=[raw_unmapped],
+            facts_deduped=[deduped_unplaced, deduped_period],
+            review_items=[review_item],
+        )
+        finalized = finalize_source_backed_gap_closure(
+            closure_payload["rows"],
+            alias_acceptance_candidates=[
+                {"candidate_alias": "营业外收入", "canonical_code": "ZT_175", "safe_to_auto_accept": True}
+            ],
+        )
+        rows_by_type = {row["recommended_fix_type"] for row in finalized["rows"]}
+        self.assertEqual(rows_by_type, {"alias_promotion", "placement_rule", "period_role_fix"})
+        applied = apply_source_backed_gap_closures(finalized["rows"], [raw_unmapped], [deduped_unplaced, deduped_period], [review_item])
+        self.assertEqual(applied["summary"]["applied_total"], 3)
+        self.assertEqual(raw_unmapped.mapping_code, "ZT_175")
+        self.assertEqual(applied["preferred_export_fact_ids"][("ZT_148", "2022年度__本期")], "F_DEDUPED_1")
+        self.assertEqual(applied["runtime_alignment_overrides"][0]["mapping_code"], "ZT_169")
+        final_payload = finalize_source_backed_gap_results(applied["rows"], final_investigation_rows=[])
+        self.assertEqual(final_payload["summary"]["closed_total"], 3)
+
     def test_derived_formula_and_conflict(self):
         facts = assign_fact_ids(
             [
@@ -1593,11 +1803,77 @@ class StandardizeTests(unittest.TestCase):
                 source_files=[],
                 run_summary={"run_id": run_id},
                 manifest_rules={"snapshot_root": "normalized_runs", "core_artifacts": ["run_summary.json", "artifact_integrity.json"]},
+                artifact_manifest_mode="core",
             )
             self.assertEqual(payload["manifest"]["run_id"], run_id)
             self.assertTrue((output_dir / "run_manifest.json").exists())
+            self.assertTrue((output_dir / "artifact_manifest_core.csv").exists())
             self.assertTrue((output_dir / "artifact_manifest.csv").exists())
             self.assertTrue(payload["artifact_rows"])
+
+    def test_run_manifest_core_vs_full(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_dir = Path(tmpdir) / "normalized"
+            output_dir.mkdir(parents=True, exist_ok=True)
+            (output_dir / "run_summary.json").write_text(json.dumps({"run_id": "RUN_TEST"}), encoding="utf-8")
+            (output_dir / "artifact_integrity.json").write_text(json.dumps({"run_id": "RUN_TEST"}), encoding="utf-8")
+            review_pack = output_dir / "review_pack"
+            review_pack.mkdir(parents=True, exist_ok=True)
+            (review_pack / "sample.png").write_bytes(b"png")
+            reocr_inputs = output_dir / "reocr_inputs"
+            reocr_inputs.mkdir(parents=True, exist_ok=True)
+            (reocr_inputs / "sample.png").write_bytes(b"png")
+            run_id = generate_run_id(["--template", "foo.xlsx"])
+
+            core_payload = write_run_manifest(
+                run_id=run_id,
+                output_dir=output_dir,
+                cli_args=["--template", "foo.xlsx"],
+                input_dir=Path(tmpdir) / "outputs",
+                template_path=Path(tmpdir) / "foo.xlsx",
+                source_files=[],
+                run_summary={"run_id": run_id},
+                manifest_rules={"snapshot_root": "normalized_runs", "core_artifacts": ["run_summary.json", "artifact_integrity.json"]},
+                artifact_manifest_mode="core",
+            )
+            core_paths = {row["relative_path"].replace("\\", "/") for row in core_payload["artifact_rows_core"]}
+            self.assertNotIn("review_pack/sample.png", core_paths)
+            self.assertNotIn("reocr_inputs/sample.png", core_paths)
+
+            full_payload = write_run_manifest(
+                run_id=run_id,
+                output_dir=output_dir,
+                cli_args=["--template", "foo.xlsx"],
+                input_dir=Path(tmpdir) / "outputs",
+                template_path=Path(tmpdir) / "foo.xlsx",
+                source_files=[],
+                run_summary={"run_id": run_id},
+                manifest_rules={"snapshot_root": "normalized_runs", "core_artifacts": ["run_summary.json", "artifact_integrity.json"]},
+                artifact_manifest_mode="full",
+            )
+            full_paths = {row["relative_path"].replace("\\", "/") for row in full_payload["artifact_rows_full"]}
+            self.assertIn("review_pack/sample.png", full_paths)
+            self.assertIn("reocr_inputs/sample.png", full_paths)
+            self.assertTrue((output_dir / "artifact_manifest_full.csv").exists())
+
+    def test_pipeline_stage_tracker_emits_failure_files(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_dir = Path(tmpdir)
+            tracker = cli.PipelineStageTracker(output_dir, "RUN_TEST", ["load/discover", "export"])
+            stage = tracker.start("load/discover")
+            tracker.finish(stage, success=True)
+            stage = tracker.start("export")
+            tracker.finish(stage, success=False, exception_message="boom")
+            tracker.finalize(success=False, exception_message="boom", failed_stage="export")
+
+            timings = json.loads((output_dir / "pipeline_stage_timings.json").read_text(encoding="utf-8"))
+            status = json.loads((output_dir / "pipeline_stage_status.json").read_text(encoding="utf-8"))
+            completion = json.loads((output_dir / "pipeline_completion_summary.json").read_text(encoding="utf-8"))
+
+            self.assertEqual(timings["run_id"], "RUN_TEST")
+            self.assertEqual(status["stages"]["export"]["status"], "failure")
+            self.assertFalse(completion["success"])
+            self.assertEqual(completion["failed_stage"], "export")
 
     def test_page_0004_end_to_end(self):
         repo_root = Path(__file__).resolve().parent
@@ -1642,6 +1918,8 @@ class StandardizeTests(unittest.TestCase):
                     "--enable-label-canonicalization",
                     "--enable-derived-facts",
                     "--emit-run-manifest",
+                    "--artifact-manifest-mode",
+                    "core",
                     "--enable-main-statement-specialization",
                     "--enable-single-period-role-inference",
                     "--emit-stage6-kpis",
@@ -1681,6 +1959,7 @@ class StandardizeTests(unittest.TestCase):
                 "reocr_input_manifest.json",
                 "artifact_integrity.json",
                 "run_manifest.json",
+                "artifact_manifest_core.csv",
                 "artifact_manifest.csv",
                 "benchmark_summary.json",
                 "benchmark_missing_in_auto.csv",
@@ -1698,6 +1977,8 @@ class StandardizeTests(unittest.TestCase):
                 "formula_rule_impact_summary.json",
                 "review_actionable.csv",
                 "reocr_task_pruned.csv",
+                "reocr_task_pruned_deduped.csv",
+                "reocr_dedupe_audit.json",
                 "stage6_kpi_summary.json",
                 "export_target_scope.csv",
                 "export_target_kpi_summary.json",
@@ -1705,6 +1986,8 @@ class StandardizeTests(unittest.TestCase):
                 "note_detail_review_queue.csv",
                 "target_gap_backlog.csv",
                 "target_gap_summary.json",
+                "source_backed_gap_closure.csv",
+                "source_backed_gap_closure_summary.json",
                 "promotion_actions_template.xlsx",
                 "promotion_actions_template.csv",
                 "no_source_gap_investigation.csv",
@@ -1713,6 +1996,13 @@ class StandardizeTests(unittest.TestCase):
                 "target_backfill_summary.json",
                 "stage7_kpi_summary.json",
                 "curated_alias_pack_summary.json",
+                "pages_skipped_metric_audit.json",
+                "metadata_contract_summary.json",
+                "run_id_propagation_audit.json",
+                "hardening_summary.json",
+                "pipeline_stage_timings.json",
+                "pipeline_stage_status.json",
+                "pipeline_completion_summary.json",
                 "full_run_contract_summary.json",
                 "run_summary.json",
                 "会计报表_填充结果.xlsx",
@@ -1723,6 +2013,25 @@ class StandardizeTests(unittest.TestCase):
                 summary = json.load(handle)
             self.assertLessEqual(summary["facts_deduped_total"], summary["facts_raw_total"])
             self.assertGreater(summary["provider_compared_pairs"], 0)
+            with (output_dir / "pages_skipped_metric_audit.json").open("r", encoding="utf-8") as handle:
+                pages_audit = json.load(handle)
+            self.assertTrue(pages_audit["pass"])
+            self.assertEqual(pages_audit["pages_skipped_as_non_table"], pages_audit["expected_pages_skipped"])
+            with (output_dir / "metadata_contract_summary.json").open("r", encoding="utf-8") as handle:
+                metadata_contract = json.load(handle)
+            self.assertTrue(metadata_contract["pass"])
+            with (output_dir / "hardening_summary.json").open("r", encoding="utf-8") as handle:
+                hardening_summary = json.load(handle)
+            self.assertIn("source_backed_gap_total_before", hardening_summary)
+            self.assertTrue(hardening_summary["rerun_completed"])
+            with (output_dir / "artifact_manifest_core.csv").open("r", encoding="utf-8-sig", newline="") as handle:
+                manifest_rows = list(csv.DictReader(handle))
+            manifest_paths = {row["relative_path"] for row in manifest_rows}
+            self.assertFalse(any(path.startswith("review_pack") for path in manifest_paths))
+            self.assertFalse(any(path.startswith("reocr_inputs") for path in manifest_paths))
+            with (output_dir / "pipeline_completion_summary.json").open("r", encoding="utf-8") as handle:
+                pipeline_completion = json.load(handle)
+            self.assertTrue(pipeline_completion["success"])
 
             with (output_dir / "facts_deduped.csv").open("r", encoding="utf-8-sig", newline="") as handle:
                 rows = list(csv.DictReader(handle))
@@ -1819,6 +2128,8 @@ class StandardizeTests(unittest.TestCase):
                         "--enable-label-canonicalization",
                         "--enable-derived-facts",
                         "--emit-run-manifest",
+                        "--artifact-manifest-mode",
+                        "core",
                         "--enable-main-statement-specialization",
                         "--enable-single-period-role-inference",
                         "--emit-stage6-kpis",

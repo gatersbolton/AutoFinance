@@ -52,9 +52,11 @@ def export_template(
     benchmark_alignment_rows: List[Dict[str, Any]] | None = None,
     target_gap_backlog_rows: List[Dict[str, Any]] | None = None,
     promotion_rows: List[Dict[str, Any]] | None = None,
+    preferred_export_fact_ids: Dict[Tuple[str, str], str] | None = None,
     export_rules: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     export_rules = export_rules or {}
+    preferred_export_fact_ids = preferred_export_fact_ids or {}
     subjects, sheet_name, header_row = load_template_subjects(template_path)
     row_by_code = {subject.code: subject.row_index for subject in subjects}
 
@@ -75,7 +77,7 @@ def export_template(
 
     resolved_groups: Dict[Tuple[str, str], FactRecord] = {}
     for group_key, group_items in grouped.items():
-        selected, dropped_rows = select_export_fact(group_items)
+        selected, dropped_rows = select_export_fact(group_items, preferred_fact_id=preferred_export_fact_ids.get(group_key, ""))
         if selected is None:
             for item in group_items:
                 item.unplaced_reason = item.unplaced_reason or "multiple_export_candidates"
@@ -153,9 +155,22 @@ def determine_unplaced_reason(fact: FactRecord, export_rules: Dict[str, Any]) ->
     return classify_export_blocker(fact, export_rules)
 
 
-def select_export_fact(group_items: List[FactRecord]) -> Tuple[FactRecord | None, List[Dict[str, Any]]]:
+def select_export_fact(group_items: List[FactRecord], preferred_fact_id: str = "") -> Tuple[FactRecord | None, List[Dict[str, Any]]]:
     if len(group_items) == 1:
         return group_items[0], []
+
+    if preferred_fact_id:
+        preferred_matches = [item for item in group_items if item.fact_id == preferred_fact_id]
+        if len(preferred_matches) == 1:
+            selected = preferred_matches[0]
+            dropped_rows = []
+            selected.unplaced_reason = ""
+            for item in group_items:
+                if item.fact_id == selected.fact_id:
+                    continue
+                item.unplaced_reason = "shadow_preferred_other_candidate"
+                dropped_rows.append(unplaced_row(item))
+            return selected, dropped_rows
 
     unique_values = {round(float(item.value_num or 0.0), 8) for item in group_items}
     dropped_rows: List[Dict[str, Any]] = []

@@ -4,6 +4,10 @@ normalized/
 normalized-*/
 normalized_runs/
 normalized_archive/
+audits/
+data/
+runs/
+_audit_tmp/
 reocr_results/
 review_pack/
 .venv/

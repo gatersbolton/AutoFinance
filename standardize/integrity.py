@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Sequence
 
 from openpyxl import load_workbook
 
+from .metadata import scan_summary_run_ids
 from .models import ArtifactIntegrityRecord, compact_json
 
 
@@ -16,6 +17,7 @@ def run_artifact_integrity(
     run_summary: Dict[str, Any],
     export_stats: Dict[str, Any],
     export_rules: Dict[str, Any],
+    required_summary_files: Sequence[str] | None = None,
 ) -> Dict[str, Any]:
     records: List[ArtifactIntegrityRecord] = []
     required_sheets = export_rules.get(
@@ -58,6 +60,24 @@ def run_artifact_integrity(
             not artifact_run_id_mismatches,
             "All major artifacts with run_id must match the current run_summary run_id.",
             {"mismatches": artifact_run_id_mismatches},
+        )
+        metadata_contract = scan_summary_run_ids(
+            output_dir=output_dir,
+            expected_run_id=str(run_summary.get("run_id", "")),
+            required_summary_files=required_summary_files,
+        )
+        add_record(
+            records,
+            "summary_run_ids_match_summary",
+            "error",
+            bool(metadata_contract.get("pass", False)),
+            "All summary JSON artifacts must carry the current run_id.",
+            {
+                "required_summary_files": list(required_summary_files or []),
+                "checked_summary_files": metadata_contract.get("checked_summary_files", []),
+                "missing_run_id_files": metadata_contract.get("missing_run_id_files", []),
+                "mismatched_run_id_files": metadata_contract.get("mismatched_run_id_files", []),
+            },
         )
 
     if int(run_summary.get("unknown_date_total", 0)) == 0:

@@ -12,6 +12,9 @@ from typing import Any, Dict, Iterable, List, Sequence
 from .stable_ids import stable_hash
 
 
+DEFAULT_CORE_EXCLUDED_DIRS = {"review_pack", "reocr_inputs"}
+
+
 def generate_run_id(cli_args: Sequence[str] | None = None) -> str:
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     payload = list(cli_args or [])
@@ -38,12 +41,16 @@ def write_run_manifest(
     run_summary: Dict[str, Any],
     feature_flags: Dict[str, Any] | None = None,
     manifest_rules: Dict[str, Any] | None = None,
+    artifact_manifest_mode: str = "core",
 ) -> Dict[str, Any]:
     manifest_rules = manifest_rules or {}
+    mode = normalize_artifact_manifest_mode(artifact_manifest_mode)
     manifest_path = output_dir / "run_manifest.json"
-    artifact_manifest_path = output_dir / "artifact_manifest.csv"
+    core_manifest_path = output_dir / "artifact_manifest_core.csv"
+    legacy_manifest_path = output_dir / "artifact_manifest.csv"
+    full_manifest_path = output_dir / "artifact_manifest_full.csv"
 
-    base_manifest = {
+    manifest_payload = {
         "run_id": run_id,
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "cli_args": list(cli_args),
@@ -52,37 +59,62 @@ def write_run_manifest(
         "source_file_list": list(source_files),
         "summary_metrics_snapshot": dict(run_summary),
         "feature_flags": dict(feature_flags or {}),
-        "generated_artifacts": [],
+        "artifact_manifest_mode": mode,
+        "artifact_manifest_files": {
+            "core": core_manifest_path.name,
+            "legacy_core_alias": legacy_manifest_path.name,
+            "full": full_manifest_path.name if mode == "full" else "",
+        },
+        "snapshot_index_file": "run_snapshot_index.json",
     }
-    manifest_path.write_text(json.dumps(base_manifest, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+    manifest_path.write_text(json.dumps(manifest_payload, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
 
-    artifact_rows = collect_artifact_rows(output_dir, run_id)
-    write_artifact_manifest(artifact_manifest_path, artifact_rows)
-    artifact_rows = collect_artifact_rows(output_dir, run_id)
-    write_artifact_manifest(artifact_manifest_path, artifact_rows)
-    base_manifest["generated_artifacts"] = artifact_rows
-    manifest_path.write_text(json.dumps(base_manifest, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+    core_rows = collect_artifact_rows(output_dir, run_id, mode="core", manifest_rules=manifest_rules)
+    write_artifact_manifest(core_manifest_path, core_rows)
+    if legacy_manifest_path != core_manifest_path:
+        shutil.copyfile(core_manifest_path, legacy_manifest_path)
 
+    full_rows: List[Dict[str, Any]] = []
+    if mode == "full":
+        full_rows = collect_artifact_rows(output_dir, run_id, mode="full", manifest_rules=manifest_rules)
+        write_artifact_manifest(full_manifest_path, full_rows)
+    elif full_manifest_path.exists():
+        full_manifest_path.unlink()
+
+    snapshot_rows = full_rows if mode == "full" else core_rows
     snapshot_index = snapshot_run_artifacts(
         run_id=run_id,
         output_dir=output_dir,
-        artifact_rows=artifact_rows,
+        artifact_rows=snapshot_rows,
         manifest_rules=manifest_rules,
     )
     snapshot_index_path = output_dir / "run_snapshot_index.json"
     snapshot_index_path.write_text(json.dumps(snapshot_index, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
     return {
-        "manifest": base_manifest,
-        "artifact_rows": artifact_rows,
+        "manifest": manifest_payload,
+        "artifact_rows": core_rows,
+        "artifact_rows_core": core_rows,
+        "artifact_rows_full": full_rows,
         "snapshot_index": snapshot_index,
     }
 
 
-def collect_artifact_rows(output_dir: Path, run_id: str) -> List[Dict[str, Any]]:
+def normalize_artifact_manifest_mode(value: str | None) -> str:
+    mode = str(value or "core").strip().lower()
+    return "full" if mode == "full" else "core"
+
+
+def collect_artifact_rows(
+    output_dir: Path,
+    run_id: str,
+    *,
+    mode: str = "full",
+    manifest_rules: Dict[str, Any] | None = None,
+) -> List[Dict[str, Any]]:
+    manifest_rules = manifest_rules or {}
+    normalized_mode = normalize_artifact_manifest_mode(mode)
     rows: List[Dict[str, Any]] = []
-    for path in sorted(output_dir.rglob("*")):
-        if not path.is_file():
-            continue
+    for path in iter_manifest_paths(output_dir, normalized_mode, manifest_rules):
         rows.append(
             {
                 "run_id": run_id,
@@ -92,6 +124,31 @@ def collect_artifact_rows(output_dir: Path, run_id: str) -> List[Dict[str, Any]]
             }
         )
     return rows
+
+
+def iter_manifest_paths(output_dir: Path, mode: str, manifest_rules: Dict[str, Any]) -> List[Path]:
+    if mode == "core":
+        candidates = [
+            path
+            for path in sorted(output_dir.iterdir())
+            if path.is_file() and path.name != "artifact_manifest_full.csv"
+        ]
+        return candidates
+
+    excluded_dirs = {
+        str(name).strip()
+        for name in (manifest_rules.get("full_excluded_dirs", []) or [])
+        if str(name).strip()
+    }
+    paths: List[Path] = []
+    for path in sorted(output_dir.rglob("*")):
+        if not path.is_file():
+            continue
+        relative = path.relative_to(output_dir)
+        if relative.parts and relative.parts[0] in excluded_dirs:
+            continue
+        paths.append(path)
+    return paths
 
 
 def write_artifact_manifest(path: Path, rows: List[Dict[str, Any]]) -> None:

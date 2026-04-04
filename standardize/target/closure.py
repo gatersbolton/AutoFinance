@@ -246,10 +246,216 @@ def build_source_backed_gap_closure(
         "closure_candidates_total": len(closure_rows),
         "safe_to_auto_close_total": auto_closable_total,
         "closure_type_breakdown": dict(closure_counter),
+        "source_backed_gap_total_before": len(closure_rows),
     }
     return {
         "rows": closure_rows,
         "summary": summary,
+    }
+
+
+def finalize_source_backed_gap_closure(
+    closure_rows: Sequence[Dict[str, Any]],
+    alias_acceptance_candidates: Sequence[Dict[str, Any]],
+) -> Dict[str, Any]:
+    safe_alias_pairs = {
+        (
+            str(row.get("candidate_alias", "")).strip(),
+            str(row.get("canonical_code", "")).strip(),
+        )
+        for row in alias_acceptance_candidates
+        if _parse_bool(row.get("safe_to_auto_accept", False))
+    }
+    rows: List[Dict[str, Any]] = []
+    safe_total = 0
+    fix_counter = Counter()
+    for item in closure_rows:
+        row = dict(item)
+        payload = _parse_payload_json(row.get("payload_json", ""))
+        gap_cause = str(row.get("gap_cause", "")).strip()
+        recommended_fix_type = _recommended_fix_type(row)
+        row["cause"] = gap_cause
+        row["recommended_fix_type"] = recommended_fix_type
+        row["safe_to_apply"] = False
+        row["applied_in_this_round"] = False
+        row["result"] = "suggestion_only"
+        base_safe = _parse_bool(row.get("safe_to_auto_close", False))
+        if recommended_fix_type == "alias_promotion":
+            alias_key = (
+                str(payload.get("alias", "")).strip(),
+                str(payload.get("canonical_code", row.get("mapping_code", ""))).strip(),
+            )
+            row["safe_to_apply"] = base_safe and alias_key in safe_alias_pairs
+            if base_safe and alias_key not in safe_alias_pairs:
+                row["reason"] = "alias_candidate_not_safe_under_repo_rules"
+        elif recommended_fix_type in {"placement_rule", "period_role_fix"}:
+            row["safe_to_apply"] = base_safe
+        if row["safe_to_apply"]:
+            row["result"] = "pending_apply"
+            safe_total += 1
+        fix_counter[recommended_fix_type] += 1
+        rows.append(row)
+    summary = {
+        "run_id": "",
+        "closure_candidates_total": len(rows),
+        "safe_to_apply_total": safe_total,
+        "applied_total": 0,
+        "closed_total": 0,
+        "remaining_source_backed_total": len(rows),
+        "recommended_fix_type_breakdown": dict(fix_counter),
+    }
+    return {"rows": rows, "summary": summary}
+
+
+def apply_source_backed_gap_closures(
+    closure_rows: Sequence[Dict[str, Any]],
+    facts_raw: Sequence[FactRecord],
+    facts_deduped: Sequence[FactRecord],
+    review_items: Sequence[ReviewQueueRecord],
+) -> Dict[str, Any]:
+    raw_by_id = {fact.fact_id: fact for fact in facts_raw if fact.fact_id}
+    deduped_by_id = {fact.fact_id: fact for fact in facts_deduped if fact.fact_id}
+    review_by_id = {item.review_id: item for item in review_items if item.review_id}
+    runtime_alignment_overrides: List[Dict[str, Any]] = []
+    preferred_export_fact_ids: Dict[Tuple[str, str], str] = {}
+    rows: List[Dict[str, Any]] = []
+    applied_total = 0
+    applied_breakdown = Counter()
+
+    for item in closure_rows:
+        row = dict(item)
+        payload = _parse_payload_json(row.get("payload_json", ""))
+        if not _parse_bool(row.get("safe_to_apply", False)):
+            rows.append(row)
+            continue
+        fix_type = str(row.get("recommended_fix_type", "")).strip()
+        benchmark_value = row.get("benchmark_value")
+        applied = False
+        result = "skipped"
+
+        if fix_type == "alias_promotion":
+            target_facts = _resolve_candidate_facts(
+                source_refs=str(row.get("source_fact_ids", "")),
+                benchmark_value=benchmark_value,
+                raw_by_id=raw_by_id,
+                deduped_by_id=deduped_by_id,
+                review_by_id=review_by_id,
+                aligned_period_key=str(row.get("aligned_period_key", "")).strip(),
+            )
+            changed = _apply_alias_mapping(
+                target_facts=target_facts,
+                canonical_code=str(payload.get("canonical_code", row.get("mapping_code", ""))).strip(),
+                canonical_name=str(payload.get("canonical_name", row.get("mapping_name", ""))).strip(),
+            )
+            if changed > 0:
+                applied = True
+                result = f"applied_to_{changed}_facts"
+        elif fix_type == "placement_rule":
+            mapping_code = str(payload.get("mapping_code", row.get("mapping_code", ""))).strip()
+            period_key = str(payload.get("period_key", row.get("aligned_period_key", ""))).strip()
+            fact_id = str(payload.get("fact_id", "")).strip()
+            if mapping_code and period_key and fact_id and fact_id in deduped_by_id:
+                preferred_export_fact_ids[(mapping_code, period_key)] = fact_id
+                preferred_fact = deduped_by_id[fact_id]
+                preferred_fact.unplaced_reason = ""
+                preferred_fact.override_source = "stage7_1_source_backed_closure"
+                applied = True
+                result = "applied_export_preference"
+        elif fix_type == "period_role_fix":
+            aligned_period_key = str(payload.get("aligned_period_key", "")).strip()
+            mapping_code = str(payload.get("mapping_code", row.get("mapping_code", ""))).strip()
+            if mapping_code and aligned_period_key:
+                runtime_alignment_overrides.append(
+                    {
+                        "mapping_code": mapping_code,
+                        "benchmark_header": str(payload.get("benchmark_header", "")).strip(),
+                        "aligned_period_key": aligned_period_key,
+                        "benchmark_value": row.get("benchmark_value"),
+                    }
+                )
+                applied = True
+                result = "applied_runtime_alignment_override"
+
+        row["applied_in_this_round"] = applied
+        row["result"] = result if applied else "apply_failed"
+        if applied:
+            applied_total += 1
+            applied_breakdown[fix_type] += 1
+        rows.append(row)
+
+    return {
+        "rows": rows,
+        "summary": {
+            "run_id": "",
+            "applied_total": applied_total,
+            "applied_fix_type_breakdown": dict(applied_breakdown),
+        },
+        "preferred_export_fact_ids": preferred_export_fact_ids,
+        "runtime_alignment_overrides": runtime_alignment_overrides,
+    }
+
+
+def finalize_source_backed_gap_results(
+    closure_rows: Sequence[Dict[str, Any]],
+    final_investigation_rows: Sequence[Dict[str, Any]],
+) -> Dict[str, Any]:
+    remaining_keys = {
+        (
+            str(row.get("mapping_code", "")).strip(),
+            str(row.get("aligned_period_key", "")).strip(),
+            str(row.get("benchmark_value", "")),
+            str(row.get("gap_cause", "")).strip(),
+        )
+        for row in final_investigation_rows
+        if str(row.get("gap_cause", "")).strip() in {
+            "source_exists_but_unmapped",
+            "source_exists_but_unplaced",
+            "source_exists_but_period_misaligned",
+        }
+    }
+    rows: List[Dict[str, Any]] = []
+    result_counter = Counter()
+    safe_total = 0
+    applied_total = 0
+    closed_total = 0
+    for item in closure_rows:
+        row = dict(item)
+        key = (
+            str(row.get("mapping_code", "")).strip(),
+            str(row.get("aligned_period_key", "")).strip(),
+            str(row.get("benchmark_value", "")),
+            str(row.get("gap_cause", "")).strip(),
+        )
+        safe_to_apply = _parse_bool(row.get("safe_to_apply", False))
+        applied = _parse_bool(row.get("applied_in_this_round", False))
+        if safe_to_apply:
+            safe_total += 1
+        if applied:
+            applied_total += 1
+        if key in remaining_keys:
+            if applied:
+                row["result"] = "applied_gap_still_open"
+            else:
+                row["result"] = "suggestion_only"
+        else:
+            if applied:
+                row["result"] = "closed"
+                closed_total += 1
+            else:
+                row["result"] = "resolved_without_apply"
+        result_counter[str(row.get("result", "")).strip()] += 1
+        rows.append(row)
+    return {
+        "rows": rows,
+        "summary": {
+            "run_id": "",
+            "closure_candidates_total": len(rows),
+            "safe_to_apply_total": safe_total,
+            "applied_total": applied_total,
+            "closed_total": closed_total,
+            "remaining_source_backed_total": len(remaining_keys),
+            "result_breakdown": dict(result_counter),
+        },
     }
 
 
@@ -376,3 +582,98 @@ def _build_closure_candidate(
         return candidate
 
     return {}
+
+
+def _recommended_fix_type(row: Dict[str, Any]) -> str:
+    closure_type = str(row.get("closure_type", "")).strip()
+    if closure_type == "alias_promotion_candidate":
+        return "alias_promotion"
+    if closure_type == "placement_preference_candidate":
+        return "placement_rule"
+    if closure_type == "period_override_candidate":
+        return "period_role_fix"
+    return "review_only"
+
+
+def _resolve_candidate_facts(
+    *,
+    source_refs: str,
+    benchmark_value: Any,
+    raw_by_id: Dict[str, FactRecord],
+    deduped_by_id: Dict[str, FactRecord],
+    review_by_id: Dict[str, ReviewQueueRecord],
+    aligned_period_key: str,
+) -> List[FactRecord]:
+    target_fact_ids: List[str] = []
+    for ref in [value.strip() for value in source_refs.split(";") if value.strip()]:
+        if ref in raw_by_id or ref in deduped_by_id:
+            target_fact_ids.append(ref)
+            continue
+        review_item = review_by_id.get(ref)
+        if review_item is None:
+            continue
+        target_fact_ids.extend(review_item.related_fact_ids)
+    ordered_ids = []
+    for fact_id in target_fact_ids:
+        if fact_id not in ordered_ids:
+            ordered_ids.append(fact_id)
+    facts: List[FactRecord] = []
+    for fact_id in ordered_ids:
+        for fact in (deduped_by_id.get(fact_id), raw_by_id.get(fact_id)):
+            if fact is None:
+                continue
+            if aligned_period_key and fact.period_key and fact.period_key != aligned_period_key:
+                continue
+            if benchmark_value not in ("", None) and fact.value_num not in ("", None) and not _amount_close(fact.value_num, benchmark_value):
+                continue
+            facts.append(fact)
+    unique: List[FactRecord] = []
+    seen = set()
+    for fact in facts:
+        key = (id(fact), fact.fact_id)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(fact)
+    return unique
+
+
+def _apply_alias_mapping(
+    *,
+    target_facts: Sequence[FactRecord],
+    canonical_code: str,
+    canonical_name: str,
+) -> int:
+    changed = 0
+    for fact in target_facts:
+        if not canonical_code or fact.mapping_code:
+            continue
+        fact.mapping_code = canonical_code
+        fact.mapping_name = canonical_name
+        fact.mapping_method = "stage7_1_source_backed_alias"
+        fact.mapping_confidence = 1.0
+        fact.mapping_relation_type = ""
+        fact.mapping_review_required = False
+        fact.override_source = "stage7_1_source_backed_closure"
+        fact.unplaced_reason = ""
+        changed += 1
+    return changed
+
+
+def _parse_payload_json(value: Any) -> Dict[str, Any]:
+    if isinstance(value, dict):
+        return dict(value)
+    text = str(value or "").strip()
+    if not text:
+        return {}
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _parse_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().lower() in {"1", "true", "yes", "y"}

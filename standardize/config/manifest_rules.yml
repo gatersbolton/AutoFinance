@@ -10,4 +10,12 @@ core_artifacts:
   - benchmark_summary.json
   - derived_formula_summary.json
   - run_manifest.json
+  - artifact_manifest_core.csv
   - artifact_manifest.csv
+  - pipeline_stage_timings.json
+  - pipeline_stage_status.json
+  - pipeline_completion_summary.json
+  - pages_skipped_metric_audit.json
+  - metadata_contract_summary.json
+  - run_id_propagation_audit.json
+  - hardening_summary.json
