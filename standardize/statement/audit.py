@@ -219,12 +219,17 @@ def build_required_summary_files(feature_flags: Dict[str, Any]) -> List[str]:
         required.extend(
             [
                 "export_target_kpi_summary.json",
-                "no_source_gap_summary.json",
                 "source_backed_gap_closure_summary.json",
-                "target_backfill_summary.json",
                 "target_gap_summary.json",
             ]
         )
+        if feature_flags.get("target_gap_enabled", True):
+            required.extend(
+                [
+                    "no_source_gap_summary.json",
+                    "target_backfill_summary.json",
+                ]
+            )
     if feature_flags.get("emit_delta_report"):
         required.append("export_delta_summary.json")
     if feature_flags.get("emit_stage6_kpis"):

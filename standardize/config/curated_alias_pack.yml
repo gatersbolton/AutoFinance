@@ -1,20 +1,26 @@
 aliases:
-  - canonical_code: ZT_046
-    canonical_name: 固定资产原值
-    alias: 固定资产原价
-    alias_type: main_statement_only_alias
-    enabled: true
-    note: stage7_seed_safe
-  - canonical_code: ZT_047
-    canonical_name: 减:累计折旧
-    alias: 减累计折旧
-    alias_type: main_statement_only_alias
-    enabled: true
-    note: stage7_seed_safe
+- canonical_code: ZT_046
+  canonical_name: 固定资产原值
+  alias: 固定资产原价
+  alias_type: main_statement_only_alias
+  enabled: true
+  note: stage7_seed_safe
+- canonical_code: ZT_047
+  canonical_name: 减:累计折旧
+  alias: 减累计折旧
+  alias_type: main_statement_only_alias
+  enabled: true
+  note: stage7_seed_safe
+- canonical_code: ZT_044
+  canonical_name: 固定资产及清理合计
+  alias: 固定资产合计
+  alias_type: exact_alias
+  enabled: true
+  note: promoted:PROM_ALIAS_0001
 review_required_aliases:
-  - canonical_code: ZT_119
-    canonical_name: 负债合计
-    alias: 长期负债合计
-    alias_type: review_required_alias
-    enabled: true
-    note: aggregate_scope_ambiguous
+- canonical_code: ZT_119
+  canonical_name: 负债合计
+  alias: 长期负债合计
+  alias_type: review_required_alias
+  enabled: true
+  note: aggregate_scope_ambiguous

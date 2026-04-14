@@ -1,0 +1,82 @@
+entries:
+  - doc_id: D01
+    job_id: "00"
+    company: 泰兴市泰泽实业有限公司
+    input_dir: ../data/corpus/D01/ocr_outputs
+    source_image_dir: ../data/corpus/D01/input
+    benchmark_path: ../data/corpus/D01/benchmarks/会计报表_泰兴市泰泽实业有限公司2022年审计报告_gpt5.4填写.xlsx
+    benchmark_enabled: true
+    target_gap_enabled: true
+    batch_enabled: true
+    control_candidate: true
+    notes: baseline single-document corpus
+
+  - doc_id: D02
+    job_id: "01"
+    company: 泰兴市长虹现代农业开发有限公司
+    input_dir: ../data/corpus/D02/ocr_outputs
+    source_image_dir: ../data/corpus/D02/input
+    benchmark_path: ../data/corpus/D02/benchmarks/会计报表_泰兴市长虹现代农业开发有限公司2022年审计报告_gpt5.4填写.xlsx
+    benchmark_enabled: true
+    target_gap_enabled: true
+    batch_enabled: true
+
+  - doc_id: D03
+    job_id: "02"
+    company: 盐城平坦住房租赁有限公司
+    input_dir: ../data/corpus/D03/ocr_outputs
+    source_image_dir: ../data/corpus/D03/input
+    benchmark_path: ../data/corpus/D03/benchmarks/会计报表_盐城平坦住房租赁有限公司2022年审计报告_gpt5.4填写.xlsx
+    benchmark_enabled: true
+    target_gap_enabled: true
+    batch_enabled: true
+
+  - doc_id: D04
+    job_id: "03"
+    company: 1.4.3债务人2022年审计报告
+    input_dir: ../data/corpus/D04/ocr_outputs
+    source_image_dir: ../data/corpus/D04/input
+    benchmark_enabled: false
+    target_gap_enabled: false
+    batch_enabled: true
+    notes: project-only OCR corpus without repo-local benchmark workbook
+
+  - doc_id: D05
+    job_id: "04"
+    company: 泰州新滨江科技发展有限公司
+    input_dir: ../data/corpus/D05/ocr_outputs
+    source_image_dir: ../data/corpus/D05/input
+    benchmark_path: ../data/corpus/D05/benchmarks/会计报表_泰州新滨江科技发展有限公司2021年审计报告_gpt5.4填写.xlsx
+    benchmark_enabled: true
+    target_gap_enabled: true
+    batch_enabled: true
+
+  - doc_id: D06
+    job_id: "05"
+    company: 金湖县润金现代农业发展有限公司
+    input_dir: ../data/corpus/D06/ocr_outputs
+    source_image_dir: ../data/corpus/D06/input
+    benchmark_path: ../data/corpus/D06/benchmarks/会计报表_金湖县润金现代农业发展有限公司2021年审计报告_gpt5.4填写.xlsx
+    benchmark_enabled: true
+    target_gap_enabled: true
+    batch_enabled: true
+
+  - doc_id: D07
+    job_id: "06"
+    company: 淮安市清浦现代农村建设开发有限公司
+    input_dir: ../data/corpus/D07/ocr_outputs
+    source_image_dir: ../data/corpus/D07/input
+    benchmark_path: ../data/corpus/D07/benchmarks/会计报表_淮安市清浦现代农村建设开发有限公司2021年审计报告_gpt5.4填写.xlsx
+    benchmark_enabled: true
+    target_gap_enabled: true
+    batch_enabled: true
+
+  - doc_id: D08
+    job_id: "07"
+    company: 阜宁县鑫泽源污水处理有限公司
+    input_dir: ../data/corpus/D08/ocr_outputs
+    source_image_dir: ../data/corpus/D08/input
+    benchmark_path: ../data/corpus/D08/benchmarks/会计报表_阜宁县鑫泽源污水处理有限公司2022年审计报告_gpt5.4填写.xlsx
+    benchmark_enabled: true
+    target_gap_enabled: true
+    batch_enabled: true

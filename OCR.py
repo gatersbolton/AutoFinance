@@ -10,10 +10,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
+from project_paths import DEFAULT_SECRET_PATH, INBOX_INPUT_DIR, INBOX_OCR_OUTPUT_DIR, repo_relative
 
-DEFAULT_INPUT_DIR = "data"
-DEFAULT_OUTPUT_DIR = "outputs"
-DEFAULT_SECRET_FILE = "secret"
+
+DEFAULT_INPUT_DIR = str(INBOX_INPUT_DIR)
+DEFAULT_OUTPUT_DIR = str(INBOX_OCR_OUTPUT_DIR)
+DEFAULT_SECRET_FILE = str(DEFAULT_SECRET_PATH)
 DEFAULT_TENCENT_REGION = "ap-beijing"
 DEFAULT_RENDER_ZOOM = 2.0
 MAX_IMAGE_DIMENSION = 8192
@@ -303,19 +305,19 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         "--input",
         dest="input_dir",
         default=DEFAULT_INPUT_DIR,
-        help="Directory containing PDF files. Defaults to ./data",
+        help=f"Directory containing PDF files. Defaults to ./{repo_relative(INBOX_INPUT_DIR)}",
     )
     parser.add_argument(
         "--output",
         dest="output_dir",
         default=DEFAULT_OUTPUT_DIR,
-        help="Directory for OCR outputs. Defaults to ./outputs",
+        help=f"Directory for OCR outputs. Defaults to ./{repo_relative(INBOX_OCR_OUTPUT_DIR)}",
     )
     parser.add_argument(
         "--secret",
         dest="secret_path",
         default=DEFAULT_SECRET_FILE,
-        help="Secret file path. Defaults to ./secret",
+        help=f"Secret file path. Defaults to ./{repo_relative(DEFAULT_SECRET_PATH)}",
     )
     return parser.parse_args(argv)
 

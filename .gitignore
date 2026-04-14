@@ -10,7 +10,7 @@ runs/
 _audit_tmp/
 reocr_results/
 review_pack/
-.venv/
+.venv*/
 __pycache__/
 .pytest_cache/
 *.pyc

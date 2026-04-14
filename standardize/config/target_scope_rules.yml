@@ -1,36 +1,36 @@
 main_statement_types:
-  - balance_sheet
-  - income_statement
-  - cash_flow
-  - changes_in_equity
+- balance_sheet
+- income_statement
+- cash_flow
+- changes_in_equity
 main_statement_priority_keywords:
-  - 营业收入
-  - 营业成本
-  - 主营业务收入
-  - 主营业务成本
-  - 资产总计
-  - 负债合计
-  - 所有者权益合计
-  - 股东权益合计
-  - 现金的期末余额
+- 营业收入
+- 营业成本
+- 主营业务收入
+- 主营业务成本
+- 资产总计
+- 负债合计
+- 所有者权益合计
+- 股东权益合计
+- 现金的期末余额
 note_detail_patterns:
   company_like:
-    - 公司
-    - 银行
-    - 分行
-    - 有限公司
+  - 公司
+  - 银行
+  - 分行
+  - 有限公司
   aging_bucket:
-    - 1年以内
-    - 1-2年
-    - 2-3年
-    - 3年以上
+  - 1年以内
+  - 1-2年
+  - 2-3年
+  - 3年以上
   note_detail_headers:
-    - 单位名称
-    - 比例
-    - 账龄
-    - 项目
+  - 单位名称
+  - 比例
+  - 账龄
+  - 项目
 note_aggregation_keywords:
-  - 合计
-  - 总计
-  - 小计
+- 合计
+- 总计
+- 小计
 promoted_rules: []

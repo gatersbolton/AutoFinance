@@ -28,4 +28,4 @@ Hardening / completion diagnostics also emit:
 - `pipeline_stage_status.json`
 - `pipeline_completion_summary.json`
 
-Snapshot packaging writes run-specific copies under `normalized_runs/<run_id>/`.
+Snapshot packaging writes run-specific copies under each run directory's `_snapshots/<run_id>/`.

@@ -1,0 +1,42 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+
+REPO_ROOT = Path(__file__).resolve().parent
+BENCHMARKS_ROOT = REPO_ROOT / "benchmarks"
+REGISTRY_PATH = BENCHMARKS_ROOT / "registry.yml"
+
+DATA_ROOT = REPO_ROOT / "data"
+CORPUS_ROOT = DATA_ROOT / "corpus"
+INBOX_ROOT = CORPUS_ROOT / "inbox"
+INBOX_INPUT_DIR = INBOX_ROOT / "input"
+INBOX_OCR_OUTPUT_DIR = INBOX_ROOT / "ocr_outputs"
+
+TEMPLATE_ROOT = DATA_ROOT / "templates"
+DEFAULT_TEMPLATE_PATH = TEMPLATE_ROOT / "会计报表.xlsx"
+
+SECRETS_ROOT = DATA_ROOT / "secrets"
+DEFAULT_SECRET_PATH = SECRETS_ROOT / "secret"
+
+VENDOR_ROOT = DATA_ROOT / "vendor"
+PADDLEOCR_ROOT = VENDOR_ROOT / "PaddleOCR"
+
+GENERATED_ROOT = DATA_ROOT / "generated"
+STANDARDIZE_GENERATED_ROOT = GENERATED_ROOT / "standardize"
+STANDARDIZE_ARCHIVE_ROOT = STANDARDIZE_GENERATED_ROOT / "archive"
+CONTROL_RUNS_ROOT = STANDARDIZE_GENERATED_ROOT / "control_runs"
+BATCHES_ROOT = STANDARDIZE_GENERATED_ROOT / "batches"
+DEFAULT_BATCH_OUTPUT_ROOT = BATCHES_ROOT / "default"
+SMOKE_BATCH_OUTPUT_ROOT = BATCHES_ROOT / "smoke"
+SMOKE2_BATCH_OUTPUT_ROOT = BATCHES_ROOT / "smoke2"
+
+AUDITS_ROOT = GENERATED_ROOT / "audits"
+EXPERIMENTS_ROOT = GENERATED_ROOT / "experiments"
+PADDLE_EXPERIMENTS_ROOT = EXPERIMENTS_ROOT / "paddle"
+COMPARISONS_ROOT = GENERATED_ROOT / "comparisons"
+LEGACY_ROOT = GENERATED_ROOT / "legacy"
+
+
+def repo_relative(path: Path) -> str:
+    return path.resolve().relative_to(REPO_ROOT).as_posix()

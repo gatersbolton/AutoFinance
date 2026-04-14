@@ -1,24 +1,66 @@
-# AutoFinance OCR
+# AutoFinance
 
-This project batch-processes scanned PDF audit reports in `data/` with multiple OCR methods from Tencent Cloud and Aliyun.
-The current methods are:
+AutoFinance is a local OCR-to-standardization workflow for scanned financial statements. It keeps code in the repo and keeps corpus files, credentials, vendor checkouts, and generated artifacts under `data/`, which is intentionally ignored by Git.
 
-- `tencent_text`: Tencent `GeneralBasicOCR`
-- `aliyun_text`: Aliyun `RecognizeAllText` with `Type=Advanced`
-- `tencent_table_v3`: Tencent `RecognizeTableAccurateOCR`
-- `aliyun_table`: Aliyun `RecognizeTableOcr`
-
-## Install
+## Quickstart
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
+python -m venv .venv
+.venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-## Secrets
+Recommended local layout:
 
-By default the tool reads credentials from the root-level `secret` file:
+```text
+data/
+  corpus/
+    inbox/
+      input/
+      ocr_outputs/
+    D01/..D08/
+  templates/
+    会计报表.xlsx
+  secrets/
+    secret
+  vendor/
+    PaddleOCR/
+  generated/
+```
+
+## Main Commands
+
+Run OCR into the default inbox output root:
+
+```bash
+python OCR.py --method tencent_table_v3
+```
+
+Run single-document standardization:
+
+```bash
+python -m standardize.cli ^
+  --input-dir data/corpus/inbox/ocr_outputs ^
+  --template data/templates/会计报表.xlsx ^
+  --output-dir data/generated/standardize/archive ^
+  --source-image-dir data/corpus/inbox/input ^
+  --provider-priority aliyun,tencent ^
+  --enable-conflict-merge
+```
+
+Run multi-document batch standardization:
+
+```bash
+python -m standardize.batch ^
+  --template data/templates/会计报表.xlsx ^
+  --output-dir data/generated/standardize/batches/default ^
+  --registry benchmarks/registry.yml ^
+  --batch-mode
+```
+
+## Credentials
+
+By default `OCR.py` reads credentials from `data/secrets/secret`:
 
 ```text
 Tencent:
@@ -30,68 +72,21 @@ AccessKey ID:YOUR_ALIYUN_ACCESS_KEY_ID
 AccessKey Secret:YOUR_ALIYUN_ACCESS_KEY_SECRET
 ```
 
-Environment variables are also supported and override the file:
+Environment variables still override the file:
 
 - `TENCENTCLOUD_SECRET_ID`
 - `TENCENTCLOUD_SECRET_KEY`
 - `ALIBABA_CLOUD_ACCESS_KEY_ID`
 - `ALIBABA_CLOUD_ACCESS_KEY_SECRET`
 
-## Usage
-
-Run Tencent text OCR:
+## Tests
 
 ```bash
-python3 OCR.py --method tencent_text
+python -m unittest discover -s tests
 ```
 
-Run Aliyun text OCR:
+## Docs
 
-```bash
-python3 OCR.py --method aliyun_text
-```
-
-Run Tencent table OCR V3:
-
-```bash
-python3 OCR.py --method tencent_table_v3
-```
-
-Run Aliyun table OCR:
-
-```bash
-python3 OCR.py --method aliyun_table
-```
-
-Optional flags:
-
-```bash
-python3 OCR.py --method tencent_table_v3 --input data --output outputs --secret secret
-```
-
-## Output Layout
-
-Each provider writes results to:
-
-```text
-outputs/<provider>/<pdf_stem>/
-  result.txt
-  result.json
-  raw/page_0001.json
-  artifacts/page_0001.xlsx  # table methods when the provider returns a workbook
-```
-
-- `result.txt`: readable text grouped by page
-- `result.json`: normalized page-level OCR result
-- `raw/*.json`: original provider responses for each page
-- `artifacts/*`: provider-specific exported files, currently used by `tencent_table_v3` for per-page Excel workbooks
-
-If any page fails, the tool still writes outputs and returns a non-zero exit code.
-
-## Test
-
-The automated tests mock PDF rendering and cloud OCR calls, so they do not need the SDKs or real credentials:
-
-```bash
-python3 -m unittest testOCR.py
-```
+- `AGENTS.md`: repo map and path contract for Codex and other agents
+- `benchmarks/registry.yml`: document registry for batch runs
+- `standardize/README*.md`: stage-specific notes for the standardization pipeline

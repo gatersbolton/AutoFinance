@@ -13,6 +13,7 @@ import time
 from typing import Any, Dict, Iterable, List, Sequence
 
 import yaml
+from project_paths import DEFAULT_TEMPLATE_PATH, INBOX_OCR_OUTPUT_DIR, STANDARDIZE_ARCHIVE_ROOT, repo_relative
 
 from .benchmark import compare_benchmark_workbook, explain_benchmark_gaps, load_workbook_main_sheet
 from .curation import (
@@ -228,12 +229,20 @@ class PipelineStageTracker:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Standardize financial statement OCR outputs.")
-    parser.add_argument("--input-dir", default="outputs", help="Directory containing OCR provider outputs.")
-    parser.add_argument("--template", required=True, help="Path to the standard accounting template workbook.")
+    parser.add_argument(
+        "--input-dir",
+        default=str(INBOX_OCR_OUTPUT_DIR),
+        help=f"Directory containing OCR provider outputs. Defaults to ./{repo_relative(INBOX_OCR_OUTPUT_DIR)}",
+    )
+    parser.add_argument(
+        "--template",
+        required=True,
+        help=f"Path to the standard accounting template workbook. Recommended local path: ./{repo_relative(DEFAULT_TEMPLATE_PATH)}",
+    )
     parser.add_argument(
         "--output-dir",
-        default="normalized_archive",
-        help="Root directory for archived normalized outputs. Each run is written into its own batch subdirectory by default.",
+        default=str(STANDARDIZE_ARCHIVE_ROOT),
+        help=f"Root directory for archived normalized outputs. Defaults to ./{repo_relative(STANDARDIZE_ARCHIVE_ROOT)} and writes each run into its own subdirectory by default.",
     )
     parser.add_argument("--source-image-dir", default="", help="Optional PDF/image directory for routing/evidence generation.")
     parser.add_argument(
@@ -283,6 +292,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--promotion-actions-file", default="", help="Optional filled promotion workbook/csv to apply.")
     parser.add_argument("--apply-promotions", action="store_true", help="Apply promotion actions from --promotion-actions-file into curated packs and rerun.")
     parser.add_argument("--emit-stage7-kpis", action="store_true", help="Emit Stage 7 target closure KPI outputs.")
+    parser.add_argument("--batch-mode", action="store_true", help="Run with batch-safe benchmark/target gating semantics.")
+    parser.add_argument("--batch-lite", action="store_true", help="Run a batch-friendly lightweight artifact profile while keeping core outputs.")
+    parser.add_argument("--disable-target-gap", action="store_true", help="Disable target-gap/closure processing for the current run.")
     parser.add_argument("--log-level", default="INFO", help="Logging level, e.g. INFO or DEBUG.")
     return parser
 
@@ -385,6 +397,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         "emit_promotion_template": bool(args.emit_promotion_template),
         "apply_promotions": bool(args.apply_promotions),
         "emit_stage7_kpis": bool(args.emit_stage7_kpis),
+        "batch_mode": bool(args.batch_mode),
+        "batch_lite": bool(args.batch_lite),
+        "target_gap_enabled": not bool(args.disable_target_gap),
     }
 
     applied_actions_rows: List[Dict[str, Any]] = []
@@ -834,6 +849,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     no_source_gap_payload: Dict[str, Any] = {}
     target_gap_backlog_rows: List[Dict[str, Any]] = []
     target_gap_summary: Dict[str, Any] = {}
+    batch_scope_gate = determine_batch_scope_gate(
+        batch_mode=bool(args.batch_mode),
+        benchmark_requested=bool(args.emit_benchmark_report and benchmark_workbook),
+        target_gap_requested=bool(args.enable_export_target_scoping and not args.disable_target_gap),
+        benchmark_summary={},
+        alignment_summary={},
+    )
+    target_gap_processing_enabled = bool(args.enable_export_target_scoping and batch_scope_gate["target_scope_enabled"])
     if args.emit_benchmark_report and benchmark_workbook:
         benchmark_payload = compare_benchmark_workbook(
             benchmark_path=benchmark_workbook,
@@ -848,6 +871,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             benchmark_alignment_rows = benchmark_payload.get("alignment_audit_rows", [])
             benchmark_alignment_summary = benchmark_payload.get("alignment_summary", {})
+        batch_scope_gate = determine_batch_scope_gate(
+            batch_mode=bool(args.batch_mode),
+            benchmark_requested=True,
+            target_gap_requested=bool(args.enable_export_target_scoping and not args.disable_target_gap),
+            benchmark_summary=benchmark_payload.get("summary", {}),
+            alignment_summary=benchmark_alignment_summary,
+        )
+        target_gap_processing_enabled = bool(args.enable_export_target_scoping and batch_scope_gate["target_scope_enabled"])
         benchmark_missing_true_rows = benchmark_payload.get("benchmark_missing_true_rows", benchmark_payload.get("missing_rows", []))
         benchmark_gap_payload = explain_benchmark_gaps(
             benchmark_missing_rows=benchmark_missing_true_rows,
@@ -858,17 +889,27 @@ def main(argv: Sequence[str] | None = None) -> int:
             mapping_candidates=mapping_candidates,
             derived_facts=derived_facts,
         )
-        no_source_gap_payload = investigate_no_source_gaps(
-            benchmark_missing_true_rows=benchmark_missing_true_rows,
-            facts_raw=facts_raw,
-            facts_deduped=facts_deduped,
-            unplaced_rows=export_stats.get("unplaced_rows", []),
-            derived_facts=derived_facts,
-            review_items=review_items,
-            issues=all_issues,
-        )
-        target_gap_backlog_rows = no_source_gap_payload.get("target_gap_backlog_rows", [])
-        target_gap_summary = no_source_gap_payload.get("target_gap_summary", {})
+        if target_gap_processing_enabled:
+            no_source_gap_payload = investigate_no_source_gaps(
+                benchmark_missing_true_rows=benchmark_missing_true_rows,
+                facts_raw=facts_raw,
+                facts_deduped=facts_deduped,
+                unplaced_rows=export_stats.get("unplaced_rows", []),
+                derived_facts=derived_facts,
+                review_items=review_items,
+                issues=all_issues,
+            )
+            target_gap_backlog_rows = no_source_gap_payload.get("target_gap_backlog_rows", [])
+            target_gap_summary = no_source_gap_payload.get("target_gap_summary", {})
+        else:
+            no_source_gap_payload = {}
+            target_gap_backlog_rows = []
+            target_gap_summary = {
+                "run_id": "",
+                "target_gap_total": 0,
+                "cause_breakdown": {},
+                "scope_status": batch_scope_gate["target_scope_status"],
+            }
         rewrite_stage5_helper_sheets(
             output_path=output_dir / "会计报表_填充结果.xlsx",
             benchmark_summary={**benchmark_payload.get("summary", {}), "run_id": run_id},
@@ -916,31 +957,54 @@ def main(argv: Sequence[str] | None = None) -> int:
         benchmark_missing_true_rows=benchmark_missing_true_rows,
         main_target_review_rows=main_target_review_rows,
         note_detail_review_rows=note_detail_review_rows,
-    ) if args.enable_export_target_scoping else {}
+    ) if target_gap_processing_enabled else {
+        "run_id": "",
+        "target_missing_total": 0,
+        "target_facts_total": 0,
+        "target_mapped_ratio": 0.0,
+        "target_amount_coverage_ratio": 0.0,
+        "target_review_total": 0,
+        "note_detail_review_total": 0,
+        "scope_status": batch_scope_gate["target_scope_status"],
+    }
     source_backed_gap_closure_payload = build_source_backed_gap_closure(
         benchmark_missing_true_rows=benchmark_missing_true_rows,
         investigation_rows=no_source_gap_payload.get("rows", []),
         facts_raw=facts_raw,
         facts_deduped=facts_deduped,
         review_items=review_items,
-    ) if args.enable_export_target_scoping else {"rows": [], "summary": {"run_id": "", "closure_candidates_total": 0}}
+    ) if target_gap_processing_enabled else {
+        "rows": [],
+        "summary": {
+            "run_id": "",
+            "closure_candidates_total": 0,
+            "safe_to_auto_close_total": 0,
+            "source_backed_gap_total_before": 0,
+            "scope_status": batch_scope_gate["target_scope_status"],
+        },
+    }
     source_backed_gap_closure_payload = finalize_source_backed_gap_closure(
         source_backed_gap_closure_payload.get("rows", []),
         alias_acceptance_candidates=alias_acceptance_candidates,
-    ) if args.enable_export_target_scoping else source_backed_gap_closure_payload
+    ) if target_gap_processing_enabled else source_backed_gap_closure_payload
     source_backed_gap_total_before = len(source_backed_gap_closure_payload.get("rows", []))
     closure_apply_payload = apply_source_backed_gap_closures(
         closure_rows=source_backed_gap_closure_payload.get("rows", []),
         facts_raw=facts_raw,
         facts_deduped=facts_deduped,
         review_items=review_items,
-    ) if args.enable_export_target_scoping else {"rows": [], "summary": {}, "preferred_export_fact_ids": {}, "runtime_alignment_overrides": []}
+    ) if target_gap_processing_enabled else {
+        "rows": [],
+        "summary": {"applied_total": 0},
+        "preferred_export_fact_ids": {},
+        "runtime_alignment_overrides": [],
+    }
     source_backed_gap_closure_payload["rows"] = closure_apply_payload.get("rows", source_backed_gap_closure_payload.get("rows", []))
     runtime_preferred_export_fact_ids = closure_apply_payload.get("preferred_export_fact_ids", {})
     runtime_alignment_overrides = closure_apply_payload.get("runtime_alignment_overrides", [])
 
     if int(closure_apply_payload.get("summary", {}).get("applied_total", 0)) > 0:
-        if args.enable_export_target_scoping:
+        if target_gap_processing_enabled:
             facts_deduped, target_scope_rows, target_scope_summary = scope_facts_to_targets(
                 facts=facts_deduped,
                 benchmark_payload=benchmark_scope_payload,
@@ -982,7 +1046,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 stage6_targets=stage6_targets,
                 fact_scope_map=fact_scope_map,
             )
-        if args.enable_export_target_scoping:
+        if target_gap_processing_enabled:
             main_target_review_rows, note_detail_review_rows, suppressed_note_detail_rows, target_review_summary = build_target_review_backlogs(
                 review_items=review_items,
                 facts=facts_deduped,
@@ -1065,6 +1129,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
                 benchmark_alignment_rows = benchmark_payload.get("alignment_audit_rows", [])
                 benchmark_alignment_summary = benchmark_payload.get("alignment_summary", {})
+            batch_scope_gate = determine_batch_scope_gate(
+                batch_mode=bool(args.batch_mode),
+                benchmark_requested=True,
+                target_gap_requested=bool(args.enable_export_target_scoping and not args.disable_target_gap),
+                benchmark_summary=benchmark_payload.get("summary", {}),
+                alignment_summary=benchmark_alignment_summary,
+            )
+            target_gap_processing_enabled = bool(args.enable_export_target_scoping and batch_scope_gate["target_scope_enabled"])
             benchmark_missing_true_rows = benchmark_payload.get("benchmark_missing_true_rows", benchmark_payload.get("missing_rows", []))
             benchmark_gap_payload = explain_benchmark_gaps(
                 benchmark_missing_rows=benchmark_missing_true_rows,
@@ -1075,17 +1147,27 @@ def main(argv: Sequence[str] | None = None) -> int:
                 mapping_candidates=mapping_candidates,
                 derived_facts=derived_facts,
             )
-            no_source_gap_payload = investigate_no_source_gaps(
-                benchmark_missing_true_rows=benchmark_missing_true_rows,
-                facts_raw=facts_raw,
-                facts_deduped=facts_deduped,
-                unplaced_rows=export_stats.get("unplaced_rows", []),
-                derived_facts=derived_facts,
-                review_items=review_items,
-                issues=all_issues,
-            )
-            target_gap_backlog_rows = no_source_gap_payload.get("target_gap_backlog_rows", [])
-            target_gap_summary = no_source_gap_payload.get("target_gap_summary", {})
+            if target_gap_processing_enabled:
+                no_source_gap_payload = investigate_no_source_gaps(
+                    benchmark_missing_true_rows=benchmark_missing_true_rows,
+                    facts_raw=facts_raw,
+                    facts_deduped=facts_deduped,
+                    unplaced_rows=export_stats.get("unplaced_rows", []),
+                    derived_facts=derived_facts,
+                    review_items=review_items,
+                    issues=all_issues,
+                )
+                target_gap_backlog_rows = no_source_gap_payload.get("target_gap_backlog_rows", [])
+                target_gap_summary = no_source_gap_payload.get("target_gap_summary", {})
+            else:
+                no_source_gap_payload = {}
+                target_gap_backlog_rows = []
+                target_gap_summary = {
+                    "run_id": "",
+                    "target_gap_total": 0,
+                    "cause_breakdown": {},
+                    "scope_status": batch_scope_gate["target_scope_status"],
+                }
             rewrite_stage5_helper_sheets(
                 output_path=output_dir / "会计报表_填充结果.xlsx",
                 benchmark_summary={**benchmark_payload.get("summary", {}), "run_id": run_id},
@@ -1115,17 +1197,18 @@ def main(argv: Sequence[str] | None = None) -> int:
             benchmark_missing_true_rows=benchmark_missing_true_rows,
             main_target_review_rows=main_target_review_rows,
             note_detail_review_rows=note_detail_review_rows,
-        ) if args.enable_export_target_scoping else {}
+        ) if target_gap_processing_enabled else export_target_kpi_summary
 
     source_backed_gap_closure_payload = finalize_source_backed_gap_results(
         closure_rows=source_backed_gap_closure_payload.get("rows", []),
         final_investigation_rows=no_source_gap_payload.get("rows", []),
-    ) if args.enable_export_target_scoping else source_backed_gap_closure_payload
+    ) if target_gap_processing_enabled else source_backed_gap_closure_payload
     source_backed_gap_closure_summary = {
         **source_backed_gap_closure_payload.get("summary", {}),
         "source_backed_gap_total_before": source_backed_gap_total_before,
         "source_backed_gap_total_after": int(source_backed_gap_closure_payload.get("summary", {}).get("remaining_source_backed_total", 0)),
         "applied_total": int(closure_apply_payload.get("summary", {}).get("applied_total", 0)),
+        "scope_status": batch_scope_gate["target_scope_status"],
     } if args.enable_export_target_scoping else {}
 
     stage_tracker.finish(current_stage, success=True)
@@ -1423,12 +1506,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     if benchmark_payload:
         run_summary["benchmark_missing_in_auto"] = int(benchmark_payload.get("summary", {}).get("missing_in_auto", 0))
         run_summary["benchmark_value_diff_cells"] = int(benchmark_payload.get("summary", {}).get("value_diff_cells", 0))
-        run_summary["benchmark_missing_true_total"] = int(len(benchmark_missing_true_rows))
         run_summary["alignment_only_gap_total"] = int(benchmark_alignment_summary.get("alignment_only_gap_total", 0))
-    if export_target_kpi_summary:
-        run_summary["target_missing_total"] = int(export_target_kpi_summary.get("target_missing_total", 0))
-        run_summary["target_mapped_ratio"] = float(export_target_kpi_summary.get("target_mapped_ratio", 0.0))
-        run_summary["target_amount_coverage_ratio"] = float(export_target_kpi_summary.get("target_amount_coverage_ratio", 0.0))
+    run_summary = apply_batch_scope_gate_to_run_summary(
+        run_summary,
+        batch_scope_gate=batch_scope_gate,
+        benchmark_missing_true_total=len(benchmark_missing_true_rows),
+        target_summary=export_target_kpi_summary,
+    )
     stage6_kpi_summary = build_stage6_kpis(
         run_summary=run_summary,
         facts=facts_deduped,
@@ -1501,6 +1585,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             benchmark_recall_by_subject,
             list(benchmark_recall_by_subject[0].keys()) if benchmark_recall_by_subject else ["mapping_code", "cells_total", "matched_cells", "recall"],
         )
+    if args.enable_benchmark_alignment_repair:
+        write_summary_json(
+            output_dir / "benchmark_missing_true_summary.json",
+            {
+                "benchmark_missing_true_total": len(benchmark_missing_true_rows),
+                "alignment_only_gap_total": int(benchmark_alignment_summary.get("alignment_only_gap_total", 0)),
+                "ambiguous_alignment_total": int(benchmark_alignment_summary.get("ambiguous_alignment_total", 0)),
+            },
+            run_id,
+        )
     if args.emit_stage7_kpis:
         baseline_stage7 = load_json_file(baseline_dir / "stage7_kpi_summary.json") if baseline_dir and (baseline_dir / "stage7_kpi_summary.json").exists() else {}
         stage7_kpi_summary = build_stage7_kpis(
@@ -1513,15 +1607,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             baseline_stage7=baseline_stage7,
         )
         write_summary_json(output_dir / "stage7_kpi_summary.json", stage7_kpi_summary, run_id)
-        write_summary_json(
-            output_dir / "benchmark_missing_true_summary.json",
-            {
-                "benchmark_missing_true_total": len(benchmark_missing_true_rows),
-                "alignment_only_gap_total": int(benchmark_alignment_summary.get("alignment_only_gap_total", 0)),
-                "ambiguous_alignment_total": int(benchmark_alignment_summary.get("ambiguous_alignment_total", 0)),
-            },
-            run_id,
-        )
 
     if args.emit_review_actions_template:
         export_review_actions_template(
@@ -1673,10 +1758,20 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
     if args.emit_stage6_kpis:
         raw_summary_payloads.append(("stage6_kpi_summary.json", stage6_kpi_summary))
+    if args.enable_benchmark_alignment_repair:
+        raw_summary_payloads.append(
+            (
+                "benchmark_missing_true_summary.json",
+                {
+                    "benchmark_missing_true_total": len(benchmark_missing_true_rows),
+                    "alignment_only_gap_total": int(benchmark_alignment_summary.get("alignment_only_gap_total", 0)),
+                    "ambiguous_alignment_total": int(benchmark_alignment_summary.get("ambiguous_alignment_total", 0)),
+                },
+            )
+        )
     if args.emit_stage7_kpis:
         raw_summary_payloads.extend(
             [
-                ("benchmark_missing_true_summary.json", {"benchmark_missing_true_total": len(benchmark_missing_true_rows)}),
                 ("stage7_kpi_summary.json", stage7_kpi_summary),
             ]
         )
@@ -1816,12 +1911,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     if benchmark_payload:
         run_summary["benchmark_missing_in_auto"] = int(benchmark_payload.get("summary", {}).get("missing_in_auto", 0))
         run_summary["benchmark_value_diff_cells"] = int(benchmark_payload.get("summary", {}).get("value_diff_cells", 0))
-        run_summary["benchmark_missing_true_total"] = int(len(benchmark_missing_true_rows))
         run_summary["alignment_only_gap_total"] = int(benchmark_alignment_summary.get("alignment_only_gap_total", 0))
-    if export_target_kpi_summary:
-        run_summary["target_missing_total"] = int(export_target_kpi_summary.get("target_missing_total", 0))
-        run_summary["target_mapped_ratio"] = float(export_target_kpi_summary.get("target_mapped_ratio", 0.0))
-        run_summary["target_amount_coverage_ratio"] = float(export_target_kpi_summary.get("target_amount_coverage_ratio", 0.0))
+    run_summary = apply_batch_scope_gate_to_run_summary(
+        run_summary,
+        batch_scope_gate=batch_scope_gate,
+        benchmark_missing_true_total=len(benchmark_missing_true_rows),
+        target_summary=export_target_kpi_summary,
+    )
     write_summary_json(output_dir / "run_summary.json", run_summary, run_id)
     write_dict_csv(output_dir / "run_summary.csv", [run_summary], list(run_summary.keys()))
     rewrite_meta_summary(output_dir / "会计报表_填充结果.xlsx", run_summary)
@@ -2153,6 +2249,75 @@ def enrich_formula_candidate_rows(rows: List[Dict[str, Any]], formula_rules: Dic
         payload["formula_payload_json"] = json.dumps(rule, ensure_ascii=False, separators=(",", ":"), sort_keys=True) if rule else ""
         enriched.append(payload)
     return enriched
+
+
+def is_batch_alignment_eligible(benchmark_summary: Dict[str, Any] | None, alignment_summary: Dict[str, Any] | None) -> bool:
+    benchmark_summary = benchmark_summary or {}
+    alignment_summary = alignment_summary or {}
+    benchmark_workbook = str(benchmark_summary.get("benchmark_workbook", "") or "").strip()
+    benchmark_filled_total = int(benchmark_summary.get("benchmark_filled_total", 0) or 0)
+    ambiguous_alignment_total = int(alignment_summary.get("ambiguous_alignment_total", 0) or 0)
+    return bool(benchmark_workbook) and benchmark_filled_total > 0 and ambiguous_alignment_total == 0
+
+
+def determine_batch_scope_gate(
+    *,
+    batch_mode: bool,
+    benchmark_requested: bool,
+    target_gap_requested: bool,
+    benchmark_summary: Dict[str, Any] | None,
+    alignment_summary: Dict[str, Any] | None,
+) -> Dict[str, Any]:
+    if not batch_mode:
+        benchmark_scope_enabled = bool(benchmark_requested)
+        target_scope_enabled = bool(target_gap_requested)
+        return {
+            "benchmark_scope_enabled": benchmark_scope_enabled,
+            "target_scope_enabled": target_scope_enabled,
+            "benchmark_scope_status": "enabled" if benchmark_scope_enabled else "disabled",
+            "target_scope_status": "enabled" if target_scope_enabled else "disabled",
+        }
+    if not benchmark_requested:
+        return {
+            "benchmark_scope_enabled": False,
+            "target_scope_enabled": False,
+            "benchmark_scope_status": "disabled",
+            "target_scope_status": "skipped_no_benchmark",
+        }
+    if not is_batch_alignment_eligible(benchmark_summary, alignment_summary):
+        return {
+            "benchmark_scope_enabled": False,
+            "target_scope_enabled": False,
+            "benchmark_scope_status": "skipped_alignment_ineligible",
+            "target_scope_status": "skipped_ineligible" if target_gap_requested else "disabled",
+        }
+    return {
+        "benchmark_scope_enabled": True,
+        "target_scope_enabled": bool(target_gap_requested),
+        "benchmark_scope_status": "enabled",
+        "target_scope_status": "enabled" if target_gap_requested else "disabled",
+    }
+
+
+def apply_batch_scope_gate_to_run_summary(
+    run_summary: Dict[str, Any],
+    *,
+    batch_scope_gate: Dict[str, Any],
+    benchmark_missing_true_total: int,
+    target_summary: Dict[str, Any] | None,
+) -> Dict[str, Any]:
+    payload = dict(run_summary)
+    payload["benchmark_scope_status"] = batch_scope_gate.get("benchmark_scope_status", "")
+    payload["target_scope_status"] = batch_scope_gate.get("target_scope_status", "")
+    payload["benchmark_missing_true_total_raw"] = int(benchmark_missing_true_total)
+    payload["benchmark_missing_true_total"] = int(benchmark_missing_true_total) if batch_scope_gate.get("benchmark_scope_enabled", False) else 0
+    if target_summary:
+        target_missing_total = int(target_summary.get("target_missing_total", 0) or 0)
+        payload["target_missing_total_raw"] = target_missing_total
+        payload["target_missing_total"] = target_missing_total if batch_scope_gate.get("target_scope_enabled", False) else 0
+        payload["target_mapped_ratio"] = float(target_summary.get("target_mapped_ratio", 0.0) or 0.0)
+        payload["target_amount_coverage_ratio"] = float(target_summary.get("target_amount_coverage_ratio", 0.0) or 0.0)
+    return payload
 
 
 def env_int(name: str, default: int = 0) -> int:

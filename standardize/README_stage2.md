@@ -29,10 +29,10 @@
 
 ```bash
 python -m standardize.cli \
-  --input-dir outputs \
-  --template ..\会计报表.xlsx \
-  --output-dir normalized \
-  --source-image-dir data \
+  --input-dir data/corpus/inbox/ocr_outputs \
+  --template data/templates/会计报表.xlsx \
+  --output-dir data/generated/standardize/archive \
+  --source-image-dir data/corpus/inbox/input \
   --provider-priority aliyun,tencent \
   --enable-conflict-merge \
   --enable-period-normalization \

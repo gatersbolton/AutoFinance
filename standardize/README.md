@@ -1,46 +1,42 @@
 # standardize
 
-`standardize` 是 `OCR.py` 的消费层，用于把 `outputs/` 下的 OCR 结果转成稳定、可追溯、可校验的中间数据，再导出到标准化会计报表模板。
+`standardize` consumes OCR provider outputs and exports a deterministic, auditable accounting workbook.
 
-## 用法
+## Typical Usage
 
 ```bash
-python -m standardize.cli \
-  --input-dir outputs \
-  --template ..\会计报表.xlsx \
-  --output-dir normalized \
-  --provider-priority aliyun,tencent \
+python -m standardize.cli ^
+  --input-dir data/corpus/inbox/ocr_outputs ^
+  --template data/templates/会计报表.xlsx ^
+  --output-dir data/generated/standardize/archive ^
+  --source-image-dir data/corpus/inbox/input ^
+  --provider-priority aliyun,tencent ^
   --enable-conflict-merge
 ```
 
-## 输入规则
+## Input Rules
 
-- 真值优先读取 `outputs/<provider>/<doc>/raw/*.json`
-- `result.json` 仅用于补充页级索引、文本和 artifact 提示
-- 仅 `aliyun_table`、`tencent_table_v3`、`xlsx_fallback` 参与表格重建
-- `xlsx` 仅作为缺失 json 时的 fallback，并会显式标记缺少 bbox / confidence
+- Primary table evidence comes from `data/corpus/*/ocr_outputs/<provider>/<doc>/raw/*.json`
+- `result.json` is used for page-level indexing, text hints, and artifact references
+- Only `aliyun_table`, `tencent_table_v3`, and `xlsx_fallback` reconstruct tables
+- `xlsx` is fallback-only and is marked as missing bbox/confidence evidence
 
-## 输出文件
+## Main Outputs
 
-- `cells.csv`: dense cell 级结构
-- `facts.csv`: long format 财务事实表
-- `issues.csv`: 可疑值、修复和输入问题
-- `conflicts.csv`: 多 provider 冲突与裁决
-- `mapping_review.csv`: 无法自动落模板的映射候选
-- `summary.json`: 本次运行摘要
-- `run_manifest.json` / `artifact_manifest_core.csv`: 运行 provenance 与核心 artifact 清单
-- `pipeline_stage_timings.json` / `pipeline_stage_status.json` / `pipeline_completion_summary.json`: 阶段耗时与完成诊断
-- `会计报表_填充结果.xlsx`: 模板副本和动态期间列
+- `cells.csv`
+- `facts.csv`
+- `issues.csv`
+- `conflicts.csv`
+- `mapping_review.csv`
+- `summary.json`
+- `run_manifest.json` / `artifact_manifest_core.csv`
+- `pipeline_stage_timings.json` / `pipeline_stage_status.json` / `pipeline_completion_summary.json`
+- `会计报表_填充结果.xlsx`
 
-## 设计边界
+Default run outputs now live under `data/generated/standardize/archive/`.
 
-- 规则和配置驱动，不接 LLM
-- 不重写 `OCR.py`
-- 当前 MVP 重点覆盖财务报表主表，附注类页面优先保留结构和 review
-- 腾讯 raw json 的行列坐标存在起止索引不一致问题，适配层会按样例做修正
+## Boundaries
 
-## 后续扩展点
-
-- 更强的 logical subtable 切分
-- 更细的勾稽校验
-- 用 LLM 仅处理长尾别名候选，不替代规则主流程
+- Deterministic and config-driven; no LLM in the core pipeline
+- `OCR.py` is upstream and remains separate
+- Main statements are the first-class export target; note tables are preserved for review and follow-up
