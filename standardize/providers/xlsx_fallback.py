@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from openpyxl import load_workbook
 
@@ -13,12 +13,42 @@ def load_xlsx_fallback_page(source: DiscoveredSource) -> ProviderPage:
         raise ValueError(f"Fallback source for page {source.page_no} is missing artifact_file")
 
     workbook_path = Path(source.artifact_file)
+    table_cells, context_lines, worksheet_title = load_table_cells_from_xlsx(
+        workbook_path,
+        table_id_override="",
+        extra_meta={"source_kind": "xlsx_fallback"},
+    )
+
+    page_text = str(source.result_page_meta.get("text", "") or "\n".join(context_lines))
+    return ProviderPage(
+        doc_id=source.doc_id,
+        page_no=source.page_no,
+        provider=source.provider,
+        source_file=source.artifact_file,
+        source_kind="xlsx_fallback",
+        page_text=page_text,
+        tables={worksheet_title: table_cells},
+        context_lines=context_lines,
+        meta={
+            "notes": list(source.notes) + ["missing_bbox", "missing_confidence"],
+            "worksheet_title": worksheet_title,
+        },
+    )
+
+
+def load_table_cells_from_xlsx(
+    workbook_path: Path,
+    *,
+    table_id_override: str = "",
+    extra_meta: Optional[Dict[str, Any]] = None,
+) -> Tuple[List[ProviderCell], List[str], str]:
     workbook = load_workbook(workbook_path, data_only=True)
     worksheet = workbook.active
 
     start_row, end_row, start_col, end_col, context_lines = detect_table_window(worksheet)
     merged_lookup = build_merged_lookup(worksheet, start_row, end_row, start_col, end_col)
 
+    table_id = table_id_override or worksheet.title
     table_cells: List[ProviderCell] = []
     seen_anchors = set()
     for row_idx in range(start_row, end_row + 1):
@@ -32,7 +62,7 @@ def load_xlsx_fallback_page(source: DiscoveredSource) -> ProviderPage:
                 cell = worksheet.cell(row=anchor[0], column=anchor[1])
                 table_cells.append(
                     ProviderCell(
-                        table_id=worksheet.title,
+                        table_id=table_id,
                         row_start=anchor[0] - start_row,
                         row_end=merge_range[2] - start_row,
                         col_start=anchor[1] - start_col,
@@ -41,7 +71,7 @@ def load_xlsx_fallback_page(source: DiscoveredSource) -> ProviderPage:
                         bbox=None,
                         confidence=None,
                         cell_type="body",
-                        meta={"source_kind": "xlsx_fallback"},
+                        meta=dict(extra_meta or {}),
                     )
                 )
                 continue
@@ -49,7 +79,7 @@ def load_xlsx_fallback_page(source: DiscoveredSource) -> ProviderPage:
             cell = worksheet.cell(row=row_idx, column=col_idx)
             table_cells.append(
                 ProviderCell(
-                    table_id=worksheet.title,
+                    table_id=table_id,
                     row_start=row_idx - start_row,
                     row_end=row_idx - start_row,
                     col_start=col_idx - start_col,
@@ -58,25 +88,10 @@ def load_xlsx_fallback_page(source: DiscoveredSource) -> ProviderPage:
                     bbox=None,
                     confidence=None,
                     cell_type="body",
-                    meta={"source_kind": "xlsx_fallback"},
+                    meta=dict(extra_meta or {}),
                 )
             )
-
-    page_text = str(source.result_page_meta.get("text", "") or "\n".join(context_lines))
-    return ProviderPage(
-        doc_id=source.doc_id,
-        page_no=source.page_no,
-        provider=source.provider,
-        source_file=source.artifact_file,
-        source_kind="xlsx_fallback",
-        page_text=page_text,
-        tables={worksheet.title: table_cells},
-        context_lines=context_lines,
-        meta={
-            "notes": list(source.notes) + ["missing_bbox", "missing_confidence"],
-            "worksheet_title": worksheet.title,
-        },
-    )
+    return table_cells, context_lines, worksheet.title
 
 
 def detect_table_window(worksheet) -> Tuple[int, int, int, int, List[str]]:

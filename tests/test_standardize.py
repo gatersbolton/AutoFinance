@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 import yaml
 from PIL import Image, ImageDraw
-from openpyxl import load_workbook
+from openpyxl import Workbook, load_workbook
 
 from standardize import cli
 from standardize import batch as batch_runner
@@ -18,6 +18,7 @@ from standardize.benchmark import compare_benchmark_workbook, explain_benchmark_
 from standardize.curation import build_alias_acceptance_candidates, build_formula_rule_impact, load_curated_alias_records, load_curated_formula_rules, load_legacy_alias_records, prune_reocr_tasks, split_unmapped_facts
 from standardize.dedupe import assign_fact_ids, dedupe_facts
 from standardize.derive import derive_formula_facts
+from standardize.discover import SUPPORTED_TABLE_PROVIDERS, discover_provider_sources, resolve_artifact_file
 from standardize.feedback import apply_review_actions, build_delta_reports, export_review_actions_template, parse_review_actions_file
 from standardize.integrity import run_artifact_integrity
 from standardize.manifest import generate_run_id, write_run_manifest
@@ -56,6 +57,119 @@ from standardize.validation import run_validation
 
 
 class StandardizeTests(unittest.TestCase):
+    def test_supported_table_providers_include_paddle(self):
+        self.assertEqual(SUPPORTED_TABLE_PROVIDERS["paddle_table_local"], "paddle")
+        provider_config = {"families": {"paddle": ["paddle_table_local"], "aliyun": ["aliyun_table"]}}
+        self.assertEqual(
+            cli.expand_provider_priority("paddle,aliyun", provider_config),
+            ["paddle_table_local", "aliyun_table"],
+        )
+
+    def test_resolve_artifact_file_prefers_xlsx_when_html_is_listed_first(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            doc_dir = Path(tmpdir) / "paddle_table_local" / "demo"
+            artifacts_dir = doc_dir / "artifacts"
+            artifacts_dir.mkdir(parents=True, exist_ok=True)
+            (artifacts_dir / "page_0001_table_01.html").write_text("<table></table>", encoding="utf-8")
+            (artifacts_dir / "page_0001_table_01.xlsx").write_bytes(b"xlsx")
+
+            artifact_path = resolve_artifact_file(
+                doc_dir,
+                1,
+                {"artifact_files": ["artifacts/page_0001_table_01.html", "artifacts/page_0001_table_01.xlsx"]},
+            )
+
+            self.assertEqual(artifact_path.name, "page_0001_table_01.xlsx")
+
+    def test_load_paddle_fixture_page_for_standardize_compatibility(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            input_dir = Path(tmpdir) / "ocr_outputs"
+            provider_doc_dir = input_dir / "paddle_table_local" / "demo"
+            raw_dir = provider_doc_dir / "raw"
+            artifacts_dir = provider_doc_dir / "artifacts"
+            raw_dir.mkdir(parents=True, exist_ok=True)
+            artifacts_dir.mkdir(parents=True, exist_ok=True)
+
+            workbook = Workbook()
+            worksheet = workbook.active
+            worksheet.title = "table_1"
+            worksheet["A1"] = "项目"
+            worksheet["B1"] = "期末数"
+            worksheet["A2"] = "货币资金"
+            worksheet["B2"] = "100"
+            workbook.save(artifacts_dir / "page_0001_table_01.xlsx")
+            (artifacts_dir / "page_0001_table_01.html").write_text(
+                "<table><tr><td>项目</td><td>期末数</td></tr><tr><td>货币资金</td><td>100</td></tr></table>",
+                encoding="utf-8",
+            )
+            raw_payload = {
+                "provider_name": "paddle_table_local",
+                "page_number": 1,
+                "page_text": "资产负债表 2022年12月31日 单位：元",
+                "layout_detection_enabled": True,
+                "selected_device": "gpu:0",
+                "runtime_seconds": 1.23,
+                "tables": [
+                    {
+                        "table_id": "1",
+                        "bbox": [10, 10, 100, 100],
+                        "table_region_id": 0,
+                        "xlsx_file": "artifacts/page_0001_table_01.xlsx",
+                        "html_file": "artifacts/page_0001_table_01.html",
+                        "neighbor_texts": ["资产负债表", "2022年12月31日", "单位：元"],
+                    }
+                ],
+                "missing_fields": [],
+            }
+            (raw_dir / "page_0001.json").write_text(json.dumps(raw_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            (provider_doc_dir / "result.json").write_text(
+                json.dumps(
+                    {
+                        "provider": "paddle_table_local",
+                        "page_count": 1,
+                        "pages": [
+                            {
+                                "page_number": 1,
+                                "text": raw_payload["page_text"],
+                                "raw_file": "raw/page_0001.json",
+                                "artifact_files": [
+                                    "artifacts/page_0001_table_01.html",
+                                    "artifacts/page_0001_table_01.xlsx",
+                                ],
+                                "table_count": 1,
+                                "bbox_coverage": 1.0,
+                                "missing_fields": [],
+                            }
+                        ],
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+
+            sources = discover_provider_sources(input_dir, "paddle_table_local")
+            self.assertEqual(len(sources), 1)
+            page = cli.load_provider_page(sources[0])
+            statement_meta = StatementMeta(
+                statement_type="balance_sheet",
+                statement_name_raw="资产负债表",
+                report_date_raw="2022年12月31日",
+                report_date_norm="2022-12-31",
+                unit_raw="元",
+                unit_multiplier=1.0,
+            )
+            cells, subtables, issues = standardize_page(
+                page=page,
+                statement_meta=statement_meta,
+                keyword_config={},
+            )
+
+            self.assertEqual(page.provider, "paddle_table_local")
+            self.assertGreater(len(page.tables["1"]), 0)
+            self.assertGreater(len(cells), 0)
+            self.assertGreater(len(subtables), 0)
+
     def test_extract_aliyun_outer_data_string(self):
         raw = {
             "Data": json.dumps(
@@ -122,7 +236,7 @@ class StandardizeTests(unittest.TestCase):
             self.assertTrue(result["suspicious_reason"])
 
     def test_template_subject_parsing(self):
-        template_path = Path(__file__).resolve().parent.parent / "会计报表.xlsx"
+        template_path = Path(__file__).resolve().parent.parent / "data" / "templates" / "会计报表.xlsx"
 
         subjects, sheet_name, header_row = load_template_subjects(template_path)
 
@@ -628,7 +742,7 @@ class StandardizeTests(unittest.TestCase):
         self.assertGreaterEqual(enriched[0].magnitude_ratio, 100)
 
     def test_export_and_integrity_contract(self):
-        template_path = Path(__file__).resolve().parent.parent / "会计报表.xlsx"
+        template_path = Path(__file__).resolve().parent.parent / "data" / "templates" / "会计报表.xlsx"
         with tempfile.TemporaryDirectory() as tmpdir:
             output_dir = Path(tmpdir)
             facts = assign_fact_ids(
@@ -964,7 +1078,7 @@ class StandardizeTests(unittest.TestCase):
 
     def test_export_writes_applied_actions_sheet(self):
         repo_root = Path(__file__).resolve().parent
-        template_path = repo_root.parent / "会计报表.xlsx"
+        template_path = repo_root.parent / "data" / "templates" / "会计报表.xlsx"
         with tempfile.TemporaryDirectory() as tmpdir:
             output_dir = Path(tmpdir)
             facts = assign_fact_ids(
@@ -1208,7 +1322,7 @@ class StandardizeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             base = Path(tmpdir)
             workbook_path = base / "wb.xlsx"
-            template_path = Path(__file__).resolve().parent.parent / "会计报表.xlsx"
+            template_path = Path(__file__).resolve().parent.parent / "data" / "templates" / "会计报表.xlsx"
             shutil.copy2(template_path, workbook_path)
             summary = run_full_run_contract(
                 output_dir=base,
@@ -1258,7 +1372,7 @@ class StandardizeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             base = Path(tmpdir)
             workbook_path = base / "wb.xlsx"
-            template_path = Path(__file__).resolve().parent.parent / "会计报表.xlsx"
+            template_path = Path(__file__).resolve().parent.parent / "data" / "templates" / "会计报表.xlsx"
             shutil.copy2(template_path, workbook_path)
             (base / "run_summary.json").write_text(json.dumps({"run_id": "RUN_TEST"}), encoding="utf-8")
             (base / "summary.json").write_text(json.dumps({"run_id": "RUN_TEST"}), encoding="utf-8")
@@ -1474,7 +1588,7 @@ class StandardizeTests(unittest.TestCase):
 
     def test_benchmark_compare_and_gap_mining(self):
         repo_root = Path(__file__).resolve().parent
-        template_path = repo_root.parent / "会计报表.xlsx"
+        template_path = repo_root.parent / "data" / "templates" / "会计报表.xlsx"
         with tempfile.TemporaryDirectory() as tmpdir:
             tmpdir_path = Path(tmpdir)
             export_path = tmpdir_path / "auto.xlsx"
@@ -1763,7 +1877,7 @@ class StandardizeTests(unittest.TestCase):
 
     def test_stage7_export_blocks_note_detail_and_writes_helper_sheets(self):
         repo_root = Path(__file__).resolve().parent
-        template_path = repo_root.parent / "会计报表.xlsx"
+        template_path = repo_root.parent / "data" / "templates" / "会计报表.xlsx"
         with tempfile.TemporaryDirectory() as tmpdir:
             output_dir = Path(tmpdir)
             facts = assign_fact_ids(
@@ -1912,9 +2026,9 @@ class StandardizeTests(unittest.TestCase):
                                 "doc_id": "T01",
                                 "job_id": "01",
                                 "company": "Repo Fixture Co",
-                                "input_dir": "../outputs",
-                                "source_image_dir": "../data",
-                                "benchmark_path": "../data/会计报表_债务人审计报告-2022年-gpt5.4填写.xlsx",
+                                "input_dir": "../../data/corpus/D01/ocr_outputs",
+                                "source_image_dir": "../../data/corpus/D01/input",
+                                "benchmark_path": "../../data/corpus/D01/benchmarks/会计报表_泰兴市泰泽实业有限公司2022年审计报告_gpt5.4填写.xlsx",
                                 "benchmark_enabled": True,
                                 "target_gap_enabled": True,
                             }
@@ -1931,7 +2045,7 @@ class StandardizeTests(unittest.TestCase):
             self.assertTrue(entry["benchmark_path_exists"])
             self.assertTrue(entry["input_dir_exists"])
             self.assertTrue(entry["source_image_dir_exists"])
-            self.assertTrue(entry["benchmark_path"].endswith("会计报表_债务人审计报告-2022年-gpt5.4填写.xlsx"))
+            self.assertTrue(entry["benchmark_path"].endswith("会计报表_泰兴市泰泽实业有限公司2022年审计报告_gpt5.4填写.xlsx"))
 
             resolution = batch_runner.resolve_benchmark_entry(doc_id="T01", registry=registry, job_id="01")
             self.assertTrue(resolution["benchmark_enabled"])
@@ -2266,7 +2380,7 @@ class StandardizeTests(unittest.TestCase):
 
     def test_run_single_doc_timeout_is_fail_closed(self):
         repo_root = Path(__file__).resolve().parent
-        template_path = repo_root.parent / "会计报表.xlsx"
+        template_path = repo_root.parent / "data" / "templates" / "会计报表.xlsx"
         registry = {
             "D01": {
                 "doc_id": "D01",
@@ -2339,7 +2453,7 @@ class StandardizeTests(unittest.TestCase):
 
     def test_batch_progress_artifacts_emit_on_partial_failure(self):
         repo_root = Path(__file__).resolve().parent
-        template_path = repo_root.parent / "会计报表.xlsx"
+        template_path = repo_root.parent / "data" / "templates" / "会计报表.xlsx"
         registry = {
             "D01": {
                 "doc_id": "D01",
@@ -2491,8 +2605,15 @@ class StandardizeTests(unittest.TestCase):
 
     def test_page_0004_end_to_end(self):
         repo_root = Path(__file__).resolve().parent
-        template_path = repo_root.parent / "会计报表.xlsx"
-        benchmark_path = repo_root / "data" / "会计报表_债务人审计报告-2022年-gpt5.4填写.xlsx"
+        template_path = repo_root.parent / "data" / "templates" / "会计报表.xlsx"
+        benchmark_path = (
+            repo_root.parent
+            / "data"
+            / "corpus"
+            / "D01"
+            / "benchmarks"
+            / "会计报表_泰兴市泰泽实业有限公司2022年审计报告_gpt5.4填写.xlsx"
+        )
 
         with tempfile.TemporaryDirectory() as tmpdir:
             tmpdir_path = Path(tmpdir)
@@ -2510,7 +2631,7 @@ class StandardizeTests(unittest.TestCase):
                     "--output-dir",
                     str(output_root),
                     "--source-image-dir",
-                    str(repo_root / "data"),
+                    str(repo_root.parent / "data" / "corpus" / "D01" / "input"),
                     "--provider-priority",
                     "aliyun,tencent",
                     "--enable-conflict-merge",
@@ -2669,11 +2790,12 @@ class StandardizeTests(unittest.TestCase):
 
     def copy_sample_page_0004(self, repo_root: Path, input_dir: Path) -> None:
         doc_name = "债务人审计报告-2022年"
+        corpus_root = repo_root.parent / "data" / "corpus" / "D01" / "ocr_outputs"
 
         aliyun_raw_dir = input_dir / "aliyun_table" / doc_name / "raw"
         aliyun_raw_dir.mkdir(parents=True, exist_ok=True)
         shutil.copy2(
-            next((repo_root / "outputs" / "aliyun_table").glob(f"*/raw/page_0004.json")),
+            next((corpus_root / "aliyun_table").glob(f"*/raw/page_0004.json")),
             aliyun_raw_dir / "page_0004.json",
         )
         aliyun_result = {
@@ -2699,11 +2821,11 @@ class StandardizeTests(unittest.TestCase):
         tencent_artifacts_dir.mkdir(parents=True, exist_ok=True)
 
         shutil.copy2(
-            next((repo_root / "outputs" / "tencent_table_v3").glob("*/raw/page_0004_tencent.json")),
+            next((corpus_root / "tencent_table_v3").glob("*/raw/page_0004_tencent.json")),
             tencent_raw_dir / "page_0004_tencent.json",
         )
         shutil.copy2(
-            next((repo_root / "outputs" / "tencent_table_v3").glob("*/artifacts/page_0004.xlsx")),
+            next((corpus_root / "tencent_table_v3").glob("*/artifacts/page_0004.xlsx")),
             tencent_artifacts_dir / "page_0004.xlsx",
         )
         tencent_result = {

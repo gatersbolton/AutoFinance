@@ -14,6 +14,7 @@ LOGGER = logging.getLogger(__name__)
 SUPPORTED_TABLE_PROVIDERS = {
     "aliyun_table": "aliyun",
     "tencent_table_v3": "tencent",
+    "paddle_table_local": "paddle",
 }
 TEXT_ONLY_PROVIDERS = {
     "aliyun_text",
@@ -144,10 +145,13 @@ def resolve_artifact_file(doc_dir: Path, page_no: int, page_meta: Dict[str, Any]
 
     artifact_files = page_meta.get("artifact_files")
     if isinstance(artifact_files, list):
+        xlsx_candidates: List[Path] = []
         for item in artifact_files:
             artifact_path = doc_dir / Path(item)
-            if artifact_path.exists():
-                return artifact_path
+            if artifact_path.exists() and artifact_path.suffix.lower() == ".xlsx":
+                xlsx_candidates.append(artifact_path)
+        if xlsx_candidates:
+            return xlsx_candidates[0]
 
     exact = artifacts_dir / f"page_{page_no:04d}.xlsx"
     if exact.exists():
@@ -157,4 +161,3 @@ def resolve_artifact_file(doc_dir: Path, page_no: int, page_meta: Dict[str, Any]
     if candidates:
         return candidates[0]
     return None
-

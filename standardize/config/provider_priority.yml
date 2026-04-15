@@ -1,6 +1,8 @@
 families:
   aliyun:
     - aliyun_table
+  paddle:
+    - paddle_table_local
   tencent:
     - tencent_table_v3
 default_priority:

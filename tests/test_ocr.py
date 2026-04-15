@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest import mock
 
 import OCR as ocr
+import project_paths
 
 
 class FakeImage:
@@ -292,6 +293,86 @@ class OCRToolTests(unittest.TestCase):
     def test_resolve_requested_methods(self):
         self.assertEqual(ocr.resolve_requested_methods("tencent_table_v3", None), ["tencent_table_v3"])
         self.assertEqual(ocr.resolve_requested_methods(None, "both"), ["tencent_text", "aliyun_text"])
+        self.assertEqual(ocr.resolve_requested_methods("paddle_table_local", None), ["paddle_table_local"])
+
+    def test_required_credential_providers_skips_paddle(self):
+        self.assertEqual(ocr.required_credential_providers(["paddle_table_local"]), [])
+        self.assertEqual(
+            ocr.required_credential_providers(["paddle_table_local", "aliyun_table"]),
+            ["aliyun"],
+        )
+
+    def test_build_provider_clients_accepts_paddle(self):
+        fake_paddle = FakeProvider("paddle_table_local", {})
+        with mock.patch.object(ocr, "PaddleLocalOCRProvider", return_value=fake_paddle):
+            providers = ocr.build_provider_clients(
+                ["paddle_table_local"],
+                ocr.CredentialBundle(),
+                paddle_options=ocr.PaddleProviderOptions(runtime_python="python"),
+            )
+        self.assertEqual([provider.name for provider in providers], ["paddle_table_local"])
+
+    def test_normalize_paddle_environment_summary(self):
+        summary = ocr.normalize_paddle_environment_summary(
+            {
+                "gpu_available": True,
+                "selected_device": "gpu:0",
+                "vram_info_if_available": {"name": "GPU", "total_memory_mb": 8192},
+                "model_cache_path": "C:/Users/demo/.paddlex",
+                "provider_ready": True,
+                "skip_reason_if_any": "",
+                "paddle_version": "3.2.2",
+                "paddlex_version": "3.4.3",
+                "compiled_with_cuda": True,
+            },
+            runtime_python="C:/python.exe",
+            options=ocr.PaddleProviderOptions(device="gpu"),
+        )
+        self.assertTrue(summary["provider_ready"])
+        self.assertEqual(summary["selected_device"], "gpu:0")
+        self.assertEqual(summary["runtime_python"], "C:/python.exe")
+
+    def test_build_paddle_provider_contract_summary(self):
+        summary = ocr.build_paddle_provider_contract_summary(
+            [
+                {
+                    "page_number": 4,
+                    "raw_file": "raw/page_0004.json",
+                    "artifact_files": [
+                        "artifacts/page_0004_table_01.xlsx",
+                        "artifacts/page_0004_table_01.html",
+                    ],
+                    "table_count": 1,
+                    "bbox_coverage": 1.0,
+                    "missing_fields": [],
+                },
+                {
+                    "page_number": 15,
+                    "raw_file": "raw/page_0015.json",
+                    "artifact_files": [
+                        "artifacts/page_0015_table_01.xlsx",
+                        "artifacts/page_0015_table_01.html",
+                    ],
+                    "table_count": 2,
+                    "bbox_coverage": 0.5,
+                    "missing_fields": ["bbox"],
+                },
+            ]
+        )
+        self.assertEqual(summary["pages_processed"], 2)
+        self.assertEqual(summary["tables_emitted"], 3)
+        self.assertTrue(summary["raw_json_present"])
+        self.assertTrue(summary["xlsx_present"])
+        self.assertTrue(summary["html_present"])
+        self.assertIn("bbox", summary["missing_fields"])
+
+    def test_project_paths_include_stage8_paddle_roots(self):
+        self.assertTrue(str(project_paths.PADDLE_PROVIDER_PILOT_ROOT).endswith("data\\generated\\experiments\\paddle_provider_pilot"))
+        self.assertTrue(
+            str(project_paths.PADDLE_STANDARDIZE_CONTROL_ROOT).endswith(
+                "data\\generated\\standardize\\control_runs\\paddle_provider_pilot"
+            )
+        )
 
     def test_process_pdf_with_provider_writes_artifacts(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -322,6 +403,42 @@ class OCRToolTests(unittest.TestCase):
             artifact_path = output_dir / "tencent_table_v3" / "audit" / "artifacts" / "page_0001.xlsx"
             self.assertTrue(artifact_path.exists())
             self.assertEqual(artifact_path.read_bytes(), b"excel-bytes")
+
+    def test_process_pdf_with_provider_merges_page_metadata(self):
+        class PageOptionProvider(ocr.OCRProvider):
+            name = "paddle_table_local"
+
+            def recognize_page(self, page, page_options=None):
+                return {
+                    "raw": {"page_number": page.page_number},
+                    "text": "table text",
+                    "blocks": [{"text": "table text"}],
+                    "artifacts": [{"filename": "page_0001_table_01.xlsx", "bytes": b"excel-bytes"}],
+                    "page_metadata": {
+                        "table_count": 1,
+                        "bbox_coverage": 1.0,
+                        "missing_fields": [],
+                        "layout_detection_enabled": bool(page_options and page_options.get("layout_detection")),
+                    },
+                }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_dir = Path(tmpdir) / "output"
+            pdf_path = Path(tmpdir) / "audit.pdf"
+            pdf_path.write_bytes(b"%PDF-1.4")
+            failures = ocr.process_pdf_with_provider(
+                pdf_path=pdf_path,
+                rendered_pages=[ocr.RenderedPage(page_number=1, image_bytes=b"img", width=100, height=200)],
+                provider=PageOptionProvider(),
+                output_root=output_dir,
+                page_options_by_number={1: {"layout_detection": "on"}},
+            )
+            self.assertEqual(failures, [])
+            result_json = json.loads(
+                (output_dir / "paddle_table_local" / "audit" / "result.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(result_json["pages"][0]["table_count"], 1)
+            self.assertTrue(result_json["pages"][0]["layout_detection_enabled"])
 
     def test_should_abort_provider_after_error_for_resource_package(self):
         self.assertTrue(

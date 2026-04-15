@@ -26,6 +26,11 @@ data/
   vendor/
     PaddleOCR/
   generated/
+    experiments/
+      paddle_provider_pilot/
+    standardize/
+      control_runs/
+        paddle_provider_pilot/
 ```
 
 ## Main Commands
@@ -34,6 +39,9 @@ Run OCR into the default inbox output root:
 
 ```bash
 python OCR.py --method tencent_table_v3
+
+python OCR.py --method paddle_table_local ^
+  --paddle-runtime-python .venv_paddlegpu\Scripts\python.exe
 ```
 
 Run single-document standardization:
@@ -90,3 +98,4 @@ python -m unittest discover -s tests
 - `AGENTS.md`: repo map and path contract for Codex and other agents
 - `benchmarks/registry.yml`: document registry for batch runs
 - `standardize/README*.md`: stage-specific notes for the standardization pipeline
+- `README_stage8_paddle_provider.md`: optional Paddle local provider pilot notes

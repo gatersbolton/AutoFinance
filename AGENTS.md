@@ -43,9 +43,11 @@ data/
     standardize/
       archive/
       control_runs/
+        paddle_provider_pilot/
       batches/
     audits/
     experiments/
+      paddle_provider_pilot/
     comparisons/
     legacy/
 ```
@@ -57,6 +59,7 @@ Rules:
 - `data/secrets/` holds credential files.
 - `data/vendor/` holds local third-party source checkouts.
 - `data/generated/` holds all run outputs, audits, experiments, and historical leftovers.
+- Stage 8 Paddle pilot outputs belong under `data/generated/experiments/paddle_provider_pilot/` and `data/generated/standardize/control_runs/paddle_provider_pilot/`.
 
 ## Standard Commands
 
@@ -64,6 +67,9 @@ OCR:
 
 ```bash
 python OCR.py --method aliyun_table
+
+python OCR.py --method paddle_table_local ^
+  --paddle-runtime-python .venv_paddlegpu\Scripts\python.exe
 ```
 
 Single document:

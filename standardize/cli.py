@@ -50,7 +50,7 @@ from .normalize.statements import classify_statement
 from .normalize.tables import extract_facts, standardize_page
 from .overrides import apply_conflict_overrides, apply_local_mapping_overrides, apply_period_overrides, apply_placement_overrides, apply_suppression_overrides
 from .overrides import build_manual_alias_records, ensure_override_store, filter_review_items_by_placement, load_override_entries
-from .providers import load_aliyun_page, load_tencent_page, load_xlsx_fallback_page
+from .providers import load_aliyun_page, load_paddle_page, load_tencent_page, load_xlsx_fallback_page
 from .quality_report import build_run_summary, build_top_suspicious_values, build_top_unknown_labels
 from .review import build_review_queue, export_review_workbook
 from .routing import build_page_selection, build_reocr_tasks, build_secondary_ocr_candidates, ingest_reocr_results, materialize_reocr_inputs
@@ -2156,6 +2156,8 @@ def load_provider_page(source: DiscoveredSource):
         return load_aliyun_page(source)
     if source.provider == "tencent_table_v3" and source.raw_file:
         return load_tencent_page(source)
+    if source.provider == "paddle_table_local" and source.raw_file:
+        return load_paddle_page(source)
     if source.artifact_file:
         return load_xlsx_fallback_page(source)
     raise ValueError(f"No supported source found for {source.doc_id} page {source.page_no} provider {source.provider}")

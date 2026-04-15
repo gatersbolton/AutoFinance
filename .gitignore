@@ -6,6 +6,8 @@ normalized_runs/
 normalized_archive/
 audits/
 data/
+data/generated/audits/
+data/generated/audits/**/_audit_tmp/
 runs/
 _audit_tmp/
 reocr_results/

@@ -6,6 +6,10 @@ import importlib
 import io
 import json
 import os
+import subprocess
+import sys
+import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
@@ -28,6 +32,7 @@ METHOD_CHOICES = (
     "aliyun_text",
     "tencent_table_v3",
     "aliyun_table",
+    "paddle_table_local",
 )
 LEGACY_PROVIDER_TO_METHODS = {
     "tencent": ["tencent_text"],
@@ -40,6 +45,11 @@ METHOD_TO_CREDENTIAL_PROVIDER = {
     "aliyun_text": "aliyun",
     "aliyun_table": "aliyun",
 }
+PADDLE_PROVIDER_NAME = "paddle_table_local"
+PADDLE_RUNTIME_CHOICES = ("auto", "gpu", "cpu")
+PADDLE_LAYOUT_CHOICES = ("auto", "on", "off")
+DEFAULT_PADDLE_PIPELINE = "table_recognition"
+PADDLE_WORKER_SCRIPT = Path(__file__).resolve().parent / "tools" / "paddle_table_worker.py"
 
 
 class OCRConfigurationError(RuntimeError):
@@ -91,6 +101,16 @@ class RenderedPage:
     image_format: str = "JPEG"
 
 
+@dataclass
+class PaddleProviderOptions:
+    device: str = "auto"
+    layout_detection: str = "auto"
+    max_pages: int = 0
+    skip_if_no_gpu: bool = False
+    runtime_python: str = ""
+    pipeline: str = DEFAULT_PADDLE_PIPELINE
+
+
 class OCRProvider:
     name = "base"
 
@@ -99,6 +119,78 @@ class OCRProvider:
 
     def recognize_page(self, page: RenderedPage) -> Dict[str, Any]:
         raise NotImplementedError
+
+
+class PaddleLocalOCRProvider(OCRProvider):
+    name = PADDLE_PROVIDER_NAME
+
+    def __init__(self, options: PaddleProviderOptions):
+        self.options = options
+        self.runtime_python = resolve_paddle_runtime_python(options.runtime_python)
+        self.environment_summary = probe_paddle_environment(self.runtime_python, options)
+        if not self.environment_summary.get("provider_ready", False):
+            raise OCRConfigurationError(
+                self.environment_summary.get("skip_reason_if_any")
+                or f"Paddle provider is not ready in {self.runtime_python}."
+            )
+
+    def recognize_page(self, page: RenderedPage, page_options: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        layout_detection = resolve_paddle_layout_detection(
+            self.options.layout_detection,
+            page_options.get("layout_detection") if page_options else None,
+        )
+        with tempfile.TemporaryDirectory(prefix="autofinance_paddle_") as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            image_path = tmpdir_path / f"page_{page.page_number:04d}.jpg"
+            image_path.write_bytes(page.image_bytes)
+            artifact_dir = tmpdir_path / "artifacts"
+            output_json_path = tmpdir_path / "worker_result.json"
+            run_paddle_worker(
+                runtime_python=self.runtime_python,
+                worker_args=[
+                    "recognize-image",
+                    "--image-path",
+                    str(image_path),
+                    "--page-number",
+                    str(page.page_number),
+                    "--requested-device",
+                    self.options.device,
+                    "--layout-detection",
+                    layout_detection,
+                    "--pipeline",
+                    self.options.pipeline,
+                    "--artifact-dir",
+                    str(artifact_dir),
+                    "--output-json",
+                    str(output_json_path),
+                ],
+            )
+            raw_payload = load_worker_json(output_json_path)
+            if raw_payload.get("error"):
+                raise OCRConfigurationError(str(raw_payload["error"]))
+
+            artifacts: List[Dict[str, Any]] = []
+            artifact_filenames = [str(item) for item in raw_payload.get("artifact_filenames", [])]
+            for filename in artifact_filenames:
+                artifact_path = artifact_dir / filename
+                if artifact_path.exists():
+                    artifacts.append({"filename": filename, "bytes": artifact_path.read_bytes()})
+
+        normalize_paddle_raw_payload(raw_payload)
+        return {
+            "raw": raw_payload,
+            "text": str(raw_payload.get("page_text", "") or ""),
+            "blocks": list(raw_payload.get("blocks", [])),
+            "artifacts": artifacts,
+            "page_metadata": {
+                "runtime_seconds": raw_payload.get("runtime_seconds"),
+                "layout_detection_enabled": raw_payload.get("layout_detection_enabled"),
+                "selected_device": raw_payload.get("selected_device"),
+                "table_count": len(raw_payload.get("tables", [])),
+                "missing_fields": list(raw_payload.get("missing_fields", [])),
+                "bbox_coverage": compute_paddle_page_bbox_coverage(raw_payload),
+            },
+        }
 
 
 class TencentOCRProvider(OCRProvider):
@@ -288,8 +380,210 @@ class AliyunTableOCRProvider(AliyunOCRProvider):
         }
 
 
+def build_paddle_options(args: argparse.Namespace) -> PaddleProviderOptions:
+    return PaddleProviderOptions(
+        device=args.paddle_device,
+        layout_detection=args.paddle_layout_detection,
+        max_pages=max(int(args.paddle_max_pages or 0), 0),
+        skip_if_no_gpu=bool(args.paddle_skip_if_no_gpu),
+        runtime_python=str(args.paddle_runtime_python or "").strip(),
+        pipeline=DEFAULT_PADDLE_PIPELINE,
+    )
+
+
+def candidate_paddle_runtime_pythons(explicit_python: str) -> List[Path]:
+    candidates: List[Path] = []
+    if explicit_python:
+        candidates.append(Path(explicit_python))
+    repo_root = Path(__file__).resolve().parent
+    for relative in [
+        ".venv_paddlegpu/Scripts/python.exe",
+        ".venv_paddleocr/Scripts/python.exe",
+    ]:
+        candidates.append(repo_root / relative)
+    candidates.append(Path(sys.executable))
+    deduped: List[Path] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        key = str(candidate).lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(candidate)
+    return deduped
+
+
+def resolve_paddle_runtime_python(explicit_python: str) -> str:
+    for candidate in candidate_paddle_runtime_pythons(explicit_python):
+        if candidate.exists():
+            return str(candidate.resolve())
+    return str(Path(explicit_python).resolve()) if explicit_python else str(Path(sys.executable).resolve())
+
+
+def run_paddle_worker(runtime_python: str, worker_args: Sequence[str]) -> None:
+    if not PADDLE_WORKER_SCRIPT.exists():
+        raise OCRConfigurationError(f"Paddle worker script is missing: {PADDLE_WORKER_SCRIPT}")
+    command = [runtime_python, str(PADDLE_WORKER_SCRIPT), *worker_args]
+    completed = subprocess.run(
+        command,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        cwd=str(Path(__file__).resolve().parent),
+    )
+    if completed.returncode != 0:
+        stderr = (completed.stderr or "").strip()
+        stdout = (completed.stdout or "").strip()
+        message = stderr or stdout or f"Paddle worker exited with code {completed.returncode}."
+        raise OCRConfigurationError(message)
+
+
+def load_worker_json(path: Path) -> Dict[str, Any]:
+    if not path.exists():
+        raise OCRConfigurationError(f"Paddle worker did not produce the expected output json: {path}")
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def normalize_paddle_raw_payload(raw_payload: Dict[str, Any]) -> None:
+    artifact_files = []
+    for filename in raw_payload.get("artifact_filenames", []):
+        artifact_files.append(f"artifacts/{filename}")
+    raw_payload["artifact_files"] = artifact_files
+    for table in raw_payload.get("tables", []):
+        xlsx_filename = str(table.get("xlsx_filename", "") or "").strip()
+        html_filename = str(table.get("html_filename", "") or "").strip()
+        table["xlsx_file"] = f"artifacts/{xlsx_filename}" if xlsx_filename else ""
+        table["html_file"] = f"artifacts/{html_filename}" if html_filename else ""
+
+
+def resolve_paddle_layout_detection(default_mode: str, override: Any = None) -> str:
+    if isinstance(override, bool):
+        return "on" if override else "off"
+    if isinstance(override, str) and override.strip().lower() in {"on", "off"}:
+        return override.strip().lower()
+    if default_mode == "off":
+        return "off"
+    return "on"
+
+
+def normalize_paddle_environment_summary(
+    probe_payload: Dict[str, Any],
+    *,
+    runtime_python: str,
+    options: PaddleProviderOptions,
+) -> Dict[str, Any]:
+    selected_device = str(probe_payload.get("selected_device", "") or "cpu")
+    skip_reason = str(probe_payload.get("skip_reason_if_any", "") or "")
+    if options.skip_if_no_gpu and selected_device != "gpu:0" and not skip_reason:
+        skip_reason = "GPU requested for Paddle provider but no Paddle GPU runtime is available."
+    provider_ready = bool(probe_payload.get("provider_ready", False)) and not skip_reason
+    return {
+        "gpu_available": bool(probe_payload.get("gpu_available", False)),
+        "selected_device": selected_device,
+        "vram_info_if_available": probe_payload.get("vram_info_if_available", ""),
+        "model_cache_path": str(probe_payload.get("model_cache_path", "") or ""),
+        "provider_enabled": True,
+        "provider_ready": provider_ready,
+        "skip_reason_if_any": skip_reason,
+        "runtime_python": runtime_python,
+        "paddle_version": str(probe_payload.get("paddle_version", "") or ""),
+        "paddlex_version": str(probe_payload.get("paddlex_version", "") or ""),
+        "compiled_with_cuda": bool(probe_payload.get("compiled_with_cuda", False)),
+    }
+
+
+def probe_paddle_environment(runtime_python: str, options: PaddleProviderOptions) -> Dict[str, Any]:
+    output_dir = Path(tempfile.mkdtemp(prefix="autofinance_paddle_env_"))
+    try:
+        output_json = output_dir / "env.json"
+        run_paddle_worker(
+            runtime_python=runtime_python,
+            worker_args=[
+                "env-summary",
+                "--requested-device",
+                options.device,
+                "--output-json",
+                str(output_json),
+                *(["--skip-if-no-gpu"] if options.skip_if_no_gpu else []),
+            ],
+        )
+        probe_payload = load_worker_json(output_json)
+    except OCRConfigurationError as exc:
+        return normalize_paddle_environment_summary(
+            {"provider_ready": False, "skip_reason_if_any": str(exc)},
+            runtime_python=runtime_python,
+            options=options,
+        )
+    finally:
+        try:
+            if output_dir.exists():
+                for path in sorted(output_dir.rglob("*"), reverse=True):
+                    if path.is_file():
+                        path.unlink()
+                    elif path.is_dir():
+                        path.rmdir()
+                output_dir.rmdir()
+        except OSError:
+            pass
+    return normalize_paddle_environment_summary(probe_payload, runtime_python=runtime_python, options=options)
+
+
+def compute_paddle_page_bbox_coverage(raw_payload: Dict[str, Any]) -> float:
+    tables = list(raw_payload.get("tables", []))
+    if not tables:
+        return 0.0
+    with_bbox = sum(1 for table in tables if table.get("bbox"))
+    return round(with_bbox / len(tables), 6)
+
+
+def build_paddle_provider_contract_summary(
+    page_entries: Sequence[Dict[str, Any]],
+    *,
+    provider_name: str = PADDLE_PROVIDER_NAME,
+) -> Dict[str, Any]:
+    pages_processed = sum(1 for entry in page_entries if not entry.get("error"))
+    table_count = sum(int(entry.get("table_count", 0) or 0) for entry in page_entries)
+    raw_json_present = pages_processed > 0 and all(entry.get("raw_file") for entry in page_entries if not entry.get("error"))
+    xlsx_present = table_count > 0 and any(
+        any(str(path).lower().endswith(".xlsx") for path in entry.get("artifact_files", []))
+        for entry in page_entries
+        if not entry.get("error")
+    )
+    html_present = table_count > 0 and any(
+        any(str(path).lower().endswith(".html") for path in entry.get("artifact_files", []))
+        for entry in page_entries
+        if not entry.get("error")
+    )
+    missing_fields = sorted(
+        {
+            field
+            for entry in page_entries
+            if not entry.get("error")
+            for field in entry.get("missing_fields", [])
+            if field
+        }
+    )
+    bbox_values = [float(entry.get("bbox_coverage", 0.0) or 0.0) for entry in page_entries if not entry.get("error")]
+    bbox_coverage = round(sum(bbox_values) / len(bbox_values), 6) if bbox_values else 0.0
+    contract_pass = bool(raw_json_present and xlsx_present and html_present and not missing_fields)
+    return {
+        "provider_name": provider_name,
+        "pages_processed": pages_processed,
+        "tables_emitted": table_count,
+        "raw_json_present": raw_json_present,
+        "xlsx_present": xlsx_present,
+        "html_present": html_present,
+        "bbox_coverage": bbox_coverage,
+        "contract_pass": contract_pass,
+        "missing_fields": missing_fields,
+    }
+
+
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Batch OCR scanned PDF audit reports with Tencent and Aliyun.")
+    parser = argparse.ArgumentParser(
+        description="Batch OCR scanned PDF audit reports with Tencent, Aliyun, and optional Paddle local table OCR."
+    )
     method_group = parser.add_mutually_exclusive_group(required=True)
     method_group.add_argument(
         "--method",
@@ -319,6 +613,34 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         default=DEFAULT_SECRET_FILE,
         help=f"Secret file path. Defaults to ./{repo_relative(DEFAULT_SECRET_PATH)}",
     )
+    parser.add_argument(
+        "--paddle-device",
+        default="auto",
+        choices=PADDLE_RUNTIME_CHOICES,
+        help="Preferred Paddle device selection. auto chooses GPU when the Paddle runtime can use it, otherwise CPU.",
+    )
+    parser.add_argument(
+        "--paddle-layout-detection",
+        default="auto",
+        choices=PADDLE_LAYOUT_CHOICES,
+        help="Layout detection mode for Paddle table OCR. auto currently defaults to on.",
+    )
+    parser.add_argument(
+        "--paddle-max-pages",
+        default=0,
+        type=int,
+        help="Optional max-page cap when running paddle_table_local through OCR.py.",
+    )
+    parser.add_argument(
+        "--paddle-skip-if-no-gpu",
+        action="store_true",
+        help="Skip Paddle provider setup instead of falling back to CPU when GPU is unavailable.",
+    )
+    parser.add_argument(
+        "--paddle-runtime-python",
+        default="",
+        help="Optional Python executable for the Paddle runtime, e.g. .venv_paddlegpu\\Scripts\\python.exe.",
+    )
     return parser.parse_args(argv)
 
 
@@ -336,7 +658,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             return 1
 
         credentials = load_credentials(secret_path, required_credential_providers(requested_methods))
-        providers = build_provider_clients(requested_methods, credentials)
+        providers = build_provider_clients(requested_methods, credentials, paddle_options=build_paddle_options(args))
     except OCRConfigurationError as exc:
         print(sanitize_text(str(exc), credentials.secret_values() if "credentials" in locals() else []))
         return 1
@@ -357,24 +679,29 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             continue
 
         for provider in providers:
+            provider_pages = list(rendered_pages)
+            if provider.name == PADDLE_PROVIDER_NAME:
+                paddle_options = build_paddle_options(args)
+                if paddle_options.max_pages > 0:
+                    provider_pages = provider_pages[: paddle_options.max_pages]
             failed_pages = process_pdf_with_provider(
                 pdf_path=pdf_path,
-                rendered_pages=rendered_pages,
+                rendered_pages=provider_pages,
                 provider=provider,
                 output_root=output_dir,
             )
             summary[provider.name]["files"] += 1
-            summary[provider.name]["pages"] += len(rendered_pages)
+            summary[provider.name]["pages"] += len(provider_pages)
             summary[provider.name]["failed_pages"] += len(failed_pages)
             if failed_pages:
                 had_failures = True
                 failed_page_list = ", ".join(str(page_number) for page_number, _ in failed_pages)
                 print(
-                    f"[{provider.name}] {pdf_path.name}: {len(rendered_pages) - len(failed_pages)}/{len(rendered_pages)} "
+                    f"[{provider.name}] {pdf_path.name}: {len(provider_pages) - len(failed_pages)}/{len(provider_pages)} "
                     f"pages succeeded. Failed pages: {failed_page_list}"
                 )
             else:
-                print(f"[{provider.name}] {pdf_path.name}: {len(rendered_pages)}/{len(rendered_pages)} pages succeeded.")
+                print(f"[{provider.name}] {pdf_path.name}: {len(provider_pages)}/{len(provider_pages)} pages succeeded.")
 
     for provider_name, provider_summary in summary.items():
         print(
@@ -396,8 +723,8 @@ def resolve_requested_methods(method: Optional[str], provider: Optional[str]) ->
 def required_credential_providers(methods: Sequence[str]) -> List[str]:
     providers: List[str] = []
     for method in methods:
-        provider = METHOD_TO_CREDENTIAL_PROVIDER[method]
-        if provider not in providers:
+        provider = METHOD_TO_CREDENTIAL_PROVIDER.get(method)
+        if provider and provider not in providers:
             providers.append(provider)
     return providers
 
@@ -483,7 +810,12 @@ def normalize_secret_key(section: str, key: str) -> str:
     return normalized
 
 
-def build_provider_clients(requested_methods: Sequence[str], credentials: CredentialBundle) -> List[OCRProvider]:
+def build_provider_clients(
+    requested_methods: Sequence[str],
+    credentials: CredentialBundle,
+    *,
+    paddle_options: Optional[PaddleProviderOptions] = None,
+) -> List[OCRProvider]:
     providers: List[OCRProvider] = []
     for method_name in requested_methods:
         if method_name == "tencent_text":
@@ -502,21 +834,26 @@ def build_provider_clients(requested_methods: Sequence[str], credentials: Creden
             if not credentials.aliyun:
                 raise OCRConfigurationError("Aliyun credentials were not loaded.")
             providers.append(AliyunTableOCRProvider(credentials.aliyun))
+        elif method_name == PADDLE_PROVIDER_NAME:
+            providers.append(PaddleLocalOCRProvider(paddle_options or PaddleProviderOptions()))
         else:
             raise OCRConfigurationError(f"Unsupported OCR method: {method_name}")
     return providers
 
 
-def render_pdf_pages(pdf_path: Path) -> List[RenderedPage]:
+def render_pdf_pages(pdf_path: Path, page_numbers: Optional[Sequence[int]] = None) -> List[RenderedPage]:
     fitz = get_fitz_module()
     image_module = get_pillow_image_module()
 
     document = fitz.open(str(pdf_path))
     pages: List[RenderedPage] = []
     matrix = fitz.Matrix(DEFAULT_RENDER_ZOOM, DEFAULT_RENDER_ZOOM)
+    allowed_pages = {int(page_no) for page_no in page_numbers} if page_numbers else None
 
     try:
         for index in range(len(document)):
+            if allowed_pages is not None and (index + 1) not in allowed_pages:
+                continue
             page = document.load_page(index)
             pixmap = page.get_pixmap(matrix=matrix, alpha=False)
             image = image_module.frombytes("RGB", (pixmap.width, pixmap.height), pixmap.samples)
@@ -605,6 +942,7 @@ def process_pdf_with_provider(
     rendered_pages: Sequence[RenderedPage],
     provider: OCRProvider,
     output_root: Path,
+    page_options_by_number: Optional[Dict[int, Dict[str, Any]]] = None,
 ) -> List[Tuple[int, str]]:
     provider_output_dir = output_root / provider.name / pdf_path.stem
     raw_output_dir = provider_output_dir / "raw"
@@ -614,9 +952,20 @@ def process_pdf_with_provider(
     page_entries: List[Dict[str, Any]] = []
     failures: List[Tuple[int, str]] = []
 
+    page_options_by_number = page_options_by_number or {}
+
     for page in rendered_pages:
         try:
-            result = provider.recognize_page(page)
+            page_options = page_options_by_number.get(page.page_number, {})
+            if page_options:
+                try:
+                    result = provider.recognize_page(page, page_options=page_options)
+                except TypeError as exc:
+                    if "page_options" not in str(exc):
+                        raise
+                    result = provider.recognize_page(page)
+            else:
+                result = provider.recognize_page(page)
             raw_file_path = raw_output_dir / f"page_{page.page_number:04d}.json"
             write_json(raw_file_path, result["raw"])
             artifact_files = write_artifacts(
@@ -632,6 +981,7 @@ def process_pdf_with_provider(
                     "blocks": result["blocks"],
                     "raw_file": raw_file_path.relative_to(provider_output_dir).as_posix(),
                     "artifact_files": artifact_files,
+                    **(result.get("page_metadata", {}) or {}),
                 }
             )
         except Exception as exc:
