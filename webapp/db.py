@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from typing import Iterable
 
 from .config import WebAppSettings
-from .models import JobRecord
+from .models import JobRecord, ReviewActionRecord
 
 
 SCHEMA_SQL = """
@@ -40,6 +40,21 @@ CREATE TABLE IF NOT EXISTS jobs (
     timeout_seconds INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_jobs_status_created_at ON jobs(status, created_at);
+CREATE TABLE IF NOT EXISTS review_actions (
+    job_id TEXT NOT NULL,
+    review_item_id TEXT NOT NULL,
+    action_type TEXT NOT NULL,
+    action_value TEXT NOT NULL DEFAULT '',
+    reviewer_note TEXT NOT NULL DEFAULT '',
+    reviewer_name TEXT NOT NULL DEFAULT '',
+    review_status TEXT NOT NULL DEFAULT '',
+    source_type TEXT NOT NULL DEFAULT '',
+    source_ref TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (job_id, review_item_id)
+);
+CREATE INDEX IF NOT EXISTS idx_review_actions_job_created_at ON review_actions(job_id, created_at);
 """
 
 
@@ -62,6 +77,12 @@ def init_db(settings: WebAppSettings) -> None:
         _ensure_column(conn, "jobs", "raw_error_message", "TEXT NOT NULL DEFAULT ''")
         _ensure_column(conn, "jobs", "user_friendly_error", "TEXT NOT NULL DEFAULT ''")
         _ensure_column(conn, "jobs", "recommended_action", "TEXT NOT NULL DEFAULT ''")
+        _ensure_column(conn, "review_actions", "reviewer_note", "TEXT NOT NULL DEFAULT ''")
+        _ensure_column(conn, "review_actions", "reviewer_name", "TEXT NOT NULL DEFAULT ''")
+        _ensure_column(conn, "review_actions", "review_status", "TEXT NOT NULL DEFAULT ''")
+        _ensure_column(conn, "review_actions", "source_type", "TEXT NOT NULL DEFAULT ''")
+        _ensure_column(conn, "review_actions", "source_ref", "TEXT NOT NULL DEFAULT ''")
+        _ensure_column(conn, "review_actions", "updated_at", "TEXT NOT NULL DEFAULT ''")
 
 
 def create_job(settings: WebAppSettings, job: JobRecord) -> JobRecord:
@@ -182,6 +203,53 @@ def requeue_job(settings: WebAppSettings, job_id: str) -> JobRecord | None:
 
 def iter_jobs(settings: WebAppSettings) -> Iterable[JobRecord]:
     return list_jobs(settings, limit=1000)
+
+
+def upsert_review_action(settings: WebAppSettings, action: ReviewActionRecord) -> ReviewActionRecord:
+    with _connect(settings) as conn:
+        conn.execute(
+            """
+            INSERT INTO review_actions (
+                job_id, review_item_id, action_type, action_value, reviewer_note, reviewer_name,
+                review_status, source_type, source_ref, created_at, updated_at
+            ) VALUES (
+                :job_id, :review_item_id, :action_type, :action_value, :reviewer_note, :reviewer_name,
+                :review_status, :source_type, :source_ref, :created_at, :updated_at
+            )
+            ON CONFLICT(job_id, review_item_id) DO UPDATE SET
+                action_type = excluded.action_type,
+                action_value = excluded.action_value,
+                reviewer_note = excluded.reviewer_note,
+                reviewer_name = excluded.reviewer_name,
+                review_status = excluded.review_status,
+                source_type = excluded.source_type,
+                source_ref = excluded.source_ref,
+                updated_at = excluded.updated_at
+            """,
+            action.as_dict(),
+        )
+    stored = get_review_action(settings, action.job_id, action.review_item_id)
+    if stored is None:
+        raise KeyError(f"Failed to save review action for {action.job_id}:{action.review_item_id}")
+    return stored
+
+
+def get_review_action(settings: WebAppSettings, job_id: str, review_item_id: str) -> ReviewActionRecord | None:
+    with _connect(settings) as conn:
+        row = conn.execute(
+            "SELECT * FROM review_actions WHERE job_id = ? AND review_item_id = ?",
+            (job_id, review_item_id),
+        ).fetchone()
+    return ReviewActionRecord.from_row(row) if row else None
+
+
+def list_review_actions(settings: WebAppSettings, job_id: str) -> list[ReviewActionRecord]:
+    with _connect(settings) as conn:
+        rows = conn.execute(
+            "SELECT * FROM review_actions WHERE job_id = ? ORDER BY created_at ASC, review_item_id ASC",
+            (job_id,),
+        ).fetchall()
+    return [ReviewActionRecord.from_row(row) for row in rows]
 
 
 def _ensure_column(conn: sqlite3.Connection, table_name: str, column_name: str, column_sql: str) -> None:

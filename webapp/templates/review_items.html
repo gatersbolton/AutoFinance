@@ -1,0 +1,195 @@
+{% extends "base.html" %}
+{% block title %}复核项 | {{ settings.app_name }}{% endblock %}
+{% block content %}
+<section class="page-heading">
+    <div>
+        <p class="eyebrow">复核项</p>
+        <h1>{{ job.display_name }}</h1>
+        <p class="hero-copy">按来源、状态、原因和页码筛选复核项；每条记录可直接保存一个当前动作。</p>
+    </div>
+    <div class="actions">
+        <a class="button button--secondary" href="/jobs/{{ job.job_id }}/review">返回复核看板</a>
+        <a class="button button--secondary" href="/jobs/{{ job.job_id }}">返回任务详情</a>
+        <a class="button button--primary" href="/jobs/{{ job.job_id }}/review/export-actions">导出复核动作</a>
+    </div>
+</section>
+
+<section class="card">
+    <h2>筛选</h2>
+    <form class="filter-grid" method="get" action="/jobs/{{ job.job_id }}/review/items">
+        <label class="field">
+            <span class="label">状态</span>
+            <select name="status">
+                <option value="">全部</option>
+                {% for value in filters.statuses %}
+                <option value="{{ value }}" {% if selected_filters.status == value %}selected{% endif %}>{{ value }}</option>
+                {% endfor %}
+            </select>
+        </label>
+        <label class="field">
+            <span class="label">来源类型</span>
+            <select name="source_type">
+                <option value="">全部</option>
+                {% for value in filters.source_types %}
+                <option value="{{ value }}" {% if selected_filters.source_type == value %}selected{% endif %}>{{ value }}</option>
+                {% endfor %}
+            </select>
+        </label>
+        <label class="field">
+            <span class="label">原因代码</span>
+            <select name="reason_code">
+                <option value="">全部</option>
+                {% for value in filters.reason_codes %}
+                <option value="{{ value }}" {% if selected_filters.reason_code == value %}selected{% endif %}>{{ value }}</option>
+                {% endfor %}
+            </select>
+        </label>
+        <label class="field">
+            <span class="label">页码</span>
+            <input type="text" name="page_no" value="{{ selected_filters.page_no }}">
+        </label>
+        <label class="field">
+            <span class="label">报表类型</span>
+            <select name="statement_type">
+                <option value="">全部</option>
+                {% for value in filters.statement_types %}
+                <option value="{{ value }}" {% if selected_filters.statement_type == value %}selected{% endif %}>{{ value }}</option>
+                {% endfor %}
+            </select>
+        </label>
+        <label class="field">
+            <span class="label">Provider</span>
+            <select name="provider">
+                <option value="">全部</option>
+                {% for value in filters.providers %}
+                <option value="{{ value }}" {% if selected_filters.provider == value %}selected{% endif %}>{{ value }}</option>
+                {% endfor %}
+            </select>
+        </label>
+        <label class="field field--wide">
+            <span class="label">科目文本搜索</span>
+            <input type="text" name="search" value="{{ selected_filters.search }}">
+        </label>
+        <label class="field checkbox-field">
+            <span class="label">高优先级</span>
+            <input type="checkbox" name="only_high_priority" value="1" {% if selected_filters.only_high_priority %}checked{% endif %}>
+        </label>
+        <label class="field">
+            <span class="label">排序</span>
+            <select name="sort_by">
+                <option value="priority_desc" {% if selected_filters.sort_by == "priority_desc" %}selected{% endif %}>priority_score desc</option>
+                <option value="page_asc" {% if selected_filters.sort_by == "page_asc" %}selected{% endif %}>page_no asc</option>
+                <option value="source_type" {% if selected_filters.sort_by == "source_type" %}selected{% endif %}>source_type</option>
+            </select>
+        </label>
+        <div class="actions">
+            <button class="button button--primary" type="submit">应用筛选</button>
+            <a class="button button--secondary" href="/jobs/{{ job.job_id }}/review/items">清空</a>
+        </div>
+    </form>
+</section>
+
+<section class="card">
+    <h2>当前结果</h2>
+    <p class="todo-note">共 {{ items|length }} 条当前筛选结果。总复核项 {{ summary.total_review_items }} 条，未处理 {{ summary.unresolved_review_items }} 条。</p>
+    {% if items %}
+    <div class="review-item-list">
+        {% for item in items %}
+        <article class="review-item card">
+            <div class="review-item__header">
+                <div>
+                    <span class="status status--review-{{ item.current_status }}">{{ item.current_status }}</span>
+                    <strong>{{ item.reason_label_zh }}</strong>
+                    <span class="todo-note">priority {{ "%.2f"|format(item.priority_score) }}</span>
+                </div>
+                <div class="todo-note">
+                    <code>{{ item.source_type }}</code>
+                    {% if item.page_no is not none %}第 {{ item.page_no }} 页{% endif %}
+                </div>
+            </div>
+
+            <div class="review-item__grid">
+                <div>
+                    <h3>问题定位</h3>
+                    <dl class="meta-list">
+                        <div><dt>复核项 ID</dt><dd><code>{{ item.review_item_id }}</code></dd></div>
+                        <div><dt>原因代码</dt><dd><code>{{ item.reason_code }}</code></dd></div>
+                        <div><dt>文档</dt><dd>{{ item.doc_id or "未记录" }}</dd></div>
+                        <div><dt>报表类型</dt><dd>{{ item.statement_type or "未记录" }}</dd></div>
+                        <div><dt>原始科目</dt><dd>{{ item.row_label_raw or "未记录" }}</dd></div>
+                        <div><dt>标准科目</dt><dd>{{ item.row_label_std or "未记录" }}</dd></div>
+                        <div><dt>周期</dt><dd>{{ item.period_key or "未记录" }}</dd></div>
+                        <div><dt>数值</dt><dd>{{ item.value_raw or (item.value_num if item.value_num is not none else "未记录") }}</dd></div>
+                        <div><dt>Provider</dt><dd>{{ item.provider or "未记录" }}</dd></div>
+                        <div><dt>来源引用</dt><dd><code>{{ item.source_ref or item.source_cell_ref or "未记录" }}</code></dd></div>
+                    </dl>
+                </div>
+
+                <div>
+                    <h3>证据</h3>
+                    {% if item.meta.get("evidence_cell_available") or item.meta.get("evidence_row_available") or item.meta.get("evidence_table_available") %}
+                    <div class="evidence-links">
+                        {% if item.meta.get("evidence_cell_available") %}
+                        <a href="/jobs/{{ job.job_id }}/review/evidence/{{ item.review_item_id }}/cell" target="_blank">查看单元格证据</a>
+                        {% endif %}
+                        {% if item.meta.get("evidence_row_available") %}
+                        <a href="/jobs/{{ job.job_id }}/review/evidence/{{ item.review_item_id }}/row" target="_blank">查看行证据</a>
+                        {% endif %}
+                        {% if item.meta.get("evidence_table_available") %}
+                        <a href="/jobs/{{ job.job_id }}/review/evidence/{{ item.review_item_id }}/table" target="_blank">查看表格证据</a>
+                        {% endif %}
+                    </div>
+                    {% elif item.evidence_path %}
+                    <p>证据图片暂不可用</p>
+                    {% elif item.source_cell_ref or item.page_no is not none %}
+                    <p>无图片证据，可参考 source_cell_ref / 页码定位。</p>
+                    <p class="todo-note"><code>{{ item.source_cell_ref or "未记录" }}</code></p>
+                    {% else %}
+                    <p>证据图片暂不可用</p>
+                    {% endif %}
+
+                    {% if item.mapping_code or item.mapping_name %}
+                    <h3>建议映射</h3>
+                    <p><code>{{ item.mapping_code }}</code> {{ item.mapping_name }}</p>
+                    {% endif %}
+                </div>
+            </div>
+
+            <form class="action-form" action="/jobs/{{ job.job_id }}/review/actions" method="post">
+                <input type="hidden" name="review_item_id" value="{{ item.review_item_id }}">
+                <input type="hidden" name="next_url" value="{{ request.url.path }}{% if request.url.query %}?{{ request.url.query }}{% endif %}">
+                <div class="action-form__grid">
+                    <label class="field">
+                        <span class="label">动作</span>
+                        <select name="action_type" required>
+                            <option value="">请选择</option>
+                            {% for action_type in ["ignore", "defer", "mark_not_financial_fact", "request_reocr", "accept_mapping_candidate", "set_mapping_override", "set_conflict_winner", "suppress_false_positive"] %}
+                            <option value="{{ action_type }}" {% if item.action_type == action_type %}selected{% endif %}>{{ action_type }}</option>
+                            {% endfor %}
+                        </select>
+                    </label>
+                    <label class="field">
+                        <span class="label">action_value</span>
+                        <input type="text" name="action_value" value="{{ item.action_value }}">
+                    </label>
+                    <label class="field">
+                        <span class="label">reviewer_name</span>
+                        <input type="text" name="reviewer_name" value="{{ item.reviewer_name }}">
+                    </label>
+                    <label class="field field--wide">
+                        <span class="label">reviewer_note</span>
+                        <input type="text" name="reviewer_note" value="{{ item.reviewer_note }}">
+                    </label>
+                </div>
+                <div class="actions">
+                    <button class="button button--primary" type="submit">保存复核动作</button>
+                </div>
+            </form>
+        </article>
+        {% endfor %}
+    </div>
+    {% else %}
+    <p>当前筛选条件下没有复核项。</p>
+    {% endif %}
+</section>
+{% endblock %}

@@ -1,0 +1,68 @@
+{% extends "base.html" %}
+{% block title %}导出复核动作 | {{ settings.app_name }}{% endblock %}
+{% block content %}
+<section class="page-heading">
+    <div>
+        <p class="eyebrow">导出复核动作</p>
+        <h1>{{ job.display_name }}</h1>
+        <p class="hero-copy">将当前保存的复核动作导出为 CSV / XLSX，供后续既有 backend review action apply 流程使用。</p>
+    </div>
+    <div class="actions">
+        <a class="button button--secondary" href="/jobs/{{ job.job_id }}/review">返回复核看板</a>
+        <a class="button button--secondary" href="/jobs/{{ job.job_id }}/review/items">返回复核项</a>
+    </div>
+</section>
+
+<section class="grid">
+    <article class="card stat-card">
+        <p class="eyebrow">待复核总数</p>
+        <h2>{{ summary.total_review_items }}</h2>
+    </article>
+    <article class="card stat-card">
+        <p class="eyebrow">已保存动作</p>
+        <h2>{{ actions_total }}</h2>
+    </article>
+    <article class="card stat-card">
+        <p class="eyebrow">未处理</p>
+        <h2>{{ summary.unresolved_review_items }}</h2>
+    </article>
+</section>
+
+<section class="card">
+    <h2>导出</h2>
+    <p class="todo-note">MVP 当前只负责生成动作文件，不会自动 apply 或 rerun；Stage 10.1 再补齐该闭环。</p>
+    <form action="/jobs/{{ job.job_id }}/review/export-actions" method="post">
+        <button class="button button--primary" type="submit">生成导出文件</button>
+    </form>
+</section>
+
+<section class="card">
+    <h2>当前导出文件</h2>
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th>文件</th>
+                    <th>状态</th>
+                    <th>下载</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for artifact in export_artifacts %}
+                <tr>
+                    <td>{{ artifact.label }}</td>
+                    <td>{% if artifact.exists %}已生成{% else %}未生成{% endif %}</td>
+                    <td>
+                        {% if artifact.exists %}
+                        <a href="/jobs/{{ job.job_id }}/download/{{ artifact.slug }}">下载</a>
+                        {% else %}
+                        未生成
+                        {% endif %}
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</section>
+{% endblock %}

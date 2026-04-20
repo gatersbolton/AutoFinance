@@ -1,0 +1,150 @@
+{% extends "base.html" %}
+{% block title %}复核看板 | {{ settings.app_name }}{% endblock %}
+{% block content %}
+<section class="page-heading">
+    <div>
+        <p class="eyebrow">复核看板</p>
+        <h1>{{ job.display_name }}</h1>
+        <p class="hero-copy">面向审计复核用户的人工判定入口。当前阶段只记录复核动作并导出动作文件，不直接改写标准化基础配置。</p>
+    </div>
+    <div class="actions">
+        <a class="button button--secondary" href="/jobs/{{ job.job_id }}">返回任务详情</a>
+        <a class="button button--secondary" href="/jobs/{{ job.job_id }}/review/items">查看复核项</a>
+        <a class="button button--primary" href="/jobs/{{ job.job_id }}/review/export-actions">导出复核动作</a>
+    </div>
+</section>
+
+<section class="grid">
+    <article class="card stat-card">
+        <p class="eyebrow">待复核总数</p>
+        <h2>{{ summary.total_review_items }}</h2>
+    </article>
+    <article class="card stat-card">
+        <p class="eyebrow">未处理</p>
+        <h2>{{ summary.unresolved_review_items }}</h2>
+    </article>
+    <article class="card stat-card">
+        <p class="eyebrow">高优先级</p>
+        <h2>{{ summary.high_priority_items }}</h2>
+        <p class="todo-note">优先级阈值：{{ high_priority_threshold }}</p>
+    </article>
+    <article class="card stat-card">
+        <p class="eyebrow">已处理</p>
+        <h2>{{ summary.resolved_count }}</h2>
+    </article>
+    <article class="card stat-card">
+        <p class="eyebrow">暂缓</p>
+        <h2>{{ summary.deferred_count }}</h2>
+    </article>
+    <article class="card stat-card">
+        <p class="eyebrow">校验失败</p>
+        <h2>{{ summary.validation_fail_count }}</h2>
+    </article>
+    <article class="card stat-card">
+        <p class="eyebrow">科目映射缺失</p>
+        <h2>{{ summary.mapping_unmapped_count }}</h2>
+    </article>
+    <article class="card stat-card">
+        <p class="eyebrow">金额异常</p>
+        <h2>{{ summary.suspicious_numeric_count }}</h2>
+    </article>
+    <article class="card stat-card">
+        <p class="eyebrow">OCR 可疑</p>
+        <h2>{{ summary.ocr_suspicious_count }}</h2>
+    </article>
+    <article class="card stat-card">
+        <p class="eyebrow">供应商识别冲突</p>
+        <h2>{{ summary.provider_conflict_count }}</h2>
+    </article>
+</section>
+
+<section class="grid grid--detail">
+    <article class="card">
+        <h2>问题类型分布</h2>
+        {% if summary.reason_label_breakdown %}
+        <div class="table-wrap">
+            <table>
+                <thead>
+                    <tr>
+                        <th>类型</th>
+                        <th>数量</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for label, count in summary.reason_label_breakdown.items() %}
+                    <tr>
+                        <td>{{ label }}</td>
+                        <td>{{ count }}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        {% else %}
+        <p>当前未发现可展示的复核项。</p>
+        {% endif %}
+    </article>
+
+    <article class="card">
+        <h2>来源分布</h2>
+        {% if summary.source_type_breakdown %}
+        <div class="table-wrap">
+            <table>
+                <thead>
+                    <tr>
+                        <th>来源</th>
+                        <th>数量</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for label, count in summary.source_type_breakdown.items() %}
+                    <tr>
+                        <td><code>{{ label }}</code></td>
+                        <td>{{ count }}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        {% else %}
+        <p>当前未发现可展示的复核项。</p>
+        {% endif %}
+    </article>
+</section>
+
+<section class="card">
+    <h2>复核数据文件</h2>
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th>文件</th>
+                    <th>状态</th>
+                    <th>行数</th>
+                    <th>路径</th>
+                    <th>下载</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for artifact in source_artifacts %}
+                <tr>
+                    <td>{{ artifact.label }}</td>
+                    <td>{% if artifact.exists %}可用{% else %}不可用{% endif %}</td>
+                    <td>{{ artifact.row_count }}</td>
+                    <td><code>{{ artifact.relative_path }}</code></td>
+                    <td>
+                        {% if artifact.exists and artifact.slug != "review_workbook" %}
+                        <a href="/jobs/{{ job.job_id }}/download/{{ artifact.slug }}">下载</a>
+                        {% elif artifact.exists and artifact.slug == "review_workbook" %}
+                        <a href="/jobs/{{ job.job_id }}/download/review_workbook">下载</a>
+                        {% else %}
+                        不可用
+                        {% endif %}
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</section>
+{% endblock %}

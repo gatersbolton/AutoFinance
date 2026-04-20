@@ -39,6 +39,12 @@ COMMON_OUTPUT_DEFS = (
     ("review_queue", "复核队列", "review_queue.csv"),
     ("issues", "问题清单", "issues.csv"),
     ("validation_results", "校验结果", "validation_results.csv"),
+    ("conflicts_enriched", "冲突明细", "conflicts_enriched.csv"),
+    ("conflict_decision_audit", "冲突决策审计", "conflict_decision_audit.csv"),
+    ("unplaced_facts", "未落位事实", "unplaced_facts.csv"),
+    ("mapping_candidates", "科目映射候选", "mapping_candidates.csv"),
+    ("benchmark_gap_explanations", "基准差异说明", "benchmark_gap_explanations.csv"),
+    ("source_backed_gap_closure", "来源支撑缺口闭环", "source_backed_gap_closure.csv"),
 )
 
 
@@ -237,6 +243,7 @@ async def create_upload_job(settings: WebAppSettings, *, display_name: str, file
 def discover_output_files(job: JobRecord) -> list[OutputArtifact]:
     output_dir = Path(job.output_dir)
     result_dir = Path(job.result_dir)
+    review_dir = output_dir.resolve().parent / "review"
     artifacts: list[OutputArtifact] = []
     for slug, label, filename in COMMON_OUTPUT_DEFS:
         path = output_dir / filename
@@ -257,6 +264,23 @@ def discover_output_files(job: JobRecord) -> list[OutputArtifact]:
         ("logs", "任务日志", "job_log_bundle.json"),
     ):
         path = result_dir / filename
+        artifacts.append(
+            OutputArtifact(
+                slug=slug,
+                label=label,
+                path=str(path),
+                relative_path=_repo_relative_or_absolute(path),
+                exists=path.exists(),
+                size_bytes=path.stat().st_size if path.exists() else 0,
+                download_name=filename,
+            )
+        )
+    for slug, label, filename in (
+        ("review_actions_csv", "复核动作导出 CSV", "review_actions_filled.csv"),
+        ("review_actions_xlsx", "复核动作导出 XLSX", "review_actions_filled.xlsx"),
+        ("review_action_export_summary", "复核动作导出摘要", "review_action_export_summary.json"),
+    ):
+        path = review_dir / filename
         artifacts.append(
             OutputArtifact(
                 slug=slug,

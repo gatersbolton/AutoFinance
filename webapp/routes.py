@@ -21,6 +21,16 @@ from .jobs import (
 )
 from .models import ACTIVE_JOB_STATUSES
 from .quality import describe_job_status
+from .review import (
+    HIGH_PRIORITY_THRESHOLD,
+    build_review_dashboard_summary,
+    build_review_filters,
+    export_review_actions,
+    filter_review_items,
+    load_review_items,
+    resolve_evidence_file,
+    save_review_action,
+)
 
 
 router = APIRouter()
@@ -71,6 +81,23 @@ def _new_job_context(request: Request, *, error_message: str = "", submitted: di
         "upload_auto_run_enabled": settings.auto_run_upload_ocr,
         "template_path": str(settings.template_path),
     }
+
+
+def _review_redirect_target(job_id: str, next_url: str) -> str:
+    candidate = (next_url or "").strip()
+    if candidate.startswith(f"/jobs/{job_id}/review"):
+        return candidate
+    return f"/jobs/{job_id}/review/items"
+
+
+def _get_review_item_or_404(request: Request, job_id: str, review_item_id: str):
+    settings = get_settings(request)
+    job = require_job(settings, job_id)
+    items, _ = load_review_items(settings, job)
+    for item in items:
+        if item.review_item_id == review_item_id:
+            return job, item
+    raise HTTPException(status_code=404, detail="复核项不存在。")
 
 
 @router.get("/", response_class=HTMLResponse, dependencies=[Depends(password_gate)])
@@ -137,12 +164,15 @@ def jobs_page(request: Request) -> HTMLResponse:
 @router.get("/jobs/{job_id}", response_class=HTMLResponse, dependencies=[Depends(password_gate)])
 def job_detail(request: Request, job_id: str) -> HTMLResponse:
     job = require_job(get_settings(request), job_id)
+    review_items, review_sources = load_review_items(get_settings(request), job)
     return _render(
         request,
         "job_detail.html",
         {
             "job": job,
             "payload": build_job_detail_payload(job),
+            "review_summary": build_review_dashboard_summary(review_items),
+            "review_sources": review_sources,
             "can_cancel": job.status in {"created", "queued"},
             "can_queue": job.status in {"created", "failed", "cancelled"},
             "auto_refresh": job.status in ACTIVE_JOB_STATUSES,
@@ -182,6 +212,149 @@ def download_artifact(request: Request, job_id: str, slug: str) -> FileResponse:
     if not artifact.exists or not path.exists():
         raise HTTPException(status_code=404, detail="文件未生成。")
     return FileResponse(path=str(path), filename=artifact.download_name)
+
+
+@router.get("/jobs/{job_id}/review", response_class=HTMLResponse, dependencies=[Depends(password_gate)])
+def review_dashboard(request: Request, job_id: str) -> HTMLResponse:
+    settings = get_settings(request)
+    job = require_job(settings, job_id)
+    items, source_artifacts = load_review_items(settings, job)
+    return _render(
+        request,
+        "review_dashboard.html",
+        {
+            "job": job,
+            "summary": build_review_dashboard_summary(items),
+            "source_artifacts": source_artifacts,
+            "high_priority_threshold": HIGH_PRIORITY_THRESHOLD,
+        },
+    )
+
+
+@router.get("/jobs/{job_id}/review/items", response_class=HTMLResponse, dependencies=[Depends(password_gate)])
+def review_items_page(
+    request: Request,
+    job_id: str,
+    status: str = "",
+    source_type: str = "",
+    reason_code: str = "",
+    page_no: str = "",
+    statement_type: str = "",
+    provider: str = "",
+    search: str = "",
+    only_high_priority: str = "",
+    sort_by: str = "priority_desc",
+) -> HTMLResponse:
+    settings = get_settings(request)
+    job = require_job(settings, job_id)
+    items, source_artifacts = load_review_items(settings, job)
+    filtered_items = filter_review_items(
+        items,
+        status=status,
+        source_type=source_type,
+        reason_code=reason_code,
+        page_no=page_no,
+        statement_type=statement_type,
+        provider=provider,
+        search=search,
+        only_high_priority=only_high_priority in {"1", "true", "yes", "on"},
+        sort_by=sort_by,
+    )
+    for item in filtered_items:
+        item.meta["evidence_cell_available"] = resolve_evidence_file(job, item, "cell") is not None
+        item.meta["evidence_row_available"] = resolve_evidence_file(job, item, "row") is not None
+        item.meta["evidence_table_available"] = resolve_evidence_file(job, item, "table") is not None
+    return _render(
+        request,
+        "review_items.html",
+        {
+            "job": job,
+            "items": filtered_items,
+            "summary": build_review_dashboard_summary(items),
+            "filters": build_review_filters(items),
+            "selected_filters": {
+                "status": status,
+                "source_type": source_type,
+                "reason_code": reason_code,
+                "page_no": page_no,
+                "statement_type": statement_type,
+                "provider": provider,
+                "search": search,
+                "only_high_priority": only_high_priority,
+                "sort_by": sort_by,
+            },
+            "source_artifacts": source_artifacts,
+        },
+    )
+
+
+@router.post("/jobs/{job_id}/review/actions", dependencies=[Depends(password_gate)])
+def save_review_action_route(
+    request: Request,
+    job_id: str,
+    review_item_id: Annotated[str, Form(...)],
+    action_type: Annotated[str, Form(...)],
+    action_value: Annotated[str, Form()] = "",
+    reviewer_note: Annotated[str, Form()] = "",
+    reviewer_name: Annotated[str, Form()] = "",
+    next_url: Annotated[str, Form()] = "",
+) -> RedirectResponse:
+    settings = get_settings(request)
+    job = require_job(settings, job_id)
+    items, _ = load_review_items(settings, job)
+    item = next((candidate for candidate in items if candidate.review_item_id == review_item_id), None)
+    if item is None:
+        raise HTTPException(status_code=404, detail="复核项不存在。")
+    try:
+        save_review_action(
+            settings,
+            job,
+            item,
+            action_type=action_type,
+            action_value=action_value,
+            reviewer_note=reviewer_note,
+            reviewer_name=reviewer_name,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return RedirectResponse(url=_review_redirect_target(job_id, next_url), status_code=303)
+
+
+@router.get("/jobs/{job_id}/review/evidence/{review_item_id}/{evidence_kind}", dependencies=[Depends(password_gate)])
+def review_evidence(request: Request, job_id: str, review_item_id: str, evidence_kind: str) -> FileResponse:
+    if evidence_kind not in {"cell", "row", "table"}:
+        raise HTTPException(status_code=404, detail="证据类型不存在。")
+    job, item = _get_review_item_or_404(request, job_id, review_item_id)
+    resolved = resolve_evidence_file(job, item, evidence_kind)
+    if resolved is None:
+        raise HTTPException(status_code=404, detail="证据图片暂不可用。")
+    return FileResponse(path=str(resolved), filename=resolved.name)
+
+
+@router.get("/jobs/{job_id}/review/export-actions", response_class=HTMLResponse, dependencies=[Depends(password_gate)])
+def review_export_page(request: Request, job_id: str) -> HTMLResponse:
+    settings = get_settings(request)
+    job = require_job(settings, job_id)
+    items, _ = load_review_items(settings, job)
+    export_artifacts = [artifact for artifact in build_job_detail_payload(job)["output_files"] if str(artifact.get("slug", "")).startswith("review_action_") or str(artifact.get("slug", "")) in {"review_actions_csv", "review_actions_xlsx"}]
+    return _render(
+        request,
+        "review_export_actions.html",
+        {
+            "job": job,
+            "summary": build_review_dashboard_summary(items),
+            "actions_total": sum(1 for item in items if item.action_type),
+            "export_artifacts": export_artifacts,
+        },
+    )
+
+
+@router.post("/jobs/{job_id}/review/export-actions", dependencies=[Depends(password_gate)])
+def review_export_actions_route(request: Request, job_id: str) -> RedirectResponse:
+    settings = get_settings(request)
+    job = require_job(settings, job_id)
+    export_review_actions(settings, job)
+    return RedirectResponse(url=f"/jobs/{job_id}/review/export-actions", status_code=303)
 
 
 @router.get("/system", response_class=HTMLResponse, dependencies=[Depends(password_gate)])

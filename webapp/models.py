@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
-from typing import Mapping
+from dataclasses import asdict, dataclass, field
+from typing import Any, Mapping
 
 
 JOB_STATUS_CREATED = "created"
@@ -119,6 +119,122 @@ class SystemStatusRecord:
     auth_enabled: bool
     auth_required: bool
     worker_mode: str
+
+    def as_dict(self) -> dict[str, object]:
+        return asdict(self)
+
+
+REVIEW_STATUS_UNRESOLVED = "unresolved"
+REVIEW_STATUS_RESOLVED = "resolved"
+REVIEW_STATUS_IGNORED = "ignored"
+REVIEW_STATUS_DEFERRED = "deferred"
+REVIEW_STATUS_REOCR_REQUESTED = "reocr_requested"
+
+REVIEW_ITEM_SOURCE_TYPES = {
+    "review_queue",
+    "issue",
+    "validation",
+    "conflict",
+    "unplaced_fact",
+    "mapping_candidate",
+}
+
+REVIEW_ACTION_TYPES = {
+    "ignore",
+    "defer",
+    "mark_not_financial_fact",
+    "request_reocr",
+    "accept_mapping_candidate",
+    "set_mapping_override",
+    "set_conflict_winner",
+    "suppress_false_positive",
+}
+
+
+@dataclass(slots=True)
+class ReviewSourceArtifact:
+    slug: str
+    label: str
+    path: str
+    relative_path: str
+    exists: bool
+    row_count: int
+
+    def as_dict(self) -> dict[str, object]:
+        return asdict(self)
+
+
+@dataclass(slots=True)
+class ReviewActionRecord:
+    job_id: str
+    review_item_id: str
+    action_type: str
+    action_value: str
+    reviewer_note: str
+    reviewer_name: str
+    review_status: str
+    source_type: str
+    source_ref: str
+    created_at: str
+    updated_at: str
+
+    @classmethod
+    def from_row(cls, row: Mapping[str, object]) -> "ReviewActionRecord":
+        return cls(
+            job_id=str(row["job_id"]),
+            review_item_id=str(row["review_item_id"]),
+            action_type=str(row["action_type"] or ""),
+            action_value=str(row["action_value"] or ""),
+            reviewer_note=str(row["reviewer_note"] or ""),
+            reviewer_name=str(row["reviewer_name"] or ""),
+            review_status=str(row["review_status"] or ""),
+            source_type=str(row["source_type"] or ""),
+            source_ref=str(row["source_ref"] or ""),
+            created_at=str(row["created_at"] or ""),
+            updated_at=str(row["updated_at"] or ""),
+        )
+
+    def as_dict(self) -> dict[str, object]:
+        return asdict(self)
+
+
+@dataclass(slots=True)
+class ReviewItemRecord:
+    review_item_id: str
+    review_id: str
+    source_file: str
+    source_type: str
+    priority_score: float
+    reason_code: str
+    reason_codes: list[str] = field(default_factory=list)
+    reason_label_zh: str = ""
+    doc_id: str = ""
+    page_no: int | None = None
+    statement_type: str = ""
+    row_label_raw: str = ""
+    row_label_std: str = ""
+    mapping_code: str = ""
+    mapping_name: str = ""
+    period_key: str = ""
+    value_raw: str = ""
+    value_num: float | None = None
+    provider: str = ""
+    source_cell_ref: str = ""
+    evidence_path: str = ""
+    evidence_label: str = ""
+    current_status: str = REVIEW_STATUS_UNRESOLVED
+    action_type: str = ""
+    action_value: str = ""
+    reviewer_note: str = ""
+    reviewer_name: str = ""
+    source_ref: str = ""
+    related_conflict_ids: list[str] = field(default_factory=list)
+    related_validation_ids: list[str] = field(default_factory=list)
+    related_fact_ids: list[str] = field(default_factory=list)
+    candidate_conflict_fact_id: str = ""
+    candidate_period_override: str = ""
+    suggested_reocr_task_id: str = ""
+    meta: dict[str, Any] = field(default_factory=dict)
 
     def as_dict(self) -> dict[str, object]:
         return asdict(self)

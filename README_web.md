@@ -21,6 +21,15 @@ data/generated/web/
 
 `jobs/<job_id>/standardize/` contains standardization outputs. `results/<job_id>/` contains web-facing summary JSON, `job_quality_summary.json`, and log bundle JSON.
 
+Stage 10 review UI exports are written under:
+
+```text
+data/generated/web/jobs/<job_id>/review/
+  review_actions_filled.csv
+  review_actions_filled.xlsx
+  review_action_export_summary.json
+```
+
 ## Local Development
 
 ```bash
@@ -143,8 +152,62 @@ If present, the job detail page exposes download links for:
 - `job_summary.json`
 - `job_quality_summary.json`
 - `job_log_bundle.json`
+- `conflicts_enriched.csv`
+- `conflict_decision_audit.csv`
+- `unplaced_facts.csv`
+- `mapping_candidates.csv`
+- `benchmark_gap_explanations.csv`
+- `source_backed_gap_closure.csv`
+- `review_actions_filled.csv`
+- `review_actions_filled.xlsx`
+- `review_action_export_summary.json`
 
 If an expected artifact is missing, the UI shows `未生成`.
+
+## Review Dashboard
+
+Open a completed or `needs_review` job, then use:
+
+- `/jobs/<job_id>/review` for the audit-facing review dashboard
+- `/jobs/<job_id>/review/items` for the filterable review-item list
+- `/jobs/<job_id>/review/export-actions` to export saved actions
+
+The review dashboard is a server-rendered triage layer over existing `standardize` artifacts. It reads review-oriented files such as `review_queue.csv`, `issues.csv`, `validation_results.csv`, `conflicts_enriched.csv`, `unplaced_facts.csv`, `mapping_candidates.csv`, and related review workbook / gap files when available. Missing files are shown as unavailable instead of crashing the page.
+
+## Review Statuses
+
+- `unresolved`: 尚未在 Web 复核界面中保存动作。
+- `resolved`: 已保存一个处理动作，通常表示该条目已被人工判定。
+- `ignored`: 已标记忽略，不再作为当前待办。
+- `deferred`: 已暂缓，后续仍应进入复核积压。
+- `reocr_requested`: 已记录需要二次 OCR 的请求，但本阶段不会自动 rerun。
+
+## Review Action Types
+
+- `ignore`: 关闭当前条目，不直接改动底层事实。
+- `defer`: 记录暂缓，保留到后续复核积压。
+- `mark_not_financial_fact`: 标记为非财务事实，供后续 apply 阶段使用。
+- `request_reocr`: 记录需要二次 OCR 的请求。
+- `accept_mapping_candidate`: 接受当前候选映射；导出时会尽量映射到现有 backend 可识别动作。
+- `set_mapping_override`: 指定局部映射覆盖值。
+- `set_conflict_winner`: 指定供应商冲突的胜出结果。
+- `suppress_false_positive`: 标记 OCR 误报，供后续 apply 阶段使用。
+
+## Exporting Review Actions
+
+1. 在 `/jobs/<job_id>/review/items` 页面逐条保存动作。
+2. 打开 `/jobs/<job_id>/review/export-actions`。
+3. 点击“生成导出文件”。
+4. 从任务详情页或导出页下载 `review_actions_filled.csv` / `review_actions_filled.xlsx` / `review_action_export_summary.json`。
+
+导出文件会尽量复用现有 `standardize.feedback` 的动作模板字段，例如 `review_id`, `action_type`, `action_value`, `reviewer_note`, `reviewer_name`, `review_status`, `source_type`, `source_cell_ref`, `candidate_mapping_code`, `candidate_conflict_fact_id` 等。这样后续可以尽量对接既有 backend `--apply-review-actions` 工作流。
+
+当前限制：
+
+- Web UI 会保存并导出动作，但不会直接改写基础 standardize 配置。
+- 对 `review_queue.csv` 原生条目以外的 Web 复核项，现有 backend apply 流程可能仍需要补齐 `review_id` 或其他字段。
+- `accept_mapping_candidate` 会在导出层尽量映射到现有 backend 支持动作；兼容性缺口会写入 `review_action_export_summary.json`。
+- 自动 apply + rerun 计划放到 Stage 10.1，不在当前 MVP 范围内。
 
 ## System Status
 

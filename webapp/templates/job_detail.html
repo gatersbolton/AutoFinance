@@ -12,6 +12,8 @@
         <h1>{{ job.display_name }}</h1>
     </div>
     <div class="actions">
+        <a class="button button--secondary" href="/jobs/{{ job.job_id }}/review">复核看板</a>
+        <a class="button button--secondary" href="/jobs/{{ job.job_id }}/review/items">复核项</a>
         {% if can_queue %}
         <form action="/jobs/{{ job.job_id }}/queue" method="post">
             <button class="button button--secondary" type="submit">重新入队</button>
@@ -44,6 +46,21 @@
 </section>
 
 <section class="grid grid--detail">
+    <article class="card">
+        <h2>复核入口</h2>
+        <dl class="meta-list">
+            <div><dt>待复核总数</dt><dd>{{ review_summary.total_review_items }}</dd></div>
+            <div><dt>未处理</dt><dd>{{ review_summary.unresolved_review_items }}</dd></div>
+            <div><dt>高优先级</dt><dd>{{ review_summary.high_priority_items }}</dd></div>
+            <div><dt>校验失败</dt><dd>{{ review_summary.validation_fail_count }}</dd></div>
+            <div><dt>供应商识别冲突</dt><dd>{{ review_summary.provider_conflict_count }}</dd></div>
+        </dl>
+        <div class="actions">
+            <a class="button button--secondary" href="/jobs/{{ job.job_id }}/review">打开复核看板</a>
+            <a class="button button--secondary" href="/jobs/{{ job.job_id }}/review/export-actions">导出复核动作</a>
+        </div>
+    </article>
+
     <article class="card">
         <h2>操作摘要</h2>
         <dl class="meta-list">

@@ -174,7 +174,8 @@ pre {
 }
 
 .field input[type="text"],
-.field input[type="file"] {
+.field input[type="file"],
+.field select {
     width: 100%;
     border: 1px solid var(--line);
     border-radius: 12px;
@@ -272,6 +273,27 @@ td {
     color: var(--danger);
 }
 
+.status--review-unresolved {
+    background: rgba(168, 104, 10, 0.14);
+    color: var(--warning);
+}
+
+.status--review-resolved {
+    background: rgba(22, 128, 61, 0.14);
+    color: #166534;
+}
+
+.status--review-ignored {
+    background: rgba(95, 98, 104, 0.14);
+    color: #4b5563;
+}
+
+.status--review-deferred,
+.status--review-reocr_requested {
+    background: rgba(29, 105, 180, 0.14);
+    color: #174d7a;
+}
+
 .result-banner {
     display: grid;
     grid-template-columns: minmax(0, 1.2fr) minmax(280px, 0.8fr);
@@ -337,6 +359,72 @@ td {
     font-size: 0.92rem;
 }
 
+.stat-card h2 {
+    margin: 0;
+    font-size: 2rem;
+}
+
+.filter-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 16px;
+}
+
+.field--wide {
+    grid-column: span 2;
+}
+
+.checkbox-field {
+    align-content: end;
+}
+
+.checkbox-field input {
+    width: auto;
+    margin-top: 14px;
+}
+
+.review-item-list {
+    display: grid;
+    gap: 18px;
+}
+
+.review-item {
+    padding: 20px;
+}
+
+.review-item__header {
+    display: flex;
+    justify-content: space-between;
+    gap: 16px;
+    margin-bottom: 18px;
+}
+
+.review-item__grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: 18px;
+    margin-bottom: 18px;
+}
+
+.action-form {
+    border-top: 1px solid rgba(214, 207, 194, 0.7);
+    padding-top: 16px;
+}
+
+.action-form__grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 14px;
+    margin-bottom: 14px;
+}
+
+.evidence-links {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    margin-bottom: 12px;
+}
+
 .meta-list {
     display: grid;
     gap: 10px;
@@ -386,5 +474,13 @@ pre {
 
     .result-banner {
         grid-template-columns: 1fr;
+    }
+
+    .field--wide {
+        grid-column: span 1;
+    }
+
+    .review-item__header {
+        flex-direction: column;
     }
 }
