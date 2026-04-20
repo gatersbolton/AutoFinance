@@ -1,0 +1,57 @@
+{% extends "base.html" %}
+{% block title %}系统状态 | {{ settings.app_name }}{% endblock %}
+{% block content %}
+<section class="page-heading">
+    <div>
+        <p class="eyebrow">System</p>
+        <h1>系统状态</h1>
+    </div>
+</section>
+
+<section class="grid">
+    <article class="card">
+        <h2>运行环境</h2>
+        <dl class="meta-list">
+            <div><dt>部署环境</dt><dd>{{ status.environment }}</dd></div>
+            <div><dt>App Version</dt><dd>{{ status.app_version }}</dd></div>
+            <div><dt>Python Version</dt><dd>{{ status.python_version }}</dd></div>
+            <div><dt>Template Path</dt><dd><code>{{ status.template_path }}</code></dd></div>
+            <div><dt>Template Exists</dt><dd>{{ status.template_exists }}</dd></div>
+            <div><dt>Local Worker</dt><dd>{{ status.local_worker_enabled }}</dd></div>
+            <div><dt>Worker Mode</dt><dd>{{ status.worker_mode }}</dd></div>
+            <div><dt>Redis Configured</dt><dd>{{ status.redis_configured }}</dd></div>
+            <div><dt>Auth Enabled</dt><dd>{{ status.auth_enabled }}</dd></div>
+            <div><dt>Auth Required</dt><dd>{{ status.auth_required }}</dd></div>
+        </dl>
+    </article>
+    <article class="card">
+        <h2>数据目录</h2>
+        <ul class="plain-list">
+            {% for path, exists in status.runtime_directories.items() %}
+                <li><code>{{ path }}</code> · {{ exists }}</li>
+            {% endfor %}
+        </ul>
+    </article>
+    <article class="card">
+        <h2>Provider Modes</h2>
+        <ul class="plain-list">
+            {% for item in status.available_provider_modes %}
+                <li>{{ item }}</li>
+            {% endfor %}
+        </ul>
+    </article>
+    <article class="card">
+        <h2>OCR 凭据状态</h2>
+        <ul class="plain-list">
+            <li>密钥文件存在：{{ status.ocr_credentials.get("secret_path_exists") }}</li>
+            <li>密钥文件解析成功：{{ status.ocr_credentials.get("secret_file_parse_ok") }}</li>
+            <li>检测到解析异常：{{ status.ocr_credentials.get("secret_file_parse_error_present") }}</li>
+            <li>阿里云 OCR 已配置：{{ status.ocr_credentials.get("aliyun_configured") }}</li>
+            <li>腾讯 OCR 已配置：{{ status.ocr_credentials.get("tencent_configured") }}</li>
+            <li>当前上传 OCR 模式：{{ status.ocr_credentials.get("active_upload_method") }}</li>
+            <li>当前上传 OCR 模式可用：{{ status.ocr_credentials.get("active_upload_method_ready") }}</li>
+        </ul>
+        <p class="todo-note">TODO: Stage 10/11 需要按角色限制系统状态详情显示范围。</p>
+    </article>
+</section>
+{% endblock %}

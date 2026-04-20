@@ -1,0 +1,75 @@
+{% extends "base.html" %}
+{% block title %}新建任务 | {{ settings.app_name }}{% endblock %}
+{% block content %}
+<section class="page-heading">
+    <div>
+        <p class="eyebrow">Create Job</p>
+        <h1>新建任务</h1>
+    </div>
+</section>
+
+{% if error_message %}
+<section class="card card--error">
+    <h2>提交失败</h2>
+    <p>{{ error_message }}</p>
+</section>
+{% endif %}
+
+<form class="card form-stack" action="/jobs" method="post" enctype="multipart/form-data" data-job-form>
+    <div class="field">
+        <label for="display_name">任务名称</label>
+        <input id="display_name" name="display_name" type="text" value="{{ submitted_display_name }}" placeholder="可选，默认使用目录名或文件名">
+    </div>
+
+    <div class="field">
+        <span class="label">任务模式</span>
+        <label class="radio">
+            <input type="radio" name="mode" value="existing_ocr_outputs" {% if submitted_mode == 'existing_ocr_outputs' %}checked{% endif %}>
+            <span>existing_ocr_outputs</span>
+        </label>
+        <label class="radio">
+            <input type="radio" name="mode" value="upload_pdf" {% if submitted_mode == 'upload_pdf' %}checked{% endif %}>
+            <span>upload_pdf</span>
+        </label>
+    </div>
+
+    <section class="subform" data-mode-panel="existing_ocr_outputs">
+        <h2>模式 1：复用已有 OCR 输出</h2>
+        <p>推荐用于 smoke test。路径仅允许位于 <code>data/corpus/</code> 或 <code>data/generated/web/</code>。</p>
+        <div class="field">
+            <label for="existing_ocr_path">OCR 输出路径</label>
+            <input id="existing_ocr_path" name="existing_ocr_path" list="ocr-output-options" type="text" value="{{ default_existing_path }}" placeholder="例如 data/corpus/D01/ocr_outputs">
+            <datalist id="ocr-output-options">
+                {% for choice in existing_ocr_choices %}
+                    <option value="{{ choice }}"></option>
+                {% endfor %}
+            </datalist>
+        </div>
+    </section>
+
+    <section class="subform" data-mode-panel="upload_pdf">
+        <h2>模式 2：上传 PDF</h2>
+        <p>上传文件会存入 <code>data/generated/web/uploads/</code>。{% if upload_auto_run_enabled %}当前启用了自动 OCR。{% else %}当前未启用自动 OCR，上传后任务会保持在待 OCR 状态。{% endif %}</p>
+        <div class="field">
+            <label for="uploaded_files">PDF 文件</label>
+            <input id="uploaded_files" name="uploaded_files" type="file" accept=".pdf" multiple>
+        </div>
+    </section>
+
+    <section class="hint-grid">
+        <article class="hint">
+            <h3>模板</h3>
+            <p><code>{{ template_path }}</code></p>
+        </article>
+        <article class="hint">
+            <h3>生产默认</h3>
+            <p>Cloud-first OCR. Paddle stays pilot-only.</p>
+        </article>
+    </section>
+
+    <div class="actions">
+        <button class="button button--primary" type="submit">创建任务</button>
+        <a class="button button--secondary" href="/jobs">查看任务列表</a>
+    </div>
+</form>
+{% endblock %}

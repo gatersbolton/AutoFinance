@@ -33,6 +33,11 @@ data/
       control_runs/
         paddle_provider_pilot/
         paddle_provider_eval/
+    web/
+      uploads/
+      jobs/
+      results/
+      logs/
 ```
 
 ## Main Commands
@@ -102,3 +107,4 @@ python -m unittest discover -s tests
 - `benchmarks/paddle_pilot_registry.yml`: small Stage 8.1 evaluation sample for Paddle quality gating
 - `standardize/README*.md`: stage-specific notes for the standardization pipeline
 - `README_stage8_paddle_provider.md`: Paddle pilot and Stage 8.1 quality-eval notes
+- `README_web.md`: Stage 9 web MVP local-dev and deployment notes

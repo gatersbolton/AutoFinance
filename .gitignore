@@ -7,6 +7,7 @@ normalized_archive/
 audits/
 data/
 data/generated/audits/
+data/generated/web/
 data/generated/audits/**/_audit_tmp/
 runs/
 _audit_tmp/

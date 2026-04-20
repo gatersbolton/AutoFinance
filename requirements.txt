@@ -9,3 +9,8 @@ pytest
 openpyxl
 PyYAML
 urllib3<2
+fastapi
+uvicorn
+Jinja2
+python-multipart
+httpx

@@ -52,6 +52,11 @@ data/
       paddle_provider_eval/
     comparisons/
     legacy/
+    web/
+      uploads/
+      jobs/
+      results/
+      logs/
 ```
 
 Rules:
@@ -63,6 +68,7 @@ Rules:
 - `data/generated/` holds all run outputs, audits, experiments, and historical leftovers.
 - Stage 8 Paddle pilot outputs belong under `data/generated/experiments/paddle_provider_pilot/` and `data/generated/standardize/control_runs/paddle_provider_pilot/`.
 - Stage 8.1 Paddle quality-eval outputs belong under `data/generated/experiments/paddle_provider_eval/` and `data/generated/standardize/control_runs/paddle_provider_eval/`.
+- Stage 9 web runtime state belongs under `data/generated/web/`, including uploads, job workspaces, result summaries, logs, and the local SQLite database.
 
 ## Standard Commands
 

@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+{% block title %}任务列表 | {{ settings.app_name }}{% endblock %}
+{% block head %}
+{% if has_active_jobs %}
+<meta http-equiv="refresh" content="5">
+{% endif %}
+{% endblock %}
+{% block content %}
+<section class="page-heading">
+    <div>
+        <p class="eyebrow">Jobs</p>
+        <h1>任务列表</h1>
+    </div>
+    <a class="button button--primary" href="/jobs/new">新建任务</a>
+</section>
+
+<section class="card">
+    {% if jobs %}
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th>Job ID</th>
+                    <th>名称</th>
+                    <th>状态</th>
+                    <th>创建时间</th>
+                    <th>更新时间</th>
+                    <th>Provider Mode</th>
+                    <th>进度摘要</th>
+                    <th>详情</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for job in jobs %}
+                <tr>
+                    <td><code>{{ job.job_id }}</code></td>
+                    <td>{{ job.display_name }}</td>
+                    <td><span class="status status--{{ job.status }}">{{ describe_job_status(job.status) }}</span></td>
+                    <td>{{ job.created_at }}</td>
+                    <td>{{ job.updated_at }}</td>
+                    <td>{{ job.provider_mode }}</td>
+                    <td>{{ job.progress_summary }}</td>
+                    <td><a href="/jobs/{{ job.job_id }}">查看</a></td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% else %}
+    <p>尚未创建任务。</p>
+    {% endif %}
+</section>
+{% endblock %}

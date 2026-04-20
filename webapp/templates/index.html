@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+{% block title %}首页 | {{ settings.app_name }}{% endblock %}
+{% block content %}
+<section class="hero">
+    <div>
+        <p class="eyebrow">Stage 9</p>
+        <h1>审计任务 Web MVP</h1>
+        <p class="hero-copy">上传 PDF 或复用已有 OCR 输出，生成标准化任务，查看状态与结果文件。</p>
+    </div>
+    <a class="button button--primary button--large" href="/jobs/new">新建任务</a>
+</section>
+
+<section class="grid">
+    <article class="card">
+        <h2>快捷入口</h2>
+        <p><a href="/jobs">任务列表</a></p>
+        <p><a href="/system">系统状态</a></p>
+    </article>
+    <article class="card">
+        <h2>活动任务</h2>
+        {% if active_jobs %}
+            <ul class="plain-list">
+                {% for job in active_jobs %}
+                    <li><a href="/jobs/{{ job.job_id }}">{{ job.display_name }}</a> · {{ describe_job_status(job.status) }} · {{ job.current_stage }}</li>
+                {% endfor %}
+            </ul>
+        {% else %}
+            <p>当前没有活动任务。</p>
+        {% endif %}
+    </article>
+    <article class="card">
+        <h2>最近任务</h2>
+        {% if jobs %}
+            <ul class="plain-list">
+                {% for job in jobs %}
+                    <li><a href="/jobs/{{ job.job_id }}">{{ job.job_id }}</a> · {{ describe_job_status(job.status) }} · {{ job.progress_summary }}</li>
+                {% endfor %}
+            </ul>
+        {% else %}
+            <p>尚未创建任务。</p>
+        {% endif %}
+    </article>
+</section>
+{% endblock %}
