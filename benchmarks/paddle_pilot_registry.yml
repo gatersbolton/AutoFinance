@@ -1,0 +1,72 @@
+entries:
+  - doc_id: D01
+    input_source: corpus_registry
+    page_no: 4
+    page_role: main_statement
+    layout_detection: "off"
+    enabled: true
+    notes: baseline main statement page
+
+  - doc_id: D03
+    input_source: corpus_registry
+    page_no: 3
+    page_role: main_statement
+    layout_detection: "off"
+    enabled: true
+    notes: non-D01 balance-sheet page with dense statement rows
+
+  - doc_id: D05
+    input_source: corpus_registry
+    page_no: 3
+    page_role: main_statement
+    layout_detection: "off"
+    enabled: true
+    notes: alternative main statement page from another company template
+
+  - doc_id: D01
+    input_source: corpus_registry
+    page_no: 15
+    page_role: note_multi_table
+    layout_detection: "on"
+    enabled: true
+    notes: baseline note page with multiple stacked tables
+
+  - doc_id: D02
+    input_source: corpus_registry
+    page_no: 4
+    page_role: cross_doc_main_statement
+    layout_detection: "off"
+    enabled: true
+    notes: non-D01 main statement sample
+
+  - doc_id: D07
+    input_source: corpus_registry
+    page_no: 4
+    page_role: cross_doc_main_statement
+    layout_detection: "off"
+    enabled: true
+    notes: additional cross-doc balance-sheet sample beyond the current weak case
+
+  - doc_id: D03
+    input_source: corpus_registry
+    page_no: 12
+    page_role: note_multi_table
+    layout_detection: "on"
+    enabled: true
+    notes: denser note page with multiple compact subtables
+
+  - doc_id: D06
+    input_source: corpus_registry
+    page_no: 41
+    page_role: note_multi_table
+    layout_detection: "on"
+    enabled: true
+    notes: longer note page with multiple short-term debt and payable subtables
+
+  - doc_id: D05
+    input_source: corpus_registry
+    page_no: 36
+    page_role: note_noise
+    layout_detection: "on"
+    enabled: true
+    notes: noisy note page with mixed content and OCR distractions

@@ -39,15 +39,17 @@ data/
     secret
   vendor/
     PaddleOCR/
-  generated/
-    standardize/
-      archive/
-      control_runs/
-        paddle_provider_pilot/
-      batches/
+    generated/
+      standardize/
+        archive/
+        control_runs/
+          paddle_provider_pilot/
+          paddle_provider_eval/
+        batches/
     audits/
     experiments/
       paddle_provider_pilot/
+      paddle_provider_eval/
     comparisons/
     legacy/
 ```
@@ -60,6 +62,7 @@ Rules:
 - `data/vendor/` holds local third-party source checkouts.
 - `data/generated/` holds all run outputs, audits, experiments, and historical leftovers.
 - Stage 8 Paddle pilot outputs belong under `data/generated/experiments/paddle_provider_pilot/` and `data/generated/standardize/control_runs/paddle_provider_pilot/`.
+- Stage 8.1 Paddle quality-eval outputs belong under `data/generated/experiments/paddle_provider_eval/` and `data/generated/standardize/control_runs/paddle_provider_eval/`.
 
 ## Standard Commands
 

@@ -28,9 +28,11 @@ data/
   generated/
     experiments/
       paddle_provider_pilot/
+      paddle_provider_eval/
     standardize/
       control_runs/
         paddle_provider_pilot/
+        paddle_provider_eval/
 ```
 
 ## Main Commands
@@ -97,5 +99,6 @@ python -m unittest discover -s tests
 
 - `AGENTS.md`: repo map and path contract for Codex and other agents
 - `benchmarks/registry.yml`: document registry for batch runs
+- `benchmarks/paddle_pilot_registry.yml`: small Stage 8.1 evaluation sample for Paddle quality gating
 - `standardize/README*.md`: stage-specific notes for the standardization pipeline
-- `README_stage8_paddle_provider.md`: optional Paddle local provider pilot notes
+- `README_stage8_paddle_provider.md`: Paddle pilot and Stage 8.1 quality-eval notes

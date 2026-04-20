@@ -1,152 +1,127 @@
 from __future__ import annotations
 
 import argparse
-import csv
-import json
-import shutil
-import subprocess
 import sys
 from pathlib import Path
 from typing import Any, Dict, List
-
-import yaml
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from project_paths import DEFAULT_TEMPLATE_PATH, PADDLE_STANDARDIZE_CONTROL_ROOT
+from project_paths import DEFAULT_TEMPLATE_PATH, PADDLE_STANDARDIZE_EVAL_CONTROL_ROOT, REGISTRY_PATH
+from tools.paddle_eval_support import (
+    aggregate_compatibility_summaries,
+    execute_standardize_compatibility,
+    load_paddle_pilot_registry,
+    load_registry,
+    write_csv,
+    write_json,
+)
+
+
+DEFAULT_PADDLE_PILOT_REGISTRY = Path("benchmarks/paddle_pilot_registry.yml")
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run standardize compatibility validation for Paddle pilot outputs.")
-    parser.add_argument("--registry", default="benchmarks/registry.yml")
-    parser.add_argument("--doc-id", default="D01")
+    parser = argparse.ArgumentParser(
+        description="Run expanded standardize compatibility validation for Paddle evaluation outputs."
+    )
+    parser.add_argument("--registry", default=str(REGISTRY_PATH))
+    parser.add_argument("--sample-registry", default=str(DEFAULT_PADDLE_PILOT_REGISTRY))
+    parser.add_argument("--doc-id", action="append", default=[])
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--template", default=str(DEFAULT_TEMPLATE_PATH))
     return parser.parse_args()
 
 
-def load_registry(path: Path) -> Dict[str, Dict[str, Any]]:
-    payload = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-    entries = payload.get("entries", []) or []
-    by_doc: Dict[str, Dict[str, Any]] = {}
-    for entry in entries:
-        doc_id = str(entry.get("doc_id", "")).strip()
-        if doc_id:
-            resolved = dict(entry)
-            resolved["_input_dir"] = (path.parent / entry["input_dir"]).resolve()
-            resolved["_source_image_dir"] = (path.parent / entry["source_image_dir"]).resolve()
-            by_doc[doc_id] = resolved
-    return by_doc
-
-
-def write_json(path: Path, payload: Dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
-
-
-def count_csv_rows(path: Path) -> int:
-    if not path.exists():
-        return 0
-    with path.open("r", encoding="utf-8-sig", newline="") as handle:
-        reader = csv.reader(handle)
-        rows = list(reader)
-    return max(len(rows) - 1, 0)
-
-
-def collect_missing_fields(input_dir: Path) -> List[str]:
-    provider_dir = input_dir / "paddle_table_local"
-    if not provider_dir.exists():
-        return []
-    missing: set[str] = set()
-    for raw_path in provider_dir.rglob("raw/page_*.json"):
-        payload = json.loads(raw_path.read_text(encoding="utf-8"))
-        for field in payload.get("missing_fields", []):
-            if field:
-                missing.add(str(field))
-    return sorted(missing)
+def resolve_doc_ids(args: argparse.Namespace, registry_by_doc: Dict[str, Dict[str, Any]]) -> List[str]:
+    if args.doc_id:
+        return sorted({str(item).strip() for item in args.doc_id if str(item).strip()})
+    sample_registry_path = (REPO_ROOT / args.sample_registry).resolve()
+    samples = load_paddle_pilot_registry(
+        sample_registry_path,
+        main_registry_path=(REPO_ROOT / args.registry).resolve(),
+        registry_by_doc=registry_by_doc,
+    )
+    return sorted({sample["doc_id"] for sample in samples})
 
 
 def main() -> int:
     args = parse_args()
-    repo_root = REPO_ROOT
-    registry_path = (repo_root / args.registry).resolve()
+    registry_path = (REPO_ROOT / args.registry).resolve()
     registry_by_doc = load_registry(registry_path)
-    entry = registry_by_doc[args.doc_id]
+    template_path = Path(args.template).resolve()
+    output_root = (PADDLE_STANDARDIZE_EVAL_CONTROL_ROOT / args.run_id).resolve()
+    output_root.mkdir(parents=True, exist_ok=True)
 
-    input_dir = Path(entry["_input_dir"])
-    source_image_dir = Path(entry["_source_image_dir"])
-    output_dir = (PADDLE_STANDARDIZE_CONTROL_ROOT / args.run_id).resolve()
-    if output_dir.exists():
-        shutil.rmtree(output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    command = [
-        sys.executable,
-        "-m",
-        "standardize.cli",
-        "--input-dir",
-        str(input_dir),
-        "--template",
-        str(Path(args.template).resolve()),
-        "--output-dir",
-        str(output_dir),
-        "--output-run-subdir",
-        "none",
-        "--source-image-dir",
-        str(source_image_dir),
-        "--provider-priority",
-        "paddle_table_local",
-        "--enable-period-normalization",
-        "--enable-dedupe",
-        "--enable-validation",
-        "--enable-label-canonicalization",
-        "--enable-derived-facts",
-        "--enable-main-statement-specialization",
-        "--enable-single-period-role-inference",
-        "--enable-integrity-check",
-    ]
-    completed = subprocess.run(
-        command,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        cwd=str(repo_root),
+    doc_ids = resolve_doc_ids(args, registry_by_doc)
+    sample_registry_path = (REPO_ROOT / args.sample_registry).resolve()
+    sample_rows = load_paddle_pilot_registry(
+        sample_registry_path,
+        main_registry_path=registry_path,
+        registry_by_doc=registry_by_doc,
     )
+    roles_by_doc: Dict[str, List[str]] = {}
+    for row in sample_rows:
+        roles_by_doc.setdefault(row["doc_id"], []).append(str(row["page_role"]))
+    doc_summaries: List[Dict[str, Any]] = []
+    for doc_id in doc_ids:
+        entry = registry_by_doc[doc_id]
+        summary = execute_standardize_compatibility(
+            input_dir=Path(entry["_input_dir"]),
+            source_image_dir=Path(entry["_source_image_dir"]),
+            output_dir=output_root / doc_id,
+            template_path=template_path,
+            doc_id=doc_id,
+            scope_name=doc_id,
+            sampled_page_roles=sorted(set(roles_by_doc.get(doc_id, []))),
+        )
+        doc_summaries.append(summary)
 
-    run_summary_path = output_dir / "run_summary.json"
-    run_summary = json.loads(run_summary_path.read_text(encoding="utf-8")) if run_summary_path.exists() else {}
-    compatibility_summary = {
-        "run_id": args.run_id,
-        "doc_id": args.doc_id,
-        "standardize_exit_code": completed.returncode,
-        "output_dir": str(output_dir),
-        "cells_csv_exists": (output_dir / "cells.csv").exists(),
-        "facts_csv_exists": (output_dir / "facts.csv").exists(),
-        "issues_csv_exists": (output_dir / "issues.csv").exists(),
-        "run_summary_exists": run_summary_path.exists(),
-        "cells_total": count_csv_rows(output_dir / "cells.csv"),
-        "facts_total": count_csv_rows(output_dir / "facts.csv"),
-        "issues_total": count_csv_rows(output_dir / "issues.csv"),
-        "missing_fields_to_adapt": collect_missing_fields(input_dir),
-        "standardize_consumable": completed.returncode == 0 and (output_dir / "cells.csv").exists() and (output_dir / "facts.csv").exists(),
-        "notes": [],
-        "command": command,
-        "stderr_tail": "\n".join((completed.stderr or "").splitlines()[-20:]),
-        "stdout_tail": "\n".join((completed.stdout or "").splitlines()[-20:]),
-        "run_summary": run_summary,
-    }
-    if not compatibility_summary["standardize_consumable"]:
-        compatibility_summary["notes"].append("standardize_did_not_complete_cleanly")
-    if compatibility_summary["cells_total"] <= 0:
-        compatibility_summary["notes"].append("no_cells_emitted")
-    if compatibility_summary["facts_total"] <= 0:
-        compatibility_summary["notes"].append("no_facts_emitted")
+    compatibility_summary = aggregate_compatibility_summaries(args.run_id, doc_summaries)
+    compatibility_summary["provider_name"] = "paddle_table_local"
 
-    write_json(output_dir / "paddle_standardize_compatibility.json", compatibility_summary)
-    return 0 if completed.returncode == 0 else 1
+    write_json(output_root / "paddle_standardize_compatibility.json", compatibility_summary)
+    write_csv(
+        output_root / "paddle_standardize_compatibility_by_doc.csv",
+        [
+            {
+                "doc_id": summary["doc_id"],
+                "scope_name": summary["scope_name"],
+                "sampled_page_roles": ";".join(summary.get("sampled_page_roles", [])),
+                "provider_priority": summary["provider_priority"],
+                "standardize_exit_code": summary["standardize_exit_code"],
+                "cells_total": summary["cells_total"],
+                "facts_total": summary["facts_total"],
+                "issues_total": summary["issues_total"],
+                "standardize_consumable": summary["standardize_consumable"],
+                "zero_fact_output": summary.get("zero_fact_output", False),
+                "weak_output": summary.get("weak_output", False),
+                "missing_fields_to_adapt": ";".join(summary["missing_fields_to_adapt"]),
+                "notes": ";".join(summary["notes"]),
+                "output_dir": summary["output_dir"],
+            }
+            for summary in doc_summaries
+        ],
+        [
+            "doc_id",
+            "scope_name",
+            "sampled_page_roles",
+            "provider_priority",
+            "standardize_exit_code",
+            "cells_total",
+            "facts_total",
+            "issues_total",
+            "standardize_consumable",
+            "zero_fact_output",
+            "weak_output",
+            "missing_fields_to_adapt",
+            "notes",
+            "output_dir",
+        ],
+    )
+    return 0 if compatibility_summary["standardize_compatible"] else 1
 
 
 if __name__ == "__main__":

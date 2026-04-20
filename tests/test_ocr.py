@@ -5,9 +5,11 @@ import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
 from unittest import mock
+import yaml
 
 import OCR as ocr
 import project_paths
+from tools.paddle_eval_support import load_paddle_pilot_registry
 
 
 class FakeImage:
@@ -368,11 +370,119 @@ class OCRToolTests(unittest.TestCase):
 
     def test_project_paths_include_stage8_paddle_roots(self):
         self.assertTrue(str(project_paths.PADDLE_PROVIDER_PILOT_ROOT).endswith("data\\generated\\experiments\\paddle_provider_pilot"))
+        self.assertTrue(str(project_paths.PADDLE_PROVIDER_EVAL_ROOT).endswith("data\\generated\\experiments\\paddle_provider_eval"))
         self.assertTrue(
             str(project_paths.PADDLE_STANDARDIZE_CONTROL_ROOT).endswith(
                 "data\\generated\\standardize\\control_runs\\paddle_provider_pilot"
             )
         )
+        self.assertTrue(
+            str(project_paths.PADDLE_STANDARDIZE_EVAL_CONTROL_ROOT).endswith(
+                "data\\generated\\standardize\\control_runs\\paddle_provider_eval"
+            )
+        )
+
+    def test_load_paddle_pilot_registry_resolves_doc_paths(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_root = Path(tmpdir)
+            main_registry_path = tmp_root / "registry.yml"
+            sample_registry_path = tmp_root / "paddle_pilot_registry.yml"
+            main_registry_path.write_text(
+                yaml.safe_dump(
+                    {
+                        "entries": [
+                            {
+                                "doc_id": "D01",
+                                "input_dir": "../data/corpus/D01/ocr_outputs",
+                                "source_image_dir": "../data/corpus/D01/input",
+                            }
+                        ]
+                    },
+                    allow_unicode=True,
+                    sort_keys=False,
+                ),
+                encoding="utf-8",
+            )
+            sample_registry_path.write_text(
+                yaml.safe_dump(
+                    {
+                        "entries": [
+                            {
+                                "doc_id": "D01",
+                                "page_no": 4,
+                                "page_role": "main_statement",
+                                "layout_detection": "off",
+                                "enabled": True,
+                                "input_source": "corpus_registry",
+                            },
+                            {
+                                "doc_id": "D01",
+                                "page_no": 15,
+                                "page_role": "note_multi_table",
+                                "layout_detection": "on",
+                                "enabled": False,
+                            },
+                        ]
+                    },
+                    allow_unicode=True,
+                    sort_keys=False,
+                ),
+                encoding="utf-8",
+            )
+
+            rows = load_paddle_pilot_registry(sample_registry_path, main_registry_path=main_registry_path)
+
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["doc_id"], "D01")
+            self.assertEqual(rows[0]["page_no"], 4)
+            self.assertEqual(rows[0]["page_role"], "main_statement")
+            self.assertEqual(rows[0]["layout_detection"], "off")
+            self.assertTrue(str(rows[0]["_input_dir"]).endswith("data\\corpus\\D01\\ocr_outputs"))
+            self.assertTrue(str(rows[0]["_source_image_dir"]).endswith("data\\corpus\\D01\\input"))
+
+    def test_load_paddle_pilot_registry_handles_yaml_boolean_on_off(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_root = Path(tmpdir)
+            main_registry_path = tmp_root / "registry.yml"
+            sample_registry_path = tmp_root / "paddle_pilot_registry.yml"
+            main_registry_path.write_text(
+                "entries:\n"
+                "  - doc_id: D01\n"
+                "    input_dir: ../data/corpus/D01/ocr_outputs\n"
+                "    source_image_dir: ../data/corpus/D01/input\n",
+                encoding="utf-8",
+            )
+            sample_registry_path.write_text(
+                "entries:\n"
+                "  - doc_id: D01\n"
+                "    page_no: 4\n"
+                "    page_role: main_statement\n"
+                "    layout_detection: off\n"
+                "    enabled: true\n"
+                "  - doc_id: D01\n"
+                "    page_no: 5\n"
+                "    page_role: note_multi_table\n"
+                "    layout_detection: on\n"
+                "    enabled: true\n",
+                encoding="utf-8",
+            )
+
+            rows = load_paddle_pilot_registry(sample_registry_path, main_registry_path=main_registry_path)
+
+            self.assertEqual([row["layout_detection"] for row in rows], ["off", "on"])
+
+    def test_repo_paddle_pilot_registry_is_expanded_for_stage82(self):
+        repo_root = Path(__file__).resolve().parent.parent
+        rows = load_paddle_pilot_registry(
+            repo_root / "benchmarks" / "paddle_pilot_registry.yml",
+            main_registry_path=repo_root / "benchmarks" / "registry.yml",
+        )
+
+        roles = [row["page_role"] for row in rows]
+        self.assertGreaterEqual(len(rows), 8)
+        self.assertGreaterEqual(sum(1 for role in roles if role == "main_statement"), 2)
+        self.assertGreaterEqual(sum(1 for role in roles if role == "note_multi_table"), 2)
+        self.assertGreaterEqual(sum(1 for role in roles if role == "cross_doc_main_statement"), 2)
 
     def test_process_pdf_with_provider_writes_artifacts(self):
         with tempfile.TemporaryDirectory() as tmpdir:

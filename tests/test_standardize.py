@@ -12,6 +12,17 @@ import yaml
 from PIL import Image, ImageDraw
 from openpyxl import Workbook, load_workbook
 
+from tools.paddle_eval_support import (
+    aggregate_compatibility_summaries,
+    build_conservative_evidence_thresholds,
+    build_failure_analysis_rows,
+    build_parity_by_role_rows,
+    build_parity_summary,
+    build_quality_gate,
+    build_role_summaries,
+    build_route_recommendation,
+    build_zero_fact_rows,
+)
 from standardize import cli
 from standardize import batch as batch_runner
 from standardize.benchmark import compare_benchmark_workbook, explain_benchmark_gaps
@@ -57,6 +68,277 @@ from standardize.validation import run_validation
 
 
 class StandardizeTests(unittest.TestCase):
+    def test_build_role_summaries_for_stage82_conservative_thresholds(self):
+        role_summaries = build_role_summaries(
+            [
+                {
+                    "doc_id": "D01",
+                    "page_no": 4,
+                    "page_role": "main_statement",
+                    "runtime_seconds": 4.5,
+                    "bbox_coverage": 1.0,
+                    "tables_detected": 1,
+                    "xlsx_emitted": True,
+                    "html_emitted": True,
+                    "raw_json_emitted": True,
+                    "standardize_consumable": "yes",
+                    "mapped_facts_ratio_if_available": 0.66,
+                    "review_total_if_available": 28,
+                    "validation_fail_total_if_available": 2,
+                    "facts_total_if_available": 120,
+                    "cells_total_if_available": 200,
+                    "cloud_reference_present": True,
+                    "cloud_tables_detected_if_available": 6,
+                    "tables_detected_delta": -5,
+                    "tables_deficit_ratio": 0.833333,
+                    "fewer_tables_than_cloud_reference": "yes",
+                    "zero_fact_page": "no",
+                },
+                {
+                    "doc_id": "D05",
+                    "page_no": 3,
+                    "page_role": "main_statement",
+                    "runtime_seconds": 7.5,
+                    "bbox_coverage": 1.0,
+                    "tables_detected": 1,
+                    "xlsx_emitted": True,
+                    "html_emitted": True,
+                    "raw_json_emitted": True,
+                    "standardize_consumable": "yes",
+                    "mapped_facts_ratio_if_available": 0.55,
+                    "review_total_if_available": 40,
+                    "validation_fail_total_if_available": 1,
+                    "facts_total_if_available": 88,
+                    "cells_total_if_available": 180,
+                    "cloud_reference_present": True,
+                    "cloud_tables_detected_if_available": 9,
+                    "tables_detected_delta": -8,
+                    "tables_deficit_ratio": 0.888889,
+                    "fewer_tables_than_cloud_reference": "yes",
+                    "zero_fact_page": "no",
+                },
+                {
+                    "doc_id": "D03",
+                    "page_no": 3,
+                    "page_role": "main_statement",
+                    "runtime_seconds": 5.5,
+                    "bbox_coverage": 1.0,
+                    "tables_detected": 1,
+                    "xlsx_emitted": True,
+                    "html_emitted": True,
+                    "raw_json_emitted": True,
+                    "standardize_consumable": "yes",
+                    "mapped_facts_ratio_if_available": 0.57,
+                    "review_total_if_available": 35,
+                    "validation_fail_total_if_available": 1,
+                    "facts_total_if_available": 99,
+                    "cells_total_if_available": 190,
+                    "cloud_reference_present": True,
+                    "cloud_tables_detected_if_available": 6,
+                    "tables_detected_delta": -5,
+                    "tables_deficit_ratio": 0.833333,
+                    "fewer_tables_than_cloud_reference": "yes",
+                    "zero_fact_page": "no",
+                },
+            ]
+        )
+
+        by_role = {summary["page_role"]: summary for summary in role_summaries}
+        self.assertEqual(by_role["main_statement"]["recommendation_candidate"], "pilot_only")
+        self.assertFalse(by_role["main_statement"]["thresholds_met"]["maximum_average_tables_deficit_ratio"])
+        self.assertEqual(by_role["main_statement"]["zero_fact_pages_total"], 0)
+
+    def test_build_parity_summary_and_zero_fact_detection(self):
+        page_rows = [
+            {
+                "doc_id": "D01",
+                "page_no": 4,
+                "page_role": "main_statement",
+                "runtime_seconds": 4.0,
+                "tables_detected": 1,
+                "cloud_tables_detected_if_available": 3,
+                "tables_detected_delta": -2,
+                "tables_deficit_ratio": 0.666667,
+                "standardize_consumable": "yes",
+                "cells_total_if_available": 120,
+                "facts_total_if_available": 50,
+                "mapped_facts_ratio_if_available": 0.4,
+                "review_total_if_available": 10,
+                "validation_fail_total_if_available": 1,
+                "zero_fact_page": "no",
+                "fewer_tables_than_cloud_reference": "yes",
+            },
+            {
+                "doc_id": "D02",
+                "page_no": 4,
+                "page_role": "cross_doc_main_statement",
+                "runtime_seconds": 3.0,
+                "tables_detected": 0,
+                "cloud_tables_detected_if_available": 4,
+                "tables_detected_delta": -4,
+                "tables_deficit_ratio": 1.0,
+                "standardize_consumable": "yes",
+                "cells_total_if_available": 1,
+                "facts_total_if_available": 0,
+                "mapped_facts_ratio_if_available": 0.0,
+                "review_total_if_available": 0,
+                "validation_fail_total_if_available": 0,
+                "zero_fact_page": "yes",
+                "fewer_tables_than_cloud_reference": "yes",
+            },
+        ]
+
+        role_summaries = build_role_summaries(page_rows)
+        parity_summary = build_parity_summary(page_rows, role_summaries)
+        zero_fact_rows = build_zero_fact_rows(page_rows)
+
+        self.assertEqual(parity_summary["pages_total"], 2)
+        self.assertEqual(parity_summary["zero_fact_pages_total"], 1)
+        self.assertEqual(len(zero_fact_rows), 1)
+        self.assertEqual(zero_fact_rows[0]["doc_id"], "D02")
+
+    def test_build_failure_analysis_rows(self):
+        rows = build_failure_analysis_rows(
+            [
+                {
+                    "doc_id": "D02",
+                    "page_no": 4,
+                    "page_role": "cross_doc_main_statement",
+                    "zero_fact_page": "yes",
+                    "standardize_consumable": "yes",
+                    "fewer_tables_than_cloud_reference": "yes",
+                    "tables_detected_delta": -4,
+                    "tables_deficit_ratio": 1.0,
+                    "mapped_facts_ratio_if_available": 0.0,
+                    "review_total_if_available": 0,
+                    "validation_fail_total_if_available": 0,
+                    "notes": "no_facts_emitted",
+                }
+            ]
+        )
+
+        self.assertEqual(len(rows), 1)
+        self.assertIn("zero_fact_page", rows[0]["failure_reasons"])
+        self.assertIn("fewer_tables_than_cloud_reference", rows[0]["failure_reasons"])
+        self.assertIn("low_mapped_facts_ratio", rows[0]["failure_reasons"])
+
+    def test_build_quality_gate_remains_conservative_under_thin_evidence(self):
+        quality_gate = build_quality_gate(
+            environment_summary={"provider_ready": True},
+            contract_summary={"contract_pass": True},
+            eval_summary={
+                "sample_pages_total": 5,
+                "docs_total": 4,
+                "runtime_seconds_average": 6.0,
+                "runtime_seconds_max": 10.0,
+                "parity_summary": {
+                    "zero_fact_pages_total": 0,
+                    "average_tables_deficit_ratio": 0.2,
+                },
+            },
+            role_summaries=[
+                {
+                    "page_role": "main_statement",
+                    "recommendation_candidate": "fallback_candidate",
+                    "thresholds_met": {"minimum_docs_per_role": False},
+                },
+                {
+                    "page_role": "note_multi_table",
+                    "recommendation_candidate": "pilot_only",
+                    "thresholds_met": {"minimum_docs_per_role": True},
+                },
+            ],
+            compatibility_summary={"standardize_compatible": True},
+            cloud_control_summary={"cloud_non_regression_pass": True},
+            evidence_thresholds=build_conservative_evidence_thresholds(),
+        )
+
+        self.assertEqual(quality_gate["quality_gate_status"], "pilot_only")
+        self.assertFalse(quality_gate["evidence_breadth_ok"])
+        self.assertIn("evidence_breadth_is_still_narrow", quality_gate["notes"])
+
+    def test_build_route_recommendation_preserves_cloud_first(self):
+        recommendation = build_route_recommendation(
+            {
+                "quality_gate_status": "pilot_only",
+                "evidence_thresholds": build_conservative_evidence_thresholds(),
+                "thresholds_met_by_role": {
+                    "main_statement": {"minimum_docs_per_role": False},
+                    "note_multi_table": {"minimum_docs_per_role": True},
+                },
+            },
+            [
+                {"page_role": "main_statement", "recommendation_candidate": "pilot_only"},
+                {"page_role": "note_multi_table", "recommendation_candidate": "pilot_only"},
+            ],
+        )
+
+        self.assertTrue(recommendation["default_priority_preserved"])
+        self.assertTrue(recommendation["cloud_first_preserved"])
+        self.assertIn("minimum_docs_per_role", recommendation["evidence_thresholds"])
+        self.assertEqual(recommendation["per_role_recommendation"]["main_statement"], "pilot_only")
+        self.assertIn("note_multi_table", recommendation["roles_remaining_cloud_only"])
+
+    def test_aggregate_compatibility_summaries_reports_failures(self):
+        summary = aggregate_compatibility_summaries(
+            "PADDLE_EVAL_TEST",
+            [
+                {
+                    "doc_id": "D01",
+                    "standardize_consumable": True,
+                    "missing_fields_to_adapt": [],
+                    "zero_fact_output": False,
+                    "weak_output": False,
+                },
+                {
+                    "doc_id": "D03",
+                    "standardize_consumable": False,
+                    "missing_fields_to_adapt": ["bbox"],
+                    "zero_fact_output": True,
+                    "weak_output": True,
+                },
+            ],
+        )
+
+        self.assertFalse(summary["standardize_compatible"])
+        self.assertEqual(summary["docs_total"], 2)
+        self.assertEqual(summary["docs_consumable_total"], 1)
+        self.assertEqual(summary["zero_fact_docs_total"], 1)
+        self.assertEqual(summary["weak_output_docs_total"], 1)
+        self.assertIn("bbox", summary["missing_fields_to_adapt"])
+        self.assertTrue(any("docs_failed=D03" == note for note in summary["notes"]))
+        self.assertTrue(any("zero_fact_docs=D03" == note for note in summary["notes"]))
+
+    def test_build_parity_by_role_rows(self):
+        rows = build_parity_by_role_rows(
+            [
+                {
+                    "page_role": "main_statement",
+                    "pages_total": 3,
+                    "docs_total": 3,
+                    "zero_fact_pages_total": 0,
+                    "pages_with_fewer_tables_than_cloud_reference": 3,
+                    "standardize_consumable_ratio": 1.0,
+                    "average_runtime_seconds": 6.0,
+                    "average_tables_detected": 1.0,
+                    "average_cloud_tables_detected": 5.0,
+                    "average_tables_detected_delta": -4.0,
+                    "average_tables_deficit_ratio": 0.8,
+                    "average_cells_total": 180.0,
+                    "average_facts_total": 100.0,
+                    "average_mapped_facts_ratio": 0.5,
+                    "average_review_total": 40.0,
+                    "average_validation_fail_total": 1.0,
+                    "recommendation_candidate": "pilot_only",
+                    "notes": ["single_page_evidence"],
+                }
+            ]
+        )
+
+        self.assertEqual(rows[0]["page_role"], "main_statement")
+        self.assertEqual(rows[0]["recommendation_candidate"], "pilot_only")
+        self.assertIn("single_page_evidence", rows[0]["notes"])
+
     def test_supported_table_providers_include_paddle(self):
         self.assertEqual(SUPPORTED_TABLE_PROVIDERS["paddle_table_local"], "paddle")
         provider_config = {"families": {"paddle": ["paddle_table_local"], "aliyun": ["aliyun_table"]}}
