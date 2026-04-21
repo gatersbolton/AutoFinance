@@ -1,21 +1,27 @@
 {% extends "base.html" %}
 {% block title %}导出复核动作 | {{ settings.app_name }}{% endblock %}
+{% block head %}
+{% if auto_refresh %}
+<meta http-equiv="refresh" content="5">
+{% endif %}
+{% endblock %}
 {% block content %}
 <section class="page-heading">
     <div>
-        <p class="eyebrow">导出复核动作</p>
+        <p class="eyebrow">导出 / 预览 / 应用</p>
         <h1>{{ job.display_name }}</h1>
-        <p class="hero-copy">将当前保存的复核动作导出为 CSV / XLSX，供后续既有 backend review action apply 流程使用。</p>
+        <p class="hero-copy">先导出当前已保存动作，再查看“预计会应用 / 预计会被拒绝”的预览，最后执行 apply 或 apply + rerun。Web 端只会操作当前任务的快照与结果目录，不会直接改写基础配置。</p>
     </div>
     <div class="actions">
         <a class="button button--secondary" href="/jobs/{{ job.job_id }}/review">返回复核看板</a>
         <a class="button button--secondary" href="/jobs/{{ job.job_id }}/review/items">返回复核项</a>
+        <a class="button button--secondary" href="/jobs/{{ job.job_id }}">返回任务详情</a>
     </div>
 </section>
 
 <section class="grid">
     <article class="card stat-card">
-        <p class="eyebrow">待复核总数</p>
+        <p class="eyebrow">待复核项目</p>
         <h2>{{ summary.total_review_items }}</h2>
     </article>
     <article class="card stat-card">
@@ -23,46 +29,164 @@
         <h2>{{ actions_total }}</h2>
     </article>
     <article class="card stat-card">
-        <p class="eyebrow">未处理</p>
-        <h2>{{ summary.unresolved_review_items }}</h2>
+        <p class="eyebrow">可自动应用</p>
+        <h2>{{ summary.backend_ready_total }}</h2>
+    </article>
+    <article class="card stat-card">
+        <p class="eyebrow">不可自动应用</p>
+        <h2>{{ summary.non_backend_ready_total }}</h2>
     </article>
 </section>
 
 <section class="card">
-    <h2>导出</h2>
-    <p class="todo-note">MVP 当前只负责生成动作文件，不会自动 apply 或 rerun；Stage 10.1 再补齐该闭环。</p>
-    <form action="/jobs/{{ job.job_id }}/review/export-actions" method="post">
-        <button class="button button--primary" type="submit">生成导出文件</button>
-    </form>
+    <h2>操作入口</h2>
+    <div class="actions">
+        <form action="/jobs/{{ job.job_id }}/review/export-actions" method="post">
+            <button class="button button--primary" type="submit">生成导出文件</button>
+        </form>
+        <form action="/jobs/{{ job.job_id }}/review/apply-preview" method="get">
+            <button class="button button--secondary" type="submit">生成应用预览</button>
+        </form>
+        <form action="/jobs/{{ job.job_id }}/review/apply" method="post">
+            <button class="button button--secondary" type="submit">应用复核动作</button>
+        </form>
+        <form action="/jobs/{{ job.job_id }}/review/apply-and-rerun" method="post">
+            <button class="button button--secondary" type="submit">应用并重跑标准化</button>
+        </form>
+        <form action="/jobs/{{ job.job_id }}/review/rerun" method="post">
+            <button class="button button--secondary" type="submit">仅重新生成</button>
+        </form>
+    </div>
+    <p class="todo-note">云优先默认值、OCR provider 优先级以及标准化基础配置都不会被这个页面直接改写。</p>
 </section>
 
-<section class="card">
-    <h2>当前导出文件</h2>
-    <div class="table-wrap">
-        <table>
-            <thead>
-                <tr>
-                    <th>文件</th>
-                    <th>状态</th>
-                    <th>下载</th>
-                </tr>
-            </thead>
-            <tbody>
-                {% for artifact in export_artifacts %}
-                <tr>
-                    <td>{{ artifact.label }}</td>
-                    <td>{% if artifact.exists %}已生成{% else %}未生成{% endif %}</td>
-                    <td>
-                        {% if artifact.exists %}
-                        <a href="/jobs/{{ job.job_id }}/download/{{ artifact.slug }}">下载</a>
-                        {% else %}
-                        未生成
-                        {% endif %}
-                    </td>
-                </tr>
-                {% endfor %}
-            </tbody>
-        </table>
-    </div>
+<section class="grid grid--detail">
+    <article class="card">
+        <h2>应用预览</h2>
+        {% if latest_apply_preview_summary %}
+        <dl class="meta-list">
+            <div><dt>动作总数</dt><dd>{{ latest_apply_preview_summary.get("actions_total", 0) }}</dd></div>
+            <div><dt>可自动应用</dt><dd>{{ latest_apply_preview_summary.get("backend_ready_total", 0) }}</dd></div>
+            <div><dt>部分支持</dt><dd>{{ latest_apply_preview_summary.get("partial_total", 0) }}</dd></div>
+            <div><dt>仅作为建议</dt><dd>{{ latest_apply_preview_summary.get("suggestion_only_total", 0) }}</dd></div>
+            <div><dt>暂不支持</dt><dd>{{ latest_apply_preview_summary.get("unsupported_total", 0) }}</dd></div>
+            <div><dt>预计会应用</dt><dd>{{ latest_apply_preview_summary.get("likely_applied_total", 0) }}</dd></div>
+            <div><dt>预计会被拒绝</dt><dd>{{ latest_apply_preview_summary.get("likely_rejected_total", 0) }}</dd></div>
+        </dl>
+        {% if latest_apply_preview_summary.get("warning_messages") %}
+        <h3>预警</h3>
+        <ul class="inline-list">
+            {% for message in latest_apply_preview_summary.get("warning_messages", []) %}
+            <li>{{ message }}</li>
+            {% endfor %}
+        </ul>
+        {% endif %}
+        {% else %}
+        <p>尚未生成应用预览。</p>
+        {% endif %}
+    </article>
+
+    <article class="card">
+        <h2>最近一次应用结果</h2>
+        {% if latest_apply_summary %}
+        <dl class="meta-list">
+            <div><dt>状态</dt><dd>{{ latest_apply_summary.get("status_label", latest_apply_summary.get("status", "未记录")) }}</dd></div>
+            <div><dt>已应用动作</dt><dd>{{ latest_apply_summary.get("applied_actions_total", 0) }}</dd></div>
+            <div><dt>被拒绝动作</dt><dd>{{ latest_apply_summary.get("rejected_actions_total", 0) }}</dd></div>
+            <div><dt>配置快照目录</dt><dd><code>{{ latest_apply_summary.get("config_snapshot_dir", "") }}</code></dd></div>
+        </dl>
+        {% else %}
+        <p>尚未执行应用。</p>
+        {% endif %}
+    </article>
+
+    <article class="card">
+        <h2>最近一次后台操作</h2>
+        {% if latest_operation_summary %}
+        <dl class="meta-list">
+            <div><dt>操作类型</dt><dd>{{ latest_operation_summary.get("operation_type_label_zh", latest_operation_summary.get("operation_type", "未记录")) }}</dd></div>
+            <div><dt>状态</dt><dd>{{ latest_operation_summary.get("status_label_zh", latest_operation_summary.get("status", "未记录")) }}</dd></div>
+            <div><dt>当前阶段</dt><dd>{{ latest_operation_summary.get("progress_stage", "未记录") }}</dd></div>
+            <div><dt>阶段说明</dt><dd>{{ latest_operation_summary.get("progress_message_zh", "未记录") }}</dd></div>
+            <div><dt>开始时间</dt><dd>{{ latest_operation_summary.get("started_at", "未记录") }}</dd></div>
+            <div><dt>结束时间</dt><dd>{{ latest_operation_summary.get("finished_at", "未记录") }}</dd></div>
+            <div><dt>已耗时秒数</dt><dd>{{ latest_operation_summary.get("elapsed_seconds", latest_operation_summary.get("duration_seconds", 0)) }}</dd></div>
+        </dl>
+        <div class="actions">
+            {% if latest_operation_summary.get("can_cancel") %}
+            <form action="/jobs/{{ job.job_id }}/operations/{{ latest_operation_summary.get('operation_id') }}/cancel" method="post">
+                <button class="button button--secondary" type="submit">取消操作</button>
+            </form>
+            {% endif %}
+            {% if latest_operation_summary.get("can_retry") %}
+            <form action="/jobs/{{ job.job_id }}/operations/{{ latest_operation_summary.get('operation_id') }}/retry" method="post">
+                <button class="button button--secondary" type="submit">重试操作</button>
+            </form>
+            {% endif %}
+        </div>
+        {% if latest_operation_summary.get("log_tails") %}
+        <h3>最新日志</h3>
+        {% for item in latest_operation_summary.get("log_tails", []) %}
+        <p class="todo-note"><code>{{ item.path }}</code></p>
+        <pre>{{ item.tail }}</pre>
+        {% endfor %}
+        {% endif %}
+        {% else %}
+        <p>尚未记录后台操作。</p>
+        {% endif %}
+    </article>
+</section>
+
+<section class="grid grid--detail">
+    <article class="card">
+        <h2>最近一次重跑结果</h2>
+        {% if latest_rerun_summary %}
+        <dl class="meta-list">
+            <div><dt>重跑状态</dt><dd>{{ latest_rerun_summary.get("final_job_status_label", latest_rerun_summary.get("final_job_status", "未记录")) }}</dd></div>
+            <div><dt>Run ID</dt><dd>{{ latest_rerun_summary.get("run_id", "未记录") }}</dd></div>
+            <div><dt>输出目录</dt><dd><code>{{ latest_rerun_summary.get("output_dir", "") }}</code></dd></div>
+        </dl>
+        {% if latest_operation_summary and latest_operation_summary.get("result_paths") %}
+        <h3>结果文件</h3>
+        <ul class="plain-list">
+            {% for path in latest_operation_summary.get("result_paths", []) %}
+            <li><code>{{ path }}</code></li>
+            {% endfor %}
+        </ul>
+        {% endif %}
+        {% else %}
+        <p>尚未执行应用并重跑。</p>
+        {% endif %}
+    </article>
+
+    <article class="card">
+        <h2>当前导出文件</h2>
+        <div class="table-wrap">
+            <table>
+                <thead>
+                    <tr>
+                        <th>文件</th>
+                        <th>状态</th>
+                        <th>下载</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for artifact in export_artifacts %}
+                    <tr>
+                        <td>{{ artifact.label }}</td>
+                        <td>{% if artifact.exists %}已生成{% else %}未生成{% endif %}</td>
+                        <td>
+                            {% if artifact.exists %}
+                            <a href="/jobs/{{ job.job_id }}/download/{{ artifact.slug }}">下载</a>
+                            {% else %}
+                            未生成
+                            {% endif %}
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </article>
 </section>
 {% endblock %}

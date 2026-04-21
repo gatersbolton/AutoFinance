@@ -157,6 +157,11 @@ pre {
     color: var(--ink);
 }
 
+.button--active {
+    background: rgba(13, 108, 93, 0.18);
+    color: var(--brand-strong);
+}
+
 .button--large {
     min-width: 200px;
     min-height: 64px;
@@ -399,6 +404,12 @@ td {
     margin-bottom: 18px;
 }
 
+.review-item__selection {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+}
+
 .review-item__grid {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
@@ -444,6 +455,37 @@ td {
 .meta-list dd {
     margin: 0;
     color: var(--muted);
+}
+
+.quick-filter-strip {
+    align-items: center;
+}
+
+.inline-list {
+    margin: 0;
+    padding-left: 18px;
+    display: grid;
+    gap: 8px;
+}
+
+.status--compatibility-backend_ready {
+    background: rgba(22, 128, 61, 0.14);
+    color: #166534;
+}
+
+.status--compatibility-partial {
+    background: rgba(29, 105, 180, 0.14);
+    color: #174d7a;
+}
+
+.status--compatibility-suggestion_only {
+    background: rgba(168, 104, 10, 0.14);
+    color: var(--warning);
+}
+
+.status--compatibility-unsupported {
+    background: rgba(166, 61, 64, 0.14);
+    color: var(--danger);
 }
 
 .plain-list {

@@ -14,6 +14,7 @@ from .config import WebAppSettings, load_settings
 from .db import claim_next_queued_job, get_job, init_db, update_job, utc_now_iso
 from .jobs import discover_output_files, ensure_job_workspace, write_output_manifest
 from .models import JOB_MODE_UPLOAD, JOB_STATUS_FAILED, SUCCESS_LIKE_JOB_STATUSES, JobRecord
+from .operations import run_review_operation_once
 from .quality import build_job_quality_summary, load_json
 
 
@@ -371,6 +372,9 @@ def execute_job(settings: WebAppSettings, job_id: str) -> JobRecord:
 
 def run_worker_once(settings: WebAppSettings) -> JobRecord | None:
     init_db(settings)
+    operation = run_review_operation_once(settings)
+    if operation is not None:
+        return None
     job = claim_next_queued_job(settings)
     if job is None:
         return None
@@ -416,6 +420,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     run_job_parser = subparsers.add_parser("run-job", help="Run a specific job immediately.")
     run_job_parser.add_argument("--job-id", required=True, help="Job id to execute.")
+
+    subparsers.add_parser("healthcheck", help="Validate worker runtime configuration.")
     return parser
 
 
@@ -434,6 +440,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     if args.command == "run-job":
         execute_job(settings, args.job_id)
+        return 0
+    if args.command == "healthcheck":
+        settings.validate_runtime_configuration()
+        init_db(settings)
         return 0
     parser.error(f"Unsupported command: {args.command}")
     return 2

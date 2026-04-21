@@ -74,13 +74,16 @@ class WebAppSettings:
     worker_poll_seconds: int = 2
     max_upload_bytes: int = 25 * 1024 * 1024
     job_timeout_seconds: int = 3600
+    operation_timeout_seconds: int = 3600
     auto_run_upload_ocr: bool = False
     upload_ocr_method: str = "aliyun_table"
     provider_priority: str = "aliyun,tencent"
     python_executable: str = sys.executable
     auth_required: bool = False
     admin_password: str = ""
+    queue_backend: str = "local"
     redis_url: str = ""
+    operation_log_tail_chars: int = 4000
     standardize_flags: tuple[str, ...] = field(
         default_factory=lambda: (
             "--enable-conflict-merge",
@@ -181,11 +184,18 @@ class WebAppSettings:
         normalized_env = (self.env_mode or "dev").strip().lower()
         if normalized_env not in {"dev", "prod"}:
             raise RuntimeError(f"WEBAPP_ENV must be dev or prod, got: {self.env_mode}")
+        normalized_queue_backend = (self.queue_backend or "local").strip().lower()
+        if normalized_queue_backend not in {"local", "rq"}:
+            raise RuntimeError(f"WEBAPP_QUEUE_BACKEND must be local or rq, got: {self.queue_backend}")
         if self.auth_required and not self.admin_password:
             raise RuntimeError(
                 "WEBAPP_ADMIN_PASSWORD is required when authentication is enabled. "
                 "Set WEBAPP_ADMIN_PASSWORD before starting the web app."
             )
+        if normalized_queue_backend == "rq" and not self.redis_url.strip():
+            raise RuntimeError("REDIS_URL is required when WEBAPP_QUEUE_BACKEND=rq.")
+        if self.operation_timeout_seconds <= 0:
+            raise RuntimeError("WEBAPP_OPERATION_TIMEOUT_SECONDS must be greater than 0.")
 
 
 def load_settings() -> WebAppSettings:
@@ -220,13 +230,16 @@ def load_settings() -> WebAppSettings:
         worker_poll_seconds=_env_int("WEBAPP_WORKER_POLL_SECONDS", 2),
         max_upload_bytes=_env_int("WEBAPP_MAX_UPLOAD_BYTES", 25 * 1024 * 1024),
         job_timeout_seconds=_env_int("WEBAPP_JOB_TIMEOUT_SECONDS", 3600),
+        operation_timeout_seconds=_env_int("WEBAPP_OPERATION_TIMEOUT_SECONDS", 3600),
         auto_run_upload_ocr=_env_bool("WEBAPP_AUTO_RUN_UPLOAD_OCR", False),
         upload_ocr_method=os.environ.get("WEBAPP_UPLOAD_OCR_METHOD", "aliyun_table").strip() or "aliyun_table",
         provider_priority=os.environ.get("WEBAPP_PROVIDER_PRIORITY", "aliyun,tencent").strip() or "aliyun,tencent",
         python_executable=os.environ.get("WEBAPP_PYTHON_EXECUTABLE", sys.executable).strip() or sys.executable,
         auth_required=auth_required,
         admin_password=admin_password,
+        queue_backend=os.environ.get("WEBAPP_QUEUE_BACKEND", "local").strip().lower() or "local",
         redis_url=os.environ.get("REDIS_URL", ""),
+        operation_log_tail_chars=_env_int("WEBAPP_OPERATION_LOG_TAIL_CHARS", 4000),
     )
 
 

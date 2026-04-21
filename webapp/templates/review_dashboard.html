@@ -3,14 +3,14 @@
 {% block content %}
 <section class="page-heading">
     <div>
-        <p class="eyebrow">复核看板</p>
+        <p class="eyebrow">复核工作台</p>
         <h1>{{ job.display_name }}</h1>
-        <p class="hero-copy">面向审计复核用户的人工判定入口。当前阶段只记录复核动作并导出动作文件，不直接改写标准化基础配置。</p>
+        <p class="hero-copy">面向审计复核用户的统一工作台。这里会集中展示复核进度、自动应用兼容性、证据图片覆盖情况，以及导出 / 应用 / 重跑入口。</p>
     </div>
     <div class="actions">
         <a class="button button--secondary" href="/jobs/{{ job.job_id }}">返回任务详情</a>
-        <a class="button button--secondary" href="/jobs/{{ job.job_id }}/review/items">查看复核项</a>
-        <a class="button button--primary" href="/jobs/{{ job.job_id }}/review/export-actions">导出复核动作</a>
+        <a class="button button--secondary" href="/jobs/{{ job.job_id }}/review/items">打开复核项工作台</a>
+        <a class="button button--primary" href="/jobs/{{ job.job_id }}/review/export-actions">导出 / 预览 / 应用</a>
     </div>
 </section>
 
@@ -18,10 +18,42 @@
     <article class="card stat-card">
         <p class="eyebrow">待复核总数</p>
         <h2>{{ summary.total_review_items }}</h2>
+        <p class="todo-note">按 <code>review_item_id</code> 去重后的唯一复核项。</p>
+    </article>
+    <article class="card stat-card">
+        <p class="eyebrow">已处理</p>
+        <h2>{{ summary.resolved_total }}</h2>
+        <p class="todo-note">已在 Web 端保存动作的条目总数。</p>
     </article>
     <article class="card stat-card">
         <p class="eyebrow">未处理</p>
         <h2>{{ summary.unresolved_review_items }}</h2>
+        <p class="todo-note">尚未保存任何动作的条目。</p>
+    </article>
+    <article class="card stat-card">
+        <p class="eyebrow">暂缓</p>
+        <h2>{{ summary.deferred_count }}</h2>
+        <p class="todo-note">已明确选择“暂缓处理”的条目。</p>
+    </article>
+    <article class="card stat-card">
+        <p class="eyebrow">已忽略</p>
+        <h2>{{ summary.ignored_total }}</h2>
+        <p class="todo-note">已关闭、不再继续处理的条目。</p>
+    </article>
+    <article class="card stat-card">
+        <p class="eyebrow">已请求重新 OCR</p>
+        <h2>{{ summary.reocr_requested_total }}</h2>
+        <p class="todo-note">已记录重 OCR 请求的条目。</p>
+    </article>
+    <article class="card stat-card">
+        <p class="eyebrow">可自动应用</p>
+        <h2>{{ summary.backend_ready_total }}</h2>
+        <p class="todo-note">具备 backend review_id，可直接进入现有 apply 流程。</p>
+    </article>
+    <article class="card stat-card">
+        <p class="eyebrow">不可自动应用</p>
+        <h2>{{ summary.non_backend_ready_total }}</h2>
+        <p class="todo-note">部分支持 + 仅作为建议 + 暂不支持。</p>
     </article>
     <article class="card stat-card">
         <p class="eyebrow">高优先级</p>
@@ -29,36 +61,89 @@
         <p class="todo-note">优先级阈值：{{ high_priority_threshold }}</p>
     </article>
     <article class="card stat-card">
-        <p class="eyebrow">已处理</p>
-        <h2>{{ summary.resolved_count }}</h2>
+        <p class="eyebrow">有证据图片</p>
+        <h2>{{ summary.evidence_available_total }}</h2>
+        <p class="todo-note">至少一类证据图片可直接打开。</p>
     </article>
     <article class="card stat-card">
-        <p class="eyebrow">暂缓</p>
-        <h2>{{ summary.deferred_count }}</h2>
-    </article>
-    <article class="card stat-card">
-        <p class="eyebrow">校验失败</p>
-        <h2>{{ summary.validation_fail_count }}</h2>
-    </article>
-    <article class="card stat-card">
-        <p class="eyebrow">科目映射缺失</p>
-        <h2>{{ summary.mapping_unmapped_count }}</h2>
-    </article>
-    <article class="card stat-card">
-        <p class="eyebrow">金额异常</p>
-        <h2>{{ summary.suspicious_numeric_count }}</h2>
-    </article>
-    <article class="card stat-card">
-        <p class="eyebrow">OCR 可疑</p>
-        <h2>{{ summary.ocr_suspicious_count }}</h2>
-    </article>
-    <article class="card stat-card">
-        <p class="eyebrow">供应商识别冲突</p>
-        <h2>{{ summary.provider_conflict_count }}</h2>
+        <p class="eyebrow">无证据图片</p>
+        <h2>{{ summary.evidence_missing_total }}</h2>
+        <p class="todo-note">暂无可展示图片，可改看 source_cell_ref / 页码。</p>
     </article>
 </section>
 
 <section class="grid grid--detail">
+    <article class="card">
+        <h2>计数口径</h2>
+        <div class="table-wrap">
+            <table>
+                <thead>
+                    <tr>
+                        <th>指标</th>
+                        <th>说明</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for label, meaning in summary.count_semantics.items() %}
+                    <tr>
+                        <td>{{ label }}</td>
+                        <td>{{ meaning }}</td>
+                    </tr>
+                    {% endfor %}
+                    <tr>
+                        <td>待复核项目</td>
+                        <td>{{ summary.total_review_items }} 条，表示唯一复核项数。</td>
+                    </tr>
+                    <tr>
+                        <td>已提交动作</td>
+                        <td>{{ summary.actions_submitted_total }} 条，表示已保存过动作的条目数。</td>
+                    </tr>
+                    <tr>
+                        <td>原始问题行</td>
+                        <td>{{ summary.source_artifact_rows_total }} 条，来自来源 CSV/XLSX，可能高于唯一复核项数。</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+    </article>
+
+    <article class="card">
+        <h2>自动应用兼容性</h2>
+        <div class="table-wrap">
+            <table>
+                <thead>
+                    <tr>
+                        <th>状态</th>
+                        <th>数量</th>
+                        <th>说明</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td>可自动应用</td>
+                        <td>{{ summary.backend_ready_total }}</td>
+                        <td>已有 backend review_id，可直接调用现有 apply 机制。</td>
+                    </tr>
+                    <tr>
+                        <td>部分支持</td>
+                        <td>{{ summary.backend_partial_total }}</td>
+                        <td>字段足够导出，但实际 apply 可能因缺少 review_id 等信息被后端拒绝。</td>
+                    </tr>
+                    <tr>
+                        <td>仅作为建议</td>
+                        <td>{{ summary.backend_suggestion_only_total }}</td>
+                        <td>更适合作为人工建议留档，不能宣称已完全 backend-ready。</td>
+                    </tr>
+                    <tr>
+                        <td>暂不支持</td>
+                        <td>{{ summary.backend_unsupported_total }}</td>
+                        <td>缺少关键定位信息，当前不建议直接 apply。</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+    </article>
+
     <article class="card">
         <h2>问题类型分布</h2>
         {% if summary.reason_label_breakdown %}
@@ -74,32 +159,6 @@
                     {% for label, count in summary.reason_label_breakdown.items() %}
                     <tr>
                         <td>{{ label }}</td>
-                        <td>{{ count }}</td>
-                    </tr>
-                    {% endfor %}
-                </tbody>
-            </table>
-        </div>
-        {% else %}
-        <p>当前未发现可展示的复核项。</p>
-        {% endif %}
-    </article>
-
-    <article class="card">
-        <h2>来源分布</h2>
-        {% if summary.source_type_breakdown %}
-        <div class="table-wrap">
-            <table>
-                <thead>
-                    <tr>
-                        <th>来源</th>
-                        <th>数量</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    {% for label, count in summary.source_type_breakdown.items() %}
-                    <tr>
-                        <td><code>{{ label }}</code></td>
                         <td>{{ count }}</td>
                     </tr>
                     {% endfor %}
@@ -133,10 +192,8 @@
                     <td>{{ artifact.row_count }}</td>
                     <td><code>{{ artifact.relative_path }}</code></td>
                     <td>
-                        {% if artifact.exists and artifact.slug != "review_workbook" %}
+                        {% if artifact.exists %}
                         <a href="/jobs/{{ job.job_id }}/download/{{ artifact.slug }}">下载</a>
-                        {% elif artifact.exists and artifact.slug == "review_workbook" %}
-                        <a href="/jobs/{{ job.job_id }}/download/review_workbook">下载</a>
                         {% else %}
                         不可用
                         {% endif %}

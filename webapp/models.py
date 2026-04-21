@@ -20,6 +20,34 @@ ACTIVE_JOB_STATUSES = {JOB_STATUS_QUEUED, JOB_STATUS_RUNNING}
 WARNING_JOB_STATUSES = {JOB_STATUS_SUCCEEDED_WITH_WARNINGS, JOB_STATUS_NEEDS_REVIEW}
 SUCCESS_LIKE_JOB_STATUSES = {JOB_STATUS_SUCCEEDED, *WARNING_JOB_STATUSES}
 
+OPERATION_STATUS_CREATED = "created"
+OPERATION_STATUS_QUEUED = "queued"
+OPERATION_STATUS_RUNNING = "running"
+OPERATION_STATUS_SUCCEEDED = "succeeded"
+OPERATION_STATUS_FAILED = "failed"
+OPERATION_STATUS_CANCELLED = "cancelled"
+
+ACTIVE_OPERATION_STATUSES = {
+    OPERATION_STATUS_CREATED,
+    OPERATION_STATUS_QUEUED,
+    OPERATION_STATUS_RUNNING,
+}
+TERMINAL_OPERATION_STATUSES = {
+    OPERATION_STATUS_SUCCEEDED,
+    OPERATION_STATUS_FAILED,
+    OPERATION_STATUS_CANCELLED,
+}
+
+OPERATION_TYPE_APPLY_REVIEW_ACTIONS = "apply_review_actions"
+OPERATION_TYPE_APPLY_AND_RERUN = "apply_and_rerun"
+OPERATION_TYPE_RERUN_ONLY = "rerun_only"
+
+REVIEW_OPERATION_TYPES = {
+    OPERATION_TYPE_APPLY_REVIEW_ACTIONS,
+    OPERATION_TYPE_APPLY_AND_RERUN,
+    OPERATION_TYPE_RERUN_ONLY,
+}
+
 
 @dataclass(slots=True)
 class JobRecord:
@@ -119,6 +147,8 @@ class SystemStatusRecord:
     auth_enabled: bool
     auth_required: bool
     worker_mode: str
+    queue_backend: str
+    operation_timeout_seconds: int
 
     def as_dict(self) -> dict[str, object]:
         return asdict(self)
@@ -148,6 +178,18 @@ REVIEW_ACTION_TYPES = {
     "set_mapping_override",
     "set_conflict_winner",
     "suppress_false_positive",
+}
+
+REVIEW_COMPATIBILITY_BACKEND_READY = "backend_ready"
+REVIEW_COMPATIBILITY_PARTIAL = "partial"
+REVIEW_COMPATIBILITY_SUGGESTION_ONLY = "suggestion_only"
+REVIEW_COMPATIBILITY_UNSUPPORTED = "unsupported"
+
+REVIEW_COMPATIBILITY_STATUSES = {
+    REVIEW_COMPATIBILITY_BACKEND_READY,
+    REVIEW_COMPATIBILITY_PARTIAL,
+    REVIEW_COMPATIBILITY_SUGGESTION_ONLY,
+    REVIEW_COMPATIBILITY_UNSUPPORTED,
 }
 
 
@@ -234,7 +276,113 @@ class ReviewItemRecord:
     candidate_conflict_fact_id: str = ""
     candidate_period_override: str = ""
     suggested_reocr_task_id: str = ""
+    backend_review_id: str = ""
+    apply_target_type: str = ""
+    apply_compatibility_status: str = ""
+    apply_incompatibility_reason: str = ""
+    priority_bucket: str = ""
+    evidence_available: bool = False
     meta: dict[str, Any] = field(default_factory=dict)
 
     def as_dict(self) -> dict[str, object]:
         return asdict(self)
+
+
+@dataclass(slots=True)
+class ReviewOperationRecord:
+    operation_id: str
+    job_id: str
+    operation_type: str
+    queue_backend: str
+    status: str
+    created_at: str
+    updated_at: str
+    started_at: str
+    finished_at: str
+    duration_seconds: float
+    progress_stage: str
+    progress_message_zh: str
+    error_message: str
+    user_friendly_error_zh: str
+    log_paths: list[str] = field(default_factory=list)
+    result_paths: list[str] = field(default_factory=list)
+    operation_dir: str = ""
+    summary_path: str = ""
+    timeline_path: str = ""
+    retry_of_operation_id: str = ""
+    retry_count: int = 0
+    cancel_requested: bool = False
+    cancel_acknowledged: bool = False
+    queue_job_id: str = ""
+    extra: dict[str, Any] = field(default_factory=dict)
+
+    @classmethod
+    def from_row(cls, row: Mapping[str, object]) -> "ReviewOperationRecord":
+        import json
+
+        def _load_json_list(value: object) -> list[str]:
+            raw = str(value or "").strip()
+            if not raw:
+                return []
+            try:
+                parsed = json.loads(raw)
+            except json.JSONDecodeError:
+                return []
+            if not isinstance(parsed, list):
+                return []
+            return [str(item).strip() for item in parsed if str(item).strip()]
+
+        def _load_json_object(value: object) -> dict[str, Any]:
+            raw = str(value or "").strip()
+            if not raw:
+                return {}
+            try:
+                parsed = json.loads(raw)
+            except json.JSONDecodeError:
+                return {}
+            return parsed if isinstance(parsed, dict) else {}
+
+        return cls(
+            operation_id=str(row["operation_id"]),
+            job_id=str(row["job_id"]),
+            operation_type=str(row["operation_type"]),
+            queue_backend=str(row["queue_backend"]),
+            status=str(row["status"]),
+            created_at=str(row["created_at"]),
+            updated_at=str(row["updated_at"]),
+            started_at=str(row["started_at"] or ""),
+            finished_at=str(row["finished_at"] or ""),
+            duration_seconds=float(row["duration_seconds"] or 0.0),
+            progress_stage=str(row["progress_stage"] or ""),
+            progress_message_zh=str(row["progress_message_zh"] or ""),
+            error_message=str(row["error_message"] or ""),
+            user_friendly_error_zh=str(row["user_friendly_error_zh"] or ""),
+            log_paths=_load_json_list(row["log_paths_json"]),
+            result_paths=_load_json_list(row["result_paths_json"]),
+            operation_dir=str(row["operation_dir"] or ""),
+            summary_path=str(row["summary_path"] or ""),
+            timeline_path=str(row["timeline_path"] or ""),
+            retry_of_operation_id=str(row["retry_of_operation_id"] or ""),
+            retry_count=int(row["retry_count"] or 0),
+            cancel_requested=bool(int(row["cancel_requested"] or 0)),
+            cancel_acknowledged=bool(int(row["cancel_acknowledged"] or 0)),
+            queue_job_id=str(row["queue_job_id"] or ""),
+            extra=_load_json_object(row["extra_json"]),
+        )
+
+    def as_dict(self) -> dict[str, object]:
+        return asdict(self)
+
+    def as_db_dict(self) -> dict[str, object]:
+        import json
+
+        payload = asdict(self)
+        payload["log_paths_json"] = json.dumps(self.log_paths, ensure_ascii=False, separators=(",", ":"))
+        payload["result_paths_json"] = json.dumps(self.result_paths, ensure_ascii=False, separators=(",", ":"))
+        payload["extra_json"] = json.dumps(self.extra, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+        payload["cancel_requested"] = 1 if self.cancel_requested else 0
+        payload["cancel_acknowledged"] = 1 if self.cancel_acknowledged else 0
+        payload.pop("log_paths", None)
+        payload.pop("result_paths", None)
+        payload.pop("extra", None)
+        return payload

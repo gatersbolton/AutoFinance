@@ -4,6 +4,7 @@ import csv
 import json
 import shutil
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -13,7 +14,14 @@ from openpyxl import Workbook
 
 from project_paths import REPO_ROOT
 from webapp.config import WebAppSettings
-from webapp.db import get_job, init_db, list_review_actions, update_job
+from webapp.db import (
+    get_job,
+    get_review_operation,
+    init_db,
+    list_review_actions,
+    update_job,
+    update_review_operation,
+)
 from webapp.jobs import discover_output_files
 from webapp.main import create_app
 from webapp.models import JobRecord
@@ -120,6 +128,9 @@ class WebAppTests(unittest.TestCase):
             for row in rows:
                 writer.writerow(row)
 
+    def _run_next_worker_item(self) -> None:
+        run_worker_once(self.settings)
+
     def _prepare_review_job(self, *, include_optional: bool = True, outside_evidence: bool = False) -> str:
         job_id = self._create_job("review job")
         job = get_job(self.settings, job_id)
@@ -128,7 +139,17 @@ class WebAppTests(unittest.TestCase):
         output_dir = Path(job.output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
         self._write_fake_workbook(output_dir / "会计报表_填充结果.xlsx")
-        self._write_json(output_dir / "run_summary.json", {"review_total": 2, "validation_fail_total": 1})
+        self._write_json(
+            output_dir / "run_summary.json",
+            {
+                "run_id": "RUN_REVIEW_JOB_001",
+                "review_total": 2,
+                "validation_fail_total": 1,
+                "mapped_facts_ratio": 0.4,
+                "exportable_facts_total": 3,
+                "integrity_fail_total": 0,
+            },
+        )
         self._write_json(output_dir / "pipeline_completion_summary.json", {"status": "success", "last_successful_stage": "export"})
         self._write_json(output_dir / "artifact_integrity.json", {"integrity_fail_total": 0, "integrity_review_total": 0})
         self._write_json(output_dir / "review_summary.json", {"review_total": 2})
@@ -140,7 +161,10 @@ class WebAppTests(unittest.TestCase):
         review_pack_dir = output_dir / "review_pack"
         review_pack_dir.mkdir(parents=True, exist_ok=True)
         inside_evidence = review_pack_dir / "REV_case_1_cell.png"
-        inside_evidence.write_bytes(b"mockpng")
+        inside_evidence.write_bytes(
+            b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x02\x00\x00\x00\x90wS\xde"
+            b"\x00\x00\x00\x0cIDAT\x08\xd7c\xf8\xcf\xc0\x00\x00\x03\x01\x01\x00\xc9\xfe\x92\xef\x00\x00\x00\x00IEND\xaeB`\x82"
+        )
         outside_path = self.temp_path / "outside_evidence.png"
         outside_path.write_bytes(b"outside")
         evidence_path = outside_path if outside_evidence else inside_evidence
@@ -317,6 +341,76 @@ class WebAppTests(unittest.TestCase):
                 ],
             )
         return job_id
+
+    def _fake_review_rerun(self, profile: str = "improved"):
+        def _runner(
+            *,
+            settings,
+            job,
+            output_dir: Path,
+            config_dir: Path,
+            stdout_path: Path,
+            stderr_path: Path,
+            cancel_requested=None,
+            timeout_seconds=None,
+        ):
+            stdout_path.parent.mkdir(parents=True, exist_ok=True)
+            stderr_path.parent.mkdir(parents=True, exist_ok=True)
+            stdout_path.write_text(f"fake rerun for {profile}\n", encoding="utf-8")
+            stderr_path.write_text("", encoding="utf-8")
+            output_dir.mkdir(parents=True, exist_ok=True)
+            self._write_fake_workbook(output_dir / "会计报表_填充结果.xlsx")
+            review_total = 1 if profile == "improved" else 2
+            validation_fail_total = 0 if profile == "improved" else 1
+            mapped_ratio = 0.7 if profile == "improved" else 0.4
+            exportable_total = 5 if profile == "improved" else 3
+            self._write_json(
+                output_dir / "run_summary.json",
+                {
+                    "run_id": "RUN_RERUN_001",
+                    "review_total": review_total,
+                    "validation_fail_total": validation_fail_total,
+                    "mapped_facts_ratio": mapped_ratio,
+                    "exportable_facts_total": exportable_total,
+                    "integrity_fail_total": 0,
+                },
+            )
+            self._write_json(output_dir / "artifact_integrity.json", {"run_id": "RUN_RERUN_001", "integrity_fail_total": 0, "integrity_review_total": 0})
+            self._write_json(output_dir / "review_summary.json", {"run_id": "RUN_RERUN_001", "review_total": review_total})
+            self._write_json(output_dir / "validation_summary.json", {"run_id": "RUN_RERUN_001", "validation_fail_total": validation_fail_total})
+            self._write_json(output_dir / "pipeline_completion_summary.json", {"run_id": "RUN_RERUN_001", "status": "success", "last_successful_stage": "export"})
+            return {
+                "exit_code": 0,
+                "logical_command": "python -m standardize.cli --output-dir ...",
+                "runner_command": "python -c ...",
+            }
+
+        return _runner
+
+    def _fake_failed_review_rerun(self):
+        def _runner(
+            *,
+            settings,
+            job,
+            output_dir: Path,
+            config_dir: Path,
+            stdout_path: Path,
+            stderr_path: Path,
+            cancel_requested=None,
+            timeout_seconds=None,
+        ):
+            stdout_path.parent.mkdir(parents=True, exist_ok=True)
+            stderr_path.parent.mkdir(parents=True, exist_ok=True)
+            stdout_path.write_text("fake rerun failed\n", encoding="utf-8")
+            stderr_path.write_text("rerun failed\n", encoding="utf-8")
+            return {
+                "exit_code": -1,
+                "logical_command": "python -m standardize.cli --output-dir ...",
+                "runner_command": "python -c ...",
+                "cancelled": False,
+            }
+
+        return _runner
 
     def _fake_subprocess(self, profile: str = "clean_success"):
         def _runner(*, command, stdout_path: Path, stderr_path: Path, timeout_seconds: int):
@@ -537,9 +631,9 @@ class WebAppTests(unittest.TestCase):
         response = self.client.get(f"/jobs/{job_id}/review")
         self.assertEqual(response.status_code, 200)
         self.assertIn("复核看板", response.text)
-        self.assertIn("待复核总数", response.text)
-        self.assertIn("校验失败", response.text)
-        self.assertIn("OCR 可疑", response.text)
+        self.assertIn("待复核项目", response.text)
+        self.assertIn("已提交动作", response.text)
+        self.assertIn("原始问题行", response.text)
 
     def test_review_dashboard_handles_missing_optional_files(self):
         job_id = self._prepare_review_job(include_optional=False)
@@ -654,6 +748,737 @@ class WebAppTests(unittest.TestCase):
         self.assertTrue(str(review_dir).startswith(str(self.settings.jobs_root)))
         self.assertFalse((REPO_ROOT / "review_actions_filled.csv").exists())
         self.assertFalse((REPO_ROOT / "review_actions_filled.xlsx").exists())
+
+    def test_review_dashboard_count_semantics_summary_is_generated(self):
+        job_id = self._prepare_review_job(include_optional=True)
+        response = self.client.get(f"/jobs/{job_id}/review")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("待复核项目", response.text)
+        self.assertIn("已提交动作", response.text)
+        self.assertIn("可处理项目", response.text)
+        self.assertIn("原始问题行", response.text)
+        self.assertIn("高优先级", response.text)
+        job = get_job(self.settings, job_id)
+        summary_path = get_review_dir(job) / "review_dashboard_counts_summary.json"
+        self.assertTrue(summary_path.exists())
+        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        self.assertEqual(summary["total_review_items"], 4)
+        self.assertEqual(summary["source_artifact_rows_total"], 4)
+        self.assertEqual(summary["actions_submitted_total"], 0)
+        self.assertEqual(summary["actionable_items_total"], 4)
+
+    def test_review_items_page_contains_chinese_action_labels(self):
+        job_id = self._prepare_review_job(include_optional=True)
+        response = self.client.get(f"/jobs/{job_id}/review/items")
+        self.assertEqual(response.status_code, 200)
+        for text in (
+            "暂缓处理",
+            "忽略此项",
+            "标记为非财务事实",
+            "请求重新 OCR",
+            "接受科目建议",
+            "指定标准科目",
+            "选择冲突赢家",
+            "标记为误报",
+        ):
+            self.assertIn(text, response.text)
+
+    def test_non_review_queue_items_get_stable_surrogate_review_item_id_and_source_ref(self):
+        job_id = self._prepare_review_job(include_optional=True)
+        job = get_job(self.settings, job_id)
+        items_first, _ = load_review_items(self.settings, job)
+        items_second, _ = load_review_items(self.settings, job)
+        issue_first = next(item for item in items_first if item.source_type == "issue")
+        issue_second = next(item for item in items_second if item.source_type == "issue")
+        self.assertEqual(issue_first.review_item_id, issue_second.review_item_id)
+        self.assertEqual(issue_first.review_id, "")
+        self.assertTrue(issue_first.review_item_id.startswith("issue_"))
+        self.assertTrue(issue_first.source_ref)
+
+    def test_review_action_compatibility_summary_is_generated(self):
+        job_id = self._prepare_review_job(include_optional=True)
+        job = get_job(self.settings, job_id)
+        items, _ = load_review_items(self.settings, job)
+        review_item = next(item for item in items if item.source_type == "review_queue")
+        issue_item = next(item for item in items if item.source_type == "issue")
+        self.client.post(
+            f"/jobs/{job_id}/review/actions",
+            data={
+                "review_item_id": review_item.review_item_id,
+                "action_type": "ignore",
+                "action_value": "",
+                "reviewer_note": "close queue item",
+                "reviewer_name": "auditor",
+                "next_url": f"/jobs/{job_id}/review/items",
+            },
+            follow_redirects=False,
+        )
+        self.client.post(
+            f"/jobs/{job_id}/review/actions",
+            data={
+                "review_item_id": issue_item.review_item_id,
+                "action_type": "ignore",
+                "action_value": "",
+                "reviewer_note": "close issue item",
+                "reviewer_name": "auditor",
+                "next_url": f"/jobs/{job_id}/review/items",
+            },
+            follow_redirects=False,
+        )
+        result = export_review_actions(self.settings, job)
+        self.assertTrue(Path(result["compatibility_summary_path"]).exists())
+        summary = json.loads(Path(result["compatibility_summary_path"]).read_text(encoding="utf-8"))
+        self.assertEqual(summary["actions_total"], 2)
+        self.assertEqual(summary["backend_ready_total"], 1)
+        self.assertEqual(summary["backend_partial_total"], 1)
+
+    def test_apply_review_actions_route_creates_apply_outputs(self):
+        job_id = self._prepare_review_job(include_optional=True)
+        self.client.post(
+            f"/jobs/{job_id}/review/actions",
+            data={
+                "review_item_id": "REV_case_1",
+                "action_type": "ignore",
+                "action_value": "",
+                "reviewer_note": "close item",
+                "reviewer_name": "auditor",
+                "next_url": f"/jobs/{job_id}/review/items",
+            },
+            follow_redirects=False,
+        )
+        self.client.post(f"/jobs/{job_id}/review/export-actions", follow_redirects=False)
+        response = self.client.post(f"/jobs/{job_id}/review/apply", follow_redirects=False)
+        self.assertEqual(response.status_code, 303)
+        self._run_next_worker_item()
+        apply_status = self.client.get(f"/jobs/{job_id}/review/apply-status")
+        self.assertEqual(apply_status.status_code, 200)
+        latest_apply = apply_status.json()["latest_apply_summary"]
+        self.assertEqual(latest_apply["applied_actions_total"], 1)
+        self.assertEqual(latest_apply["rejected_actions_total"], 0)
+        apply_dir = self.settings.jobs_root / job_id / "review" / latest_apply["apply_id"]
+        self.assertTrue((apply_dir / "applied_review_actions.csv").exists())
+        self.assertTrue((apply_dir / "review_apply_summary.json").exists())
+
+    def test_rejected_unsupported_or_incompatible_actions_are_recorded(self):
+        job_id = self._prepare_review_job(include_optional=True)
+        job = get_job(self.settings, job_id)
+        items, _ = load_review_items(self.settings, job)
+        issue_item = next(item for item in items if item.source_type == "issue")
+        self.client.post(
+            f"/jobs/{job_id}/review/actions",
+            data={
+                "review_item_id": issue_item.review_item_id,
+                "action_type": "defer",
+                "action_value": "",
+                "reviewer_note": "cannot backend apply",
+                "reviewer_name": "auditor",
+                "next_url": f"/jobs/{job_id}/review/items",
+            },
+            follow_redirects=False,
+        )
+        self.client.post(f"/jobs/{job_id}/review/export-actions", follow_redirects=False)
+        self.client.post(f"/jobs/{job_id}/review/apply", follow_redirects=False)
+        self._run_next_worker_item()
+        latest_apply = self.client.get(f"/jobs/{job_id}/review/apply-status").json()["latest_apply_summary"]
+        apply_dir = self.settings.jobs_root / job_id / "review" / latest_apply["apply_id"]
+        rejected_path = apply_dir / "rejected_review_actions.csv"
+        self.assertTrue(rejected_path.exists())
+        rejected_text = rejected_path.read_text(encoding="utf-8-sig")
+        self.assertIn("review_id_not_found", rejected_text)
+        self.assertIn(issue_item.review_item_id, rejected_text)
+
+    def test_apply_and_rerun_creates_new_rerun_output_directory(self):
+        job_id = self._prepare_review_job(include_optional=True)
+        self.client.post(
+            f"/jobs/{job_id}/review/actions",
+            data={
+                "review_item_id": "REV_case_1",
+                "action_type": "ignore",
+                "action_value": "",
+                "reviewer_note": "close item",
+                "reviewer_name": "auditor",
+                "next_url": f"/jobs/{job_id}/review/items",
+            },
+            follow_redirects=False,
+        )
+        self.client.post(f"/jobs/{job_id}/review/export-actions", follow_redirects=False)
+        with mock.patch("webapp.review._run_patched_standardize_cli", side_effect=self._fake_review_rerun()):
+            response = self.client.post(f"/jobs/{job_id}/review/apply-and-rerun", follow_redirects=False)
+            self._run_next_worker_item()
+        self.assertEqual(response.status_code, 303)
+        rerun_dir = self.settings.jobs_root / job_id / "reruns" / "rerun_001" / "standardize"
+        self.assertTrue(rerun_dir.exists())
+        self.assertTrue((rerun_dir / "会计报表_填充结果.xlsx").exists())
+
+    def test_review_rerun_delta_json_is_generated(self):
+        job_id = self._prepare_review_job(include_optional=True)
+        self.client.post(
+            f"/jobs/{job_id}/review/actions",
+            data={
+                "review_item_id": "REV_case_1",
+                "action_type": "ignore",
+                "action_value": "",
+                "reviewer_note": "close item",
+                "reviewer_name": "auditor",
+                "next_url": f"/jobs/{job_id}/review/items",
+            },
+            follow_redirects=False,
+        )
+        self.client.post(f"/jobs/{job_id}/review/export-actions", follow_redirects=False)
+        with mock.patch("webapp.review._run_patched_standardize_cli", side_effect=self._fake_review_rerun()):
+            self.client.post(f"/jobs/{job_id}/review/apply-and-rerun", follow_redirects=False)
+            self._run_next_worker_item()
+        delta_path = self.settings.results_root / job_id / "reruns" / "rerun_001" / "review_rerun_delta.json"
+        self.assertTrue(delta_path.exists())
+        delta = json.loads(delta_path.read_text(encoding="utf-8"))
+        metric_map = {row["metric"]: row for row in delta["metrics"]}
+        self.assertEqual(metric_map["review_total"]["before"], 2)
+        self.assertEqual(metric_map["review_total"]["after"], 1)
+        self.assertEqual(metric_map["validation_fail_total"]["after"], 0)
+
+    def test_job_detail_shows_original_and_rerun_outputs(self):
+        job_id = self._prepare_review_job(include_optional=True)
+        self.client.post(
+            f"/jobs/{job_id}/review/actions",
+            data={
+                "review_item_id": "REV_case_1",
+                "action_type": "ignore",
+                "action_value": "",
+                "reviewer_note": "close item",
+                "reviewer_name": "auditor",
+                "next_url": f"/jobs/{job_id}/review/items",
+            },
+            follow_redirects=False,
+        )
+        self.client.post(f"/jobs/{job_id}/review/export-actions", follow_redirects=False)
+        with mock.patch("webapp.review._run_patched_standardize_cli", side_effect=self._fake_review_rerun()):
+            self.client.post(f"/jobs/{job_id}/review/apply-and-rerun", follow_redirects=False)
+            self._run_next_worker_item()
+        response = self.client.get(f"/jobs/{job_id}")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("结果版本", response.text)
+        self.assertIn("original", response.text)
+        self.assertIn("rerun_001", response.text)
+        self.assertIn("当前推荐结果", response.text)
+
+    def test_evidence_preview_fixture_has_real_preview_and_summary(self):
+        job_id = self._prepare_review_job(include_optional=False)
+        response = self.client.get(f"/jobs/{job_id}/review/evidence/REV_case_1/cell")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.content[:8], b"\x89PNG\r\n\x1a\n")
+        self.client.get(f"/jobs/{job_id}/review")
+        job = get_job(self.settings, job_id)
+        summary_path = get_review_dir(job) / "review_evidence_preview_summary.json"
+        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        self.assertGreaterEqual(summary["evidence_preview_available_count"], 1)
+        self.assertTrue(summary["pass"])
+
+    def test_review_apply_and_rerun_outputs_stay_under_web_runtime_paths(self):
+        job_id = self._prepare_review_job(include_optional=True)
+        self.client.post(
+            f"/jobs/{job_id}/review/actions",
+            data={
+                "review_item_id": "REV_case_1",
+                "action_type": "ignore",
+                "action_value": "",
+                "reviewer_note": "close item",
+                "reviewer_name": "auditor",
+                "next_url": f"/jobs/{job_id}/review/items",
+            },
+            follow_redirects=False,
+        )
+        self.client.post(f"/jobs/{job_id}/review/export-actions", follow_redirects=False)
+        with mock.patch("webapp.review._run_patched_standardize_cli", side_effect=self._fake_review_rerun()):
+            self.client.post(f"/jobs/{job_id}/review/apply-and-rerun", follow_redirects=False)
+            self._run_next_worker_item()
+        apply_root = self.settings.jobs_root / job_id / "review"
+        rerun_root = self.settings.jobs_root / job_id / "reruns" / "rerun_001"
+        rerun_result_root = self.settings.results_root / job_id / "reruns" / "rerun_001"
+        self.assertTrue(str(apply_root).startswith(str(self.settings.jobs_root)))
+        self.assertTrue(str(rerun_root).startswith(str(self.settings.jobs_root)))
+        self.assertTrue(str(rerun_result_root).startswith(str(self.settings.results_root)))
+        self.assertFalse((REPO_ROOT / "rerun_001").exists())
+
+    def test_review_workbench_summary_is_generated(self):
+        job_id = self._prepare_review_job(include_optional=True)
+        response = self.client.get(f"/jobs/{job_id}/review")
+        self.assertEqual(response.status_code, 200)
+        for text in ("待复核总数", "已处理", "可自动应用", "有证据图片"):
+            self.assertIn(text, response.text)
+        job = get_job(self.settings, job_id)
+        summary_path = get_review_dir(job) / "review_workbench_summary.json"
+        self.assertTrue(summary_path.exists())
+        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        self.assertEqual(summary["review_items_total"], 4)
+        self.assertEqual(summary["backend_ready_total"], 1)
+        self.assertEqual(summary["backend_partial_total"], 2)
+        self.assertEqual(summary["backend_suggestion_only_total"], 1)
+        self.assertEqual(summary["evidence_available_total"], 1)
+        self.assertTrue(summary["pass"])
+
+    def test_review_items_can_filter_by_apply_compatibility(self):
+        job_id = self._prepare_review_job(include_optional=True)
+        job = get_job(self.settings, job_id)
+        items, _ = load_review_items(self.settings, job)
+        review_item = next(item for item in items if item.source_type == "review_queue")
+        issue_item = next(item for item in items if item.source_type == "issue")
+        response = self.client.get(f"/jobs/{job_id}/review/items?apply_compatibility=backend_ready")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(review_item.review_item_id, response.text)
+        self.assertNotIn(issue_item.review_item_id, response.text)
+
+    def test_review_items_can_filter_by_evidence_available(self):
+        job_id = self._prepare_review_job(include_optional=True)
+        job = get_job(self.settings, job_id)
+        items, _ = load_review_items(self.settings, job)
+        review_item = next(item for item in items if item.source_type == "review_queue")
+        issue_item = next(item for item in items if item.source_type == "issue")
+        response = self.client.get(f"/jobs/{job_id}/review/items?evidence_available=yes")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(review_item.review_item_id, response.text)
+        self.assertNotIn(issue_item.review_item_id, response.text)
+
+    def test_bulk_defer_creates_actions_and_summary(self):
+        job_id = self._prepare_review_job(include_optional=True)
+        job = get_job(self.settings, job_id)
+        items, _ = load_review_items(self.settings, job)
+        selected_ids = [item.review_item_id for item in items[:3]]
+        response = self.client.post(
+            f"/jobs/{job_id}/review/bulk-action",
+            data={
+                "selected_review_item_ids": selected_ids,
+                "action_type": "defer",
+                "action_value": "",
+                "reviewer_note": "bulk defer",
+                "reviewer_name": "auditor",
+                "next_url": f"/jobs/{job_id}/review/items",
+            },
+            follow_redirects=False,
+        )
+        self.assertEqual(response.status_code, 303)
+        actions = list_review_actions(self.settings, job_id)
+        self.assertEqual(len(actions), 3)
+        self.assertTrue(all(action.action_type == "defer" for action in actions))
+        summary_path = get_review_dir(job) / "bulk_review_action_summary.json"
+        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        self.assertEqual(summary["requested_total"], 3)
+        self.assertEqual(summary["applied_total"], 3)
+        self.assertEqual(summary["rejected_total"], 0)
+
+    def test_bulk_ignore_creates_actions(self):
+        job_id = self._prepare_review_job(include_optional=True)
+        job = get_job(self.settings, job_id)
+        items, _ = load_review_items(self.settings, job)
+        selected_ids = [item.review_item_id for item in items[:2]]
+        response = self.client.post(
+            f"/jobs/{job_id}/review/bulk-action",
+            data={
+                "selected_review_item_ids": selected_ids,
+                "action_type": "ignore",
+                "action_value": "",
+                "reviewer_note": "bulk ignore",
+                "reviewer_name": "auditor",
+                "next_url": f"/jobs/{job_id}/review/items",
+            },
+            follow_redirects=False,
+        )
+        self.assertEqual(response.status_code, 303)
+        actions = list_review_actions(self.settings, job_id)
+        self.assertEqual(len(actions), 2)
+        self.assertTrue(all(action.action_type == "ignore" for action in actions))
+
+    def test_unsupported_bulk_action_items_are_rejected_with_reason(self):
+        job_id = self._prepare_review_job(include_optional=True)
+        job = get_job(self.settings, job_id)
+        items, _ = load_review_items(self.settings, job)
+        review_item = next(item for item in items if item.source_type == "review_queue")
+        issue_item = next(item for item in items if item.source_type == "issue")
+        response = self.client.post(
+            f"/jobs/{job_id}/review/bulk-action",
+            data={
+                "selected_review_item_ids": [review_item.review_item_id, issue_item.review_item_id],
+                "action_type": "accept_mapping_candidate",
+                "action_value": "",
+                "reviewer_note": "bulk mapping",
+                "reviewer_name": "auditor",
+                "next_url": f"/jobs/{job_id}/review/items",
+            },
+            follow_redirects=False,
+        )
+        self.assertEqual(response.status_code, 303)
+        summary = json.loads((get_review_dir(job) / "bulk_review_action_summary.json").read_text(encoding="utf-8"))
+        self.assertEqual(summary["requested_total"], 2)
+        self.assertEqual(summary["applied_total"], 1)
+        self.assertEqual(summary["rejected_total"], 1)
+        self.assertIn("compatibility_not_backend_ready", summary["rejected_reasons"])
+
+    def test_review_apply_preview_summary_is_generated(self):
+        job_id = self._prepare_review_job(include_optional=True)
+        job = get_job(self.settings, job_id)
+        items, _ = load_review_items(self.settings, job)
+        review_item = next(item for item in items if item.source_type == "review_queue")
+        issue_item = next(item for item in items if item.source_type == "issue")
+        for item in (review_item, issue_item):
+            self.client.post(
+                f"/jobs/{job_id}/review/actions",
+                data={
+                    "review_item_id": item.review_item_id,
+                    "action_type": "ignore",
+                    "action_value": "",
+                    "reviewer_note": "preview",
+                    "reviewer_name": "auditor",
+                    "next_url": f"/jobs/{job_id}/review/items",
+                },
+                follow_redirects=False,
+            )
+        self.client.post(f"/jobs/{job_id}/review/export-actions", follow_redirects=False)
+        response = self.client.get(f"/jobs/{job_id}/review/apply-preview", follow_redirects=False)
+        self.assertEqual(response.status_code, 303)
+        summary = json.loads((get_review_dir(job) / "review_apply_preview_summary.json").read_text(encoding="utf-8"))
+        self.assertEqual(summary["actions_total"], 2)
+        self.assertEqual(summary["backend_ready_total"], 1)
+        self.assertEqual(summary["partial_total"], 1)
+        self.assertEqual(summary["likely_applied_total"], 1)
+        self.assertEqual(summary["likely_rejected_total"], 1)
+
+    def test_review_rerun_delta_explained_is_generated(self):
+        job_id = self._prepare_review_job(include_optional=True)
+        self.client.post(
+            f"/jobs/{job_id}/review/actions",
+            data={
+                "review_item_id": "REV_case_1",
+                "action_type": "ignore",
+                "action_value": "",
+                "reviewer_note": "close item",
+                "reviewer_name": "auditor",
+                "next_url": f"/jobs/{job_id}/review/items",
+            },
+            follow_redirects=False,
+        )
+        self.client.post(f"/jobs/{job_id}/review/export-actions", follow_redirects=False)
+        with mock.patch("webapp.review._run_patched_standardize_cli", side_effect=self._fake_review_rerun()):
+            self.client.post(f"/jobs/{job_id}/review/apply-and-rerun", follow_redirects=False)
+            self._run_next_worker_item()
+        explained_path = self.settings.results_root / job_id / "reruns" / "rerun_001" / "review_rerun_delta_explained.json"
+        self.assertTrue(explained_path.exists())
+        explained = json.loads(explained_path.read_text(encoding="utf-8"))
+        self.assertIn("headline_status_before", explained)
+        self.assertIn("headline_status_after", explained)
+        self.assertTrue(explained["user_friendly_summary_zh"])
+        self.assertIn("recommended_next_action_zh", explained)
+
+    def test_operation_summary_status_endpoint_returns_latest_operation(self):
+        job_id = self._prepare_review_job(include_optional=True)
+        self.client.post(
+            f"/jobs/{job_id}/review/actions",
+            data={
+                "review_item_id": "REV_case_1",
+                "action_type": "ignore",
+                "action_value": "",
+                "reviewer_note": "close item",
+                "reviewer_name": "auditor",
+                "next_url": f"/jobs/{job_id}/review/items",
+            },
+            follow_redirects=False,
+        )
+        self.client.post(f"/jobs/{job_id}/review/export-actions", follow_redirects=False)
+        with mock.patch("webapp.review._run_patched_standardize_cli", side_effect=self._fake_review_rerun()):
+            self.client.post(f"/jobs/{job_id}/review/apply-and-rerun", follow_redirects=False)
+            self._run_next_worker_item()
+        response = self.client.get(f"/jobs/{job_id}/review/operation-status")
+        self.assertEqual(response.status_code, 200)
+        latest_operation = response.json()["latest_operation_summary"]
+        self.assertEqual(latest_operation["operation_type"], "apply_and_rerun")
+        self.assertEqual(latest_operation["status"], "succeeded")
+        self.assertTrue(latest_operation["log_paths"])
+        self.assertTrue((self.settings.jobs_root / job_id / "review" / "review_operation_summary.json").exists())
+
+    def test_review_items_page_contains_stage_10_2_ux_labels_and_help(self):
+        job_id = self._prepare_review_job(include_optional=True)
+        response = self.client.get(f"/jobs/{job_id}/review/items")
+        self.assertEqual(response.status_code, 200)
+        for text in ("接受科目建议", "当前兼容性", "可自动应用", "批量动作", "对选中条目执行批量动作"):
+            self.assertIn(text, response.text)
+
+    def test_review_workbench_artifacts_do_not_go_into_repo_root(self):
+        job_id = self._prepare_review_job(include_optional=True)
+        job = get_job(self.settings, job_id)
+        self.client.get(f"/jobs/{job_id}/review")
+        self.client.post(
+            f"/jobs/{job_id}/review/actions",
+            data={
+                "review_item_id": "REV_case_1",
+                "action_type": "ignore",
+                "action_value": "",
+                "reviewer_note": "preview apply",
+                "reviewer_name": "auditor",
+                "next_url": f"/jobs/{job_id}/review/items",
+            },
+            follow_redirects=False,
+        )
+        self.client.post(f"/jobs/{job_id}/review/export-actions", follow_redirects=False)
+        self.client.get(f"/jobs/{job_id}/review/apply-preview", follow_redirects=False)
+        self.client.post(
+            f"/jobs/{job_id}/review/bulk-action",
+            data={
+                "selected_review_item_ids": ["REV_case_1"],
+                "action_type": "defer",
+                "action_value": "",
+                "reviewer_note": "bulk",
+                "reviewer_name": "auditor",
+                "next_url": f"/jobs/{job_id}/review/items",
+            },
+            follow_redirects=False,
+        )
+        self.client.post(f"/jobs/{job_id}/review/apply", follow_redirects=False)
+        self._run_next_worker_item()
+        review_dir = get_review_dir(job)
+        self.assertTrue((review_dir / "review_workbench_summary.json").exists())
+        self.assertTrue((review_dir / "review_apply_preview_summary.json").exists())
+        self.assertTrue((review_dir / "bulk_review_action_summary.json").exists())
+        self.assertTrue((review_dir / "review_operation_summary.json").exists())
+        self.assertFalse((REPO_ROOT / "review_workbench_summary.json").exists())
+        self.assertFalse((REPO_ROOT / "review_apply_preview_summary.json").exists())
+        self.assertFalse((REPO_ROOT / "bulk_review_action_summary.json").exists())
+        self.assertFalse((REPO_ROOT / "review_operation_summary.json").exists())
+
+    def test_operation_creation_returns_quickly_and_status_endpoint(self):
+        job_id = self._prepare_review_job(include_optional=True)
+        self.client.post(
+            f"/jobs/{job_id}/review/actions",
+            data={
+                "review_item_id": "REV_case_1",
+                "action_type": "ignore",
+                "action_value": "",
+                "reviewer_note": "queue quick",
+                "reviewer_name": "auditor",
+                "next_url": f"/jobs/{job_id}/review/items",
+            },
+            follow_redirects=False,
+        )
+        self.client.post(f"/jobs/{job_id}/review/export-actions", follow_redirects=False)
+        started = time.perf_counter()
+        response = self.client.post(f"/jobs/{job_id}/review/apply-and-rerun", follow_redirects=False)
+        elapsed = time.perf_counter() - started
+        self.assertEqual(response.status_code, 303)
+        self.assertLess(elapsed, 1.5)
+        latest_operation = self.client.get(f"/jobs/{job_id}/review/operation-status").json()["latest_operation_summary"]
+        self.assertEqual(latest_operation["operation_type"], "apply_and_rerun")
+        self.assertEqual(latest_operation["status"], "queued")
+        detail = self.client.get(f"/jobs/{job_id}/operations/{latest_operation['operation_id']}")
+        self.assertEqual(detail.status_code, 200)
+        self.assertEqual(detail.json()["operation"]["status"], "queued")
+
+    def test_operation_stage_timeline_is_generated_for_async_apply_and_rerun(self):
+        job_id = self._prepare_review_job(include_optional=True)
+        self.client.post(
+            f"/jobs/{job_id}/review/actions",
+            data={
+                "review_item_id": "REV_case_1",
+                "action_type": "ignore",
+                "action_value": "",
+                "reviewer_note": "timeline",
+                "reviewer_name": "auditor",
+                "next_url": f"/jobs/{job_id}/review/items",
+            },
+            follow_redirects=False,
+        )
+        self.client.post(f"/jobs/{job_id}/review/export-actions", follow_redirects=False)
+        with mock.patch("webapp.review._run_patched_standardize_cli", side_effect=self._fake_review_rerun()):
+            self.client.post(f"/jobs/{job_id}/review/apply-and-rerun", follow_redirects=False)
+            self._run_next_worker_item()
+        latest_operation = self.client.get(f"/jobs/{job_id}/review/operation-status").json()["latest_operation_summary"]
+        timeline_path = self.settings.jobs_root / job_id / "review" / "operations" / latest_operation["operation_id"] / "operation_stage_timeline.json"
+        self.assertTrue(timeline_path.exists())
+        timeline = json.loads(timeline_path.read_text(encoding="utf-8"))
+        stages = [event["stage"] for event in timeline["events"]]
+        self.assertIn("created", stages)
+        self.assertIn("queued", stages)
+        self.assertIn("running", stages)
+        self.assertIn("running_standardize", stages)
+        self.assertTrue((self.settings.jobs_root / job_id / "review" / "operation_stage_timeline.json").exists())
+
+    def test_operation_lock_prevents_duplicate_running_apply_and_rerun(self):
+        job_id = self._prepare_review_job(include_optional=True)
+        self.client.post(
+            f"/jobs/{job_id}/review/actions",
+            data={
+                "review_item_id": "REV_case_1",
+                "action_type": "ignore",
+                "action_value": "",
+                "reviewer_note": "duplicate lock",
+                "reviewer_name": "auditor",
+                "next_url": f"/jobs/{job_id}/review/items",
+            },
+            follow_redirects=False,
+        )
+        self.client.post(f"/jobs/{job_id}/review/export-actions", follow_redirects=False)
+        first = self.client.post(f"/jobs/{job_id}/review/apply-and-rerun", follow_redirects=False)
+        self.assertEqual(first.status_code, 303)
+        second = self.client.post(
+            f"/jobs/{job_id}/review/apply-and-rerun",
+            follow_redirects=False,
+            headers={"accept": "application/json"},
+        )
+        self.assertEqual(second.status_code, 409)
+        self.assertEqual(second.json()["error"], "duplicate_operation_blocked")
+        lock_summary = json.loads((self.settings.jobs_root / job_id / "review" / "operation_lock_summary.json").read_text(encoding="utf-8"))
+        self.assertTrue(lock_summary["blocked"])
+        self.assertTrue(lock_summary["blocked_by_operation_id"])
+
+    def test_retry_failed_operation_creates_new_operation_and_retry_summary(self):
+        job_id = self._prepare_review_job(include_optional=True)
+        self.client.post(
+            f"/jobs/{job_id}/review/actions",
+            data={
+                "review_item_id": "REV_case_1",
+                "action_type": "ignore",
+                "action_value": "",
+                "reviewer_note": "retry failed",
+                "reviewer_name": "auditor",
+                "next_url": f"/jobs/{job_id}/review/items",
+            },
+            follow_redirects=False,
+        )
+        self.client.post(f"/jobs/{job_id}/review/export-actions", follow_redirects=False)
+        with mock.patch("webapp.review._run_patched_standardize_cli", side_effect=self._fake_failed_review_rerun()):
+            self.client.post(f"/jobs/{job_id}/review/apply-and-rerun", follow_redirects=False)
+            self._run_next_worker_item()
+        failed_operation = self.client.get(f"/jobs/{job_id}/review/operation-status").json()["latest_operation_summary"]
+        self.assertEqual(failed_operation["status"], "failed")
+
+        with mock.patch("webapp.review._run_patched_standardize_cli", side_effect=self._fake_review_rerun()):
+            retry_response = self.client.post(
+                f"/jobs/{job_id}/operations/{failed_operation['operation_id']}/retry",
+                follow_redirects=False,
+            )
+            self.assertEqual(retry_response.status_code, 303)
+            self._run_next_worker_item()
+        latest_operation = self.client.get(f"/jobs/{job_id}/review/operation-status").json()["latest_operation_summary"]
+        self.assertEqual(latest_operation["status"], "succeeded")
+        self.assertNotEqual(latest_operation["operation_id"], failed_operation["operation_id"])
+        retry_summary = json.loads((self.settings.jobs_root / job_id / "review" / "operation_retry_summary.json").read_text(encoding="utf-8"))
+        self.assertEqual(retry_summary["source_operation_id"], failed_operation["operation_id"])
+        self.assertEqual(retry_summary["new_operation_id"], latest_operation["operation_id"])
+
+    def test_cancel_operation_route_marks_queued_operation_cancelled(self):
+        job_id = self._prepare_review_job(include_optional=True)
+        self.client.post(
+            f"/jobs/{job_id}/review/actions",
+            data={
+                "review_item_id": "REV_case_1",
+                "action_type": "ignore",
+                "action_value": "",
+                "reviewer_note": "cancel queued",
+                "reviewer_name": "auditor",
+                "next_url": f"/jobs/{job_id}/review/items",
+            },
+            follow_redirects=False,
+        )
+        self.client.post(f"/jobs/{job_id}/review/export-actions", follow_redirects=False)
+        self.client.post(f"/jobs/{job_id}/review/apply-and-rerun", follow_redirects=False)
+        latest_operation = self.client.get(f"/jobs/{job_id}/review/operation-status").json()["latest_operation_summary"]
+        cancel_response = self.client.post(
+            f"/jobs/{job_id}/operations/{latest_operation['operation_id']}/cancel",
+            follow_redirects=False,
+        )
+        self.assertEqual(cancel_response.status_code, 303)
+        detail = self.client.get(f"/jobs/{job_id}/operations/{latest_operation['operation_id']}")
+        self.assertEqual(detail.status_code, 200)
+        self.assertEqual(detail.json()["operation"]["status"], "cancelled")
+
+    def test_filter_dropdowns_show_chinese_labels_not_raw_enums(self):
+        job_id = self._prepare_review_job(include_optional=True)
+        response = self.client.get(f"/jobs/{job_id}/review/items")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn('value="unresolved"', response.text)
+        self.assertIn(">未处理</option>", response.text)
+        self.assertIn(">复核队列</option>", response.text)
+        self.assertIn(">科目映射问题</option>", response.text)
+        self.assertIn(">可自动应用</option>", response.text)
+        self.assertNotIn(">unresolved</option>", response.text)
+        self.assertNotIn(">review_queue</option>", response.text)
+        self.assertNotIn(">backend_ready</option>", response.text)
+
+    def test_operation_status_and_type_are_shown_in_chinese(self):
+        job_id = self._prepare_review_job(include_optional=True)
+        self.client.post(
+            f"/jobs/{job_id}/review/actions",
+            data={
+                "review_item_id": "REV_case_1",
+                "action_type": "ignore",
+                "action_value": "",
+                "reviewer_note": "zh labels",
+                "reviewer_name": "auditor",
+                "next_url": f"/jobs/{job_id}/review/items",
+            },
+            follow_redirects=False,
+        )
+        self.client.post(f"/jobs/{job_id}/review/export-actions", follow_redirects=False)
+        self.client.post(f"/jobs/{job_id}/review/apply-and-rerun", follow_redirects=False)
+        response = self.client.get(f"/jobs/{job_id}")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("应用复核并重新生成", response.text)
+        self.assertIn("排队中", response.text)
+
+    def test_operation_log_tail_route_is_restricted_to_allowed_job_dirs(self):
+        job_id = self._prepare_review_job(include_optional=True)
+        self.client.post(
+            f"/jobs/{job_id}/review/actions",
+            data={
+                "review_item_id": "REV_case_1",
+                "action_type": "ignore",
+                "action_value": "",
+                "reviewer_note": "log tail",
+                "reviewer_name": "auditor",
+                "next_url": f"/jobs/{job_id}/review/items",
+            },
+            follow_redirects=False,
+        )
+        self.client.post(f"/jobs/{job_id}/review/export-actions", follow_redirects=False)
+        self.client.post(f"/jobs/{job_id}/review/apply", follow_redirects=False)
+        latest_operation = self.client.get(f"/jobs/{job_id}/review/operation-status").json()["latest_operation_summary"]
+        allowed_log_path = self.settings.jobs_root / job_id / "review" / "operations" / latest_operation["operation_id"] / "operation.log"
+        allowed_log_path.parent.mkdir(parents=True, exist_ok=True)
+        allowed_log_path.write_text("allowed log\n", encoding="utf-8")
+        outside_log_path = self.temp_path / "outside_operation.log"
+        outside_log_path.write_text("outside log\n", encoding="utf-8")
+        update_review_operation(
+            self.settings,
+            latest_operation["operation_id"],
+            log_paths=[str(allowed_log_path), str(outside_log_path)],
+        )
+        response = self.client.get(f"/jobs/{job_id}/operations/{latest_operation['operation_id']}/logs")
+        self.assertEqual(response.status_code, 200)
+        log_tails = response.json()["log_tails"]
+        self.assertEqual(len(log_tails), 1)
+        self.assertIn("allowed log", log_tails[0]["tail"])
+
+    def test_operation_artifacts_stay_under_generated_web_paths(self):
+        job_id = self._prepare_review_job(include_optional=True)
+        self.client.post(
+            f"/jobs/{job_id}/review/actions",
+            data={
+                "review_item_id": "REV_case_1",
+                "action_type": "ignore",
+                "action_value": "",
+                "reviewer_note": "artifacts under runtime",
+                "reviewer_name": "auditor",
+                "next_url": f"/jobs/{job_id}/review/items",
+            },
+            follow_redirects=False,
+        )
+        self.client.post(f"/jobs/{job_id}/review/export-actions", follow_redirects=False)
+        with mock.patch("webapp.review._run_patched_standardize_cli", side_effect=self._fake_review_rerun()):
+            self.client.post(f"/jobs/{job_id}/review/apply-and-rerun", follow_redirects=False)
+            self._run_next_worker_item()
+        latest_operation = self.client.get(f"/jobs/{job_id}/review/operation-status").json()["latest_operation_summary"]
+        for raw_path in [*latest_operation.get("log_paths", []), *latest_operation.get("result_paths", [])]:
+            resolved = Path(raw_path)
+            if not resolved.is_absolute():
+                resolved = REPO_ROOT / resolved
+            self.assertTrue(str(resolved).startswith(str(self.runtime_root)))
+        self.assertTrue((self.settings.jobs_root / job_id / "review" / "operations").exists())
 
     def test_auth_disabled_in_dev_works(self):
         response = self.client.get("/")

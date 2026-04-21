@@ -22,8 +22,17 @@ services:
     build: .
     env_file:
       - .env
-    command: python -m webapp.runner run-worker
+    command: >
+      sh -c "if [ \"$WEBAPP_QUEUE_BACKEND\" = \"rq\" ];
+      then python -m webapp.operations run-rq-worker;
+      else python -m webapp.runner run-worker; fi"
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-m", "webapp.runner", "healthcheck"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
     volumes:
       - ./data:/app/data
 
@@ -31,6 +40,12 @@ services:
     image: redis:7-alpine
     restart: unless-stopped
     profiles: ["rq"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
 
   postgres:
     image: postgres:16-alpine

@@ -1,12 +1,14 @@
-# AutoFinance Web MVP
+# AutoFinance Web Review Workbench
 
-This Stage 9 web layer is a thin orchestration wrapper around the existing OCR and `standardize.cli` commands. It does not replace the deterministic standardization backend, and it does not promote PaddleOCR to a production fallback.
+The web app remains a thin orchestration and review layer over existing OCR and `standardize` artifacts.
 
-Current production recommendation: cloud OCR first. Paddle remains pilot-only.
+It does not redesign the OCR pipeline, does not redesign the standardize pipeline, does not change cloud-first defaults, does not change batch or benchmark semantics, and does not promote PaddleOCR beyond pilot-only.
+
+Current production recommendation remains cloud OCR first. Paddle stays pilot-only.
 
 ## Runtime Paths
 
-All web runtime artifacts stay under `data/generated/web/`:
+All runtime state stays under `data/generated/web/`:
 
 ```text
 data/generated/web/
@@ -15,20 +17,207 @@ data/generated/web/
   results/
   logs/
   webapp.sqlite3
-  web_mvp_summary.json
-  web_mvp_hardening_summary.json
+  web_operation_queue_summary.json
 ```
 
-`jobs/<job_id>/standardize/` contains standardization outputs. `results/<job_id>/` contains web-facing summary JSON, `job_quality_summary.json`, and log bundle JSON.
-
-Stage 10 review UI exports are written under:
+Per-job web artifacts use these paths:
 
 ```text
-data/generated/web/jobs/<job_id>/review/
-  review_actions_filled.csv
-  review_actions_filled.xlsx
-  review_action_export_summary.json
+data/generated/web/jobs/<job_id>/
+  standardize/
+  review/
+    review_actions_filled.csv
+    review_actions_filled.xlsx
+    review_action_export_summary.json
+    review_action_compatibility_summary.json
+    review_dashboard_counts_summary.json
+    review_workbench_summary.json
+    review_evidence_preview_summary.json
+    review_apply_preview_summary.json
+    review_operation_summary.json
+    operation_stage_timeline.json
+    operation_lock_summary.json
+    operation_retry_summary.json
+    operations/
+      <operation_id>/
+        review_operation_summary.json
+        operation_stage_timeline.json
+        operation.log
+        operation_retry_summary.json
+  reruns/
+    <rerun_id>/
+      standardize/
+      standardize_stdout.txt
+      standardize_stderr.txt
+
+data/generated/web/results/<job_id>/
+  job_summary.json
+  job_quality_summary.json
+  job_log_bundle.json
+  reruns/
+    <rerun_id>/
+      job_quality_summary.json
+      review_rerun_summary.json
+      review_rerun_delta.json
+      review_rerun_delta_explained.json
+      review_rerun_only_summary.json
+      review_apply_and_rerun_summary.json
 ```
+
+The web app should not write operation or rerun artifacts into the repo root.
+
+## Queue Backend Modes
+
+`WEBAPP_QUEUE_BACKEND` controls how long review operations are dispatched:
+
+- `local`: default local queue-backed mode. Routes create an operation record and return quickly; an in-process or external polling worker executes queued operations.
+- `rq`: optional Redis/RQ mode. Routes still create the same persisted operation record, but dispatch execution to an RQ worker.
+
+Common environment variables:
+
+```text
+WEBAPP_QUEUE_BACKEND=local|rq
+REDIS_URL=redis://redis:6379/0
+WEBAPP_OPERATION_TIMEOUT_SECONDS=3600
+WEBAPP_AUTH_REQUIRED=0|1
+WEBAPP_ADMIN_PASSWORD=...
+```
+
+The operation abstraction is the same in both modes: queueing, status polling, logs, cancel, retry, and duplicate protection all use the persisted web operation record under the job review directory.
+
+## Operation Types
+
+Supported operation types:
+
+- `apply_review_actions`: 应用复核动作
+- `apply_and_rerun`: 应用复核并重新生成
+- `rerun_only`: 仅重新生成
+
+## Operation States
+
+Each review operation has:
+
+- `operation_id`
+- `job_id`
+- `operation_type`
+- `status`
+- `created_at`
+- `started_at`
+- `finished_at`
+- `duration_seconds`
+- `progress_stage`
+- `progress_message_zh`
+- `log_paths`
+- `result_paths`
+- `error_message`
+- `user_friendly_error_zh`
+
+Operation status values:
+
+- `created`: 已创建
+- `queued`: 排队中
+- `running`: 运行中
+- `succeeded`: 已完成
+- `failed`: 失败
+- `cancelled`: 已取消
+
+The latest summary is copied to `review_operation_summary.json`; the full event trail is copied to `operation_stage_timeline.json`.
+
+## Review Operation Behavior
+
+These routes now return quickly and do not block the browser until standardization finishes:
+
+- `POST /jobs/{job_id}/review/apply`
+- `POST /jobs/{job_id}/review/apply-and-rerun`
+- `POST /jobs/{job_id}/review/rerun`
+
+Polling and inspection routes:
+
+- `GET /jobs/{job_id}/review/operation-status`
+- `GET /jobs/{job_id}/operations`
+- `GET /jobs/{job_id}/operations/{operation_id}`
+- `GET /jobs/{job_id}/operations/{operation_id}/logs`
+
+Operation control routes:
+
+- `POST /jobs/{job_id}/operations/{operation_id}/cancel`
+- `POST /jobs/{job_id}/operations/{operation_id}/retry`
+
+## Duplicate Protection And Lock Policy
+
+The web app enforces one active review operation per job for these mutating paths:
+
+- `apply_review_actions`
+- `apply_and_rerun`
+- `rerun_only`
+
+Current lock policy is `reject`.
+
+If an operation for the same job is already `created`, `queued`, or `running`, a second request is blocked and `operation_lock_summary.json` records the blocker.
+
+## Cancel And Retry
+
+Cancel behavior:
+
+- Queued operations can be cancelled immediately.
+- Running operations are marked `cancel_requested` and stop at the next safe checkpoint.
+- The rerun subprocess supports best-effort cancellation in local execution by terminating the child process.
+- Some apply work still cannot be interrupted mid-function; the UI and summaries remain explicit about that limitation.
+
+Retry behavior:
+
+- Failed or cancelled operations can be retried.
+- Retry creates a new operation id.
+- `operation_retry_summary.json` records the source operation and the new retry operation.
+
+## Why Apply + Rerun Can Take Minutes
+
+`apply_and_rerun` does two kinds of work:
+
+1. Exported review actions are applied to a job-specific config snapshot.
+2. `standardize.cli` is rerun against the original job input using that snapshot.
+
+The web app does not rewrite base configs directly from the UI. That is why apply outputs are first written under the job review directory, and reruns are then written under the job-specific rerun directories. The browser returns immediately, but the underlying standardization pass can still take minutes depending on fixture size and source complexity.
+
+## Inspecting Logs
+
+The job detail page and export/apply page show:
+
+- latest operation status
+- operation type
+- current stage
+- elapsed time
+- last log lines
+- result paths
+- cancel/retry buttons when appropriate
+
+The log-tail helper is restricted to allowed job directories only. It does not expose arbitrary filesystem files.
+
+## Chinese Labels
+
+User-facing dropdowns and operation UI use centralized Chinese labels for:
+
+- review `source_type`
+- review `reason_code`
+- review `status`
+- apply compatibility
+- operation status
+- operation type
+- provider mode
+
+Examples:
+
+- `backend_ready` -> `可自动应用`
+- `partial` -> `部分支持`
+- `suggestion_only` -> `仅作为建议`
+- `unsupported` -> `暂不支持`
+- `validation:*` -> `校验相关`
+- `mapping:*` -> `科目映射问题`
+- `apply_and_rerun` -> `应用复核并重新生成`
+- `running` -> `运行中`
+- `succeeded` -> `已完成`
+- `failed` -> `失败`
+- `cancelled` -> `已取消`
 
 ## Local Development
 
@@ -38,20 +227,17 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
-Recommended local env:
+Recommended local dev mode:
 
 ```bash
 $env:WEBAPP_ENV="dev"
 $env:WEBAPP_AUTH_REQUIRED="0"
-```
-
-Start the web app with the in-process local worker enabled:
-
-```bash
+$env:WEBAPP_QUEUE_BACKEND="local"
+$env:WEBAPP_ENABLE_LOCAL_WORKER="1"
 uvicorn webapp.main:app --reload
 ```
 
-Or run the worker separately:
+If you prefer an external worker:
 
 ```bash
 $env:WEBAPP_ENABLE_LOCAL_WORKER="0"
@@ -60,176 +246,62 @@ uvicorn webapp.main:app --reload
 python -m webapp.runner run-worker
 ```
 
-Run a single queued job once:
+Run one queued item only:
 
 ```bash
 python -m webapp.runner run-worker --once
 ```
 
-## Deployment Startup
+## Trial Deployment Mode
 
-Use deployment mode for trial environments:
+Example trial deployment env:
 
 ```bash
 $env:WEBAPP_ENV="prod"
 $env:WEBAPP_AUTH_REQUIRED="1"
 $env:WEBAPP_ADMIN_PASSWORD="change-this"
+$env:WEBAPP_QUEUE_BACKEND="local"
+$env:WEBAPP_ENABLE_LOCAL_WORKER="0"
 docker compose up --build -d
 ```
 
-If `WEBAPP_AUTH_REQUIRED=1` but `WEBAPP_ADMIN_PASSWORD` is missing, the app now fails startup with a clear configuration error.
+The compose skeleton includes:
 
-## Creating Jobs
+- `web`: FastAPI + Jinja server with `/healthz`
+- `worker`: queue worker with its own healthcheck
+- `redis`: optional Redis service for `rq` mode
 
-### Standardize-only job
+`./data:/app/data` is mounted so runtime outputs remain outside the image and continue to follow the repo path contract.
 
-Use the web form and select `existing_ocr_outputs`, then point it at a path such as:
+## Queue Mode With Redis/RQ
 
-```text
-data/corpus/D01/ocr_outputs
-```
-
-The worker will run:
+To use Redis-backed queue dispatch:
 
 ```bash
-python -m standardize.cli --input-dir ... --template ... --output-dir data/generated/web/jobs/<job_id>/standardize --output-run-subdir none
+$env:WEBAPP_QUEUE_BACKEND="rq"
+$env:REDIS_URL="redis://127.0.0.1:6379/0"
+$env:WEBAPP_ENABLE_LOCAL_WORKER="0"
 ```
 
-### Upload PDF job
-
-Upload one or more PDFs. Files are stored under `data/generated/web/uploads/<job_id>/`.
-
-- If `WEBAPP_AUTO_RUN_UPLOAD_OCR=1` and cloud OCR credentials appear configured, the worker will run `OCR.py` and then `standardize.cli`.
-- If auto OCR is disabled, the upload is stored and the job remains in a created / OCR-pending state until re-queued under a configured environment.
-
-## Job Status Meanings
-
-- `created`: 任务已创建，但尚未进入处理队列。
-- `queued`: 任务已入队，等待 worker。
-- `running`: 任务正在执行。
-- `succeeded`: 已完成，当前没有关键警告信号。
-- `succeeded_with_warnings`: 已生成结果，但存在完整性或合同类警告。
-- `needs_review`: 已生成结果，但存在人工复核或校验失败信号，建议先复核再交付。
-- `failed`: 后台命令未成功完成，当前结果不建议直接使用。
-- `cancelled`: 任务已取消。
-
-“完成但建议复核”通常意味着：
-
-- 生成了会计报表；
-- 但 `review_total`、`validation_fail_total` 或类似质量信号不为 0；
-- 建议先下载人工复核表、问题清单和日志后再交付。
-
-## Docker Compose / Trial Deployment
-
-1. Copy `.env.example` to `.env`.
-2. Adjust `WEBAPP_ENV`, `WEBAPP_AUTH_REQUIRED`, `WEBAPP_ADMIN_PASSWORD`, and OCR credentials as needed.
-3. Start the skeleton deployment:
+Then run either:
 
 ```bash
-docker compose up --build
+docker compose --profile rq up --build
 ```
 
-The compose file includes:
+or locally:
 
-- `web`: FastAPI + Jinja app
-- `worker`: local polling worker process
-- `redis`: optional future RQ profile
-- `postgres`: optional future database profile
-
-Redis and Postgres are still optional future components. The current web app continues to use SQLite by default and does not require Redis/Postgres unless a later stage adopts them.
-
-## Outputs Exposed In The UI
-
-If present, the job detail page exposes download links for:
-
-- `会计报表_填充结果.xlsx`
-- `run_summary.json`
-- `artifact_integrity.json`
-- `review_workbook.xlsx`
-- `review_queue.csv`
-- `issues.csv`
-- `validation_results.csv`
-- `job_summary.json`
-- `job_quality_summary.json`
-- `job_log_bundle.json`
-- `conflicts_enriched.csv`
-- `conflict_decision_audit.csv`
-- `unplaced_facts.csv`
-- `mapping_candidates.csv`
-- `benchmark_gap_explanations.csv`
-- `source_backed_gap_closure.csv`
-- `review_actions_filled.csv`
-- `review_actions_filled.xlsx`
-- `review_action_export_summary.json`
-
-If an expected artifact is missing, the UI shows `未生成`.
-
-## Review Dashboard
-
-Open a completed or `needs_review` job, then use:
-
-- `/jobs/<job_id>/review` for the audit-facing review dashboard
-- `/jobs/<job_id>/review/items` for the filterable review-item list
-- `/jobs/<job_id>/review/export-actions` to export saved actions
-
-The review dashboard is a server-rendered triage layer over existing `standardize` artifacts. It reads review-oriented files such as `review_queue.csv`, `issues.csv`, `validation_results.csv`, `conflicts_enriched.csv`, `unplaced_facts.csv`, `mapping_candidates.csv`, and related review workbook / gap files when available. Missing files are shown as unavailable instead of crashing the page.
-
-## Review Statuses
-
-- `unresolved`: 尚未在 Web 复核界面中保存动作。
-- `resolved`: 已保存一个处理动作，通常表示该条目已被人工判定。
-- `ignored`: 已标记忽略，不再作为当前待办。
-- `deferred`: 已暂缓，后续仍应进入复核积压。
-- `reocr_requested`: 已记录需要二次 OCR 的请求，但本阶段不会自动 rerun。
-
-## Review Action Types
-
-- `ignore`: 关闭当前条目，不直接改动底层事实。
-- `defer`: 记录暂缓，保留到后续复核积压。
-- `mark_not_financial_fact`: 标记为非财务事实，供后续 apply 阶段使用。
-- `request_reocr`: 记录需要二次 OCR 的请求。
-- `accept_mapping_candidate`: 接受当前候选映射；导出时会尽量映射到现有 backend 可识别动作。
-- `set_mapping_override`: 指定局部映射覆盖值。
-- `set_conflict_winner`: 指定供应商冲突的胜出结果。
-- `suppress_false_positive`: 标记 OCR 误报，供后续 apply 阶段使用。
-
-## Exporting Review Actions
-
-1. 在 `/jobs/<job_id>/review/items` 页面逐条保存动作。
-2. 打开 `/jobs/<job_id>/review/export-actions`。
-3. 点击“生成导出文件”。
-4. 从任务详情页或导出页下载 `review_actions_filled.csv` / `review_actions_filled.xlsx` / `review_action_export_summary.json`。
-
-导出文件会尽量复用现有 `standardize.feedback` 的动作模板字段，例如 `review_id`, `action_type`, `action_value`, `reviewer_note`, `reviewer_name`, `review_status`, `source_type`, `source_cell_ref`, `candidate_mapping_code`, `candidate_conflict_fact_id` 等。这样后续可以尽量对接既有 backend `--apply-review-actions` 工作流。
-
-当前限制：
-
-- Web UI 会保存并导出动作，但不会直接改写基础 standardize 配置。
-- 对 `review_queue.csv` 原生条目以外的 Web 复核项，现有 backend apply 流程可能仍需要补齐 `review_id` 或其他字段。
-- `accept_mapping_candidate` 会在导出层尽量映射到现有 backend 支持动作；兼容性缺口会写入 `review_action_export_summary.json`。
-- 自动 apply + rerun 计划放到 Stage 10.1，不在当前 MVP 范围内。
-
-## System Status
-
-The system page and `/api/system-status` endpoint show:
-
-- app version
-- Python version
-- template path existence
-- web runtime directory existence
-- available provider modes
-- whether Redis is configured
-- whether OCR credentials appear configured without showing secret values
-- whether authentication is enabled / required
-- worker mode
-
-The page does not display secret values. TODO: Stage 10/11 should restrict system-status visibility by role.
+```bash
+python -m webapp.operations run-rq-worker
+```
 
 ## Known Limitations
 
-- Authentication is still single-password and not multi-user RBAC.
-- Queueing uses a local SQLite-backed polling worker, not Redis/RQ.
-- Running jobs cannot be force-killed from the web UI in this MVP.
-- Upload jobs are safe but conservative; if cloud OCR is not configured they remain pending or fail with a clear message rather than falling back to Paddle.
-- The web app does not browse arbitrary filesystem locations. Existing OCR paths are limited to `data/corpus/` or `data/generated/web/`.
-- Production OCR recommendation remains cloud-first. Paddle remains pilot-only and is not used as a production fallback in the web path.
+- Authentication is still single-password and not RBAC.
+- The web app remains an orchestration/review layer; it does not replace deterministic backend logic.
+- `cancel` is honest but still best-effort for some in-process apply steps.
+- Long reruns can still take minutes; queueing removes browser blocking but not backend compute cost.
+- `rerun_only` uses the latest available job-safe config snapshot, or a fresh snapshot copy when none exists.
+- The web app does not expose arbitrary files; log tails and operation downloads are restricted to allowed job directories.
+- Cloud-first defaults remain unchanged.
+- Paddle remains pilot-only and is not promoted as a production fallback in the web path.

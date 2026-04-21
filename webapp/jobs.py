@@ -20,6 +20,7 @@ from .models import (
     JOB_MODE_UPLOAD,
     JOB_STATUS_CREATED,
     JOB_STATUS_QUEUED,
+    SUCCESS_LIKE_JOB_STATUSES,
     JobRecord,
     OutputArtifact,
     SystemStatusRecord,
@@ -47,6 +48,22 @@ COMMON_OUTPUT_DEFS = (
     ("source_backed_gap_closure", "来源支撑缺口闭环", "source_backed_gap_closure.csv"),
 )
 
+REVIEW_OUTPUT_DEFS = (
+    ("review_actions_csv", "复核动作导出 CSV", "review_actions_filled.csv"),
+    ("review_actions_xlsx", "复核动作导出 XLSX", "review_actions_filled.xlsx"),
+    ("review_action_export_summary", "复核动作导出摘要", "review_action_export_summary.json"),
+    ("review_action_compatibility_summary", "复核动作兼容性摘要", "review_action_compatibility_summary.json"),
+    ("review_dashboard_counts_summary", "复核看板计数摘要", "review_dashboard_counts_summary.json"),
+    ("review_workbench_summary", "复核工作台摘要", "review_workbench_summary.json"),
+    ("review_evidence_preview_summary", "证据预览摘要", "review_evidence_preview_summary.json"),
+    ("review_apply_preview_summary", "应用预览摘要", "review_apply_preview_summary.json"),
+    ("bulk_review_action_summary", "批量动作摘要", "bulk_review_action_summary.json"),
+    ("review_operation_summary", "最近一次复核操作摘要", "review_operation_summary.json"),
+    ("operation_stage_timeline", "最近一次复核操作阶段时间线", "operation_stage_timeline.json"),
+    ("operation_lock_summary", "复核操作锁摘要", "operation_lock_summary.json"),
+    ("operation_retry_summary", "复核操作重试摘要", "operation_retry_summary.json"),
+)
+
 
 def _is_within(path: Path, root: Path) -> bool:
     try:
@@ -61,6 +78,103 @@ def _repo_relative_or_absolute(path: Path) -> str:
         return path.resolve().relative_to(REPO_ROOT.resolve()).as_posix()
     except ValueError:
         return str(path.resolve())
+
+
+def _artifact_from_path(slug: str, label: str, path: Path, *, download_name: str | None = None) -> OutputArtifact:
+    return OutputArtifact(
+        slug=slug,
+        label=label,
+        path=str(path),
+        relative_path=_repo_relative_or_absolute(path),
+        exists=path.exists(),
+        size_bytes=path.stat().st_size if path.exists() else 0,
+        download_name=download_name or path.name,
+    )
+
+
+def _job_root(job: JobRecord) -> Path:
+    return Path(job.output_dir).resolve().parent
+
+
+def _review_dir(job: JobRecord) -> Path:
+    return _job_root(job) / "review"
+
+
+def _reruns_root(job: JobRecord) -> Path:
+    return _job_root(job) / "reruns"
+
+
+def _rerun_result_root(job: JobRecord, rerun_id: str) -> Path:
+    return Path(job.result_dir).resolve() / "reruns" / rerun_id
+
+
+def _latest_apply_dir(job: JobRecord) -> Path | None:
+    review_dir = _review_dir(job)
+    apply_dirs = sorted([path for path in review_dir.glob("apply_*") if path.is_dir()], key=lambda path: path.name)
+    return apply_dirs[-1] if apply_dirs else None
+
+
+def list_result_versions(job: JobRecord) -> list[dict[str, object]]:
+    versions: list[dict[str, object]] = []
+    original_output_dir = Path(job.output_dir).resolve()
+    versions.append(
+        {
+            "version_id": "original",
+            "label": "original",
+            "status": job.status,
+            "status_label": describe_job_status(job.status),
+            "recommended": False,
+            "workbook_slug": "filled_workbook",
+            "review_summary_slug": "quality_summary",
+            "delta_slug": "",
+            "delta_explained_slug": "",
+            "workbook_exists": (original_output_dir / "会计报表_填充结果.xlsx").exists(),
+            "delta_exists": False,
+            "delta_explained_exists": False,
+        }
+    )
+
+    rerun_dirs = sorted([path for path in _reruns_root(job).glob("rerun_*") if path.is_dir()], key=lambda path: path.name)
+    for rerun_dir in rerun_dirs:
+        rerun_id = rerun_dir.name
+        rerun_result_dir = _rerun_result_root(job, rerun_id)
+        rerun_summary = load_json(rerun_result_dir / "review_rerun_summary.json")
+        combined_summary = load_json(rerun_result_dir / "review_apply_and_rerun_summary.json")
+        quality_summary = load_json(rerun_result_dir / "job_quality_summary.json")
+        status = str(
+            combined_summary.get("rerun_status")
+            or rerun_summary.get("final_job_status")
+            or quality_summary.get("final_job_status")
+            or "failed"
+        )
+        versions.append(
+            {
+                "version_id": rerun_id,
+                "label": rerun_id,
+                "status": status,
+                "status_label": describe_job_status(status),
+                "recommended": False,
+                "workbook_slug": f"{rerun_id}_filled_workbook",
+                "review_summary_slug": f"{rerun_id}_review_rerun_summary",
+                "delta_slug": f"{rerun_id}_review_rerun_delta",
+                "delta_explained_slug": f"{rerun_id}_review_rerun_delta_explained",
+                "workbook_exists": (rerun_dir / "standardize" / "会计报表_填充结果.xlsx").exists(),
+                "delta_exists": (rerun_result_dir / "review_rerun_delta.json").exists(),
+                "delta_explained_exists": (rerun_result_dir / "review_rerun_delta_explained.json").exists(),
+            }
+        )
+
+    recommended_version_id = "original"
+    for version in reversed(versions):
+        if version["version_id"] == "original":
+            recommended_version_id = "original"
+            break
+        if str(version["status"]) in SUCCESS_LIKE_JOB_STATUSES:
+            recommended_version_id = str(version["version_id"])
+            break
+    for version in versions:
+        version["recommended"] = str(version["version_id"]) == recommended_version_id
+    return versions
 
 
 def _sanitize_filename(filename: str) -> str:
@@ -243,55 +357,57 @@ async def create_upload_job(settings: WebAppSettings, *, display_name: str, file
 def discover_output_files(job: JobRecord) -> list[OutputArtifact]:
     output_dir = Path(job.output_dir)
     result_dir = Path(job.result_dir)
-    review_dir = output_dir.resolve().parent / "review"
+    review_dir = _review_dir(job)
     artifacts: list[OutputArtifact] = []
     for slug, label, filename in COMMON_OUTPUT_DEFS:
         path = output_dir / filename
-        artifacts.append(
-            OutputArtifact(
-                slug=slug,
-                label=label,
-                path=str(path),
-                relative_path=_repo_relative_or_absolute(path),
-                exists=path.exists(),
-                size_bytes=path.stat().st_size if path.exists() else 0,
-                download_name=filename,
-            )
-        )
+        artifacts.append(_artifact_from_path(slug, label, path, download_name=filename))
     for slug, label, filename in (
         ("job_summary", "任务摘要", "job_summary.json"),
         ("quality_summary", "质量摘要", "job_quality_summary.json"),
         ("logs", "任务日志", "job_log_bundle.json"),
     ):
         path = result_dir / filename
-        artifacts.append(
-            OutputArtifact(
-                slug=slug,
-                label=label,
-                path=str(path),
-                relative_path=_repo_relative_or_absolute(path),
-                exists=path.exists(),
-                size_bytes=path.stat().st_size if path.exists() else 0,
-                download_name=filename,
-            )
-        )
-    for slug, label, filename in (
-        ("review_actions_csv", "复核动作导出 CSV", "review_actions_filled.csv"),
-        ("review_actions_xlsx", "复核动作导出 XLSX", "review_actions_filled.xlsx"),
-        ("review_action_export_summary", "复核动作导出摘要", "review_action_export_summary.json"),
-    ):
+        artifacts.append(_artifact_from_path(slug, label, path, download_name=filename))
+    for slug, label, filename in REVIEW_OUTPUT_DEFS:
         path = review_dir / filename
-        artifacts.append(
-            OutputArtifact(
-                slug=slug,
-                label=label,
-                path=str(path),
-                relative_path=_repo_relative_or_absolute(path),
-                exists=path.exists(),
-                size_bytes=path.stat().st_size if path.exists() else 0,
-                download_name=filename,
-            )
+        artifacts.append(_artifact_from_path(slug, label, path, download_name=filename))
+
+    latest_apply_dir = _latest_apply_dir(job)
+    if latest_apply_dir is not None:
+        for slug, label, filename in (
+            ("latest_review_apply_summary", "最近一次应用摘要", "review_apply_summary.json"),
+            ("latest_review_decision_summary", "最近一次应用决策摘要", "review_decision_summary.json"),
+            ("latest_applied_review_actions", "最近一次已应用动作", "applied_review_actions.csv"),
+            ("latest_rejected_review_actions", "最近一次拒绝动作", "rejected_review_actions.csv"),
+            ("latest_override_audit", "最近一次覆盖审计", "override_audit.csv"),
+        ):
+            path = latest_apply_dir / filename
+            artifacts.append(_artifact_from_path(slug, label, path, download_name=filename))
+
+    for version in list_result_versions(job):
+        version_id = str(version["version_id"])
+        if version_id == "original":
+            continue
+        rerun_root = _reruns_root(job) / version_id
+        rerun_standardize_dir = rerun_root / "standardize"
+        rerun_result_dir = _rerun_result_root(job, version_id)
+        rerun_artifacts = (
+            (f"{version_id}_filled_workbook", f"{version_id} 工作簿", rerun_standardize_dir / "会计报表_填充结果.xlsx"),
+            (f"{version_id}_review_rerun_summary", f"{version_id} 结果摘要", rerun_result_dir / "review_rerun_summary.json"),
+            (f"{version_id}_review_rerun_delta", f"{version_id} 前后对比", rerun_result_dir / "review_rerun_delta.json"),
+            (f"{version_id}_review_rerun_delta_explained", f"{version_id} 对比说明", rerun_result_dir / "review_rerun_delta_explained.json"),
+            (
+                f"{version_id}_review_apply_and_rerun_summary",
+                f"{version_id} 应用并重跑摘要",
+                rerun_result_dir / "review_apply_and_rerun_summary.json",
+            ),
+            (f"{version_id}_quality_summary", f"{version_id} 质量摘要", rerun_result_dir / "job_quality_summary.json"),
+            (f"{version_id}_stdout", f"{version_id} stdout", rerun_root / "standardize_stdout.txt"),
+            (f"{version_id}_stderr", f"{version_id} stderr", rerun_root / "standardize_stderr.txt"),
         )
+        for slug, label, path in rerun_artifacts:
+            artifacts.append(_artifact_from_path(slug, label, path))
     return artifacts
 
 
@@ -345,6 +461,14 @@ def list_existing_ocr_choices(settings: WebAppSettings) -> list[str]:
 def build_job_detail_payload(job: JobRecord) -> dict[str, object]:
     write_output_manifest(job)
     quality_summary = load_quality_bundle(job)
+    result_versions = list_result_versions(job)
+    latest_review_apply_summary = load_json((_latest_apply_dir(job) or Path("_missing")) / "review_apply_summary.json")
+    review_dir = _review_dir(job)
+    latest_rerun_delta_explained = {}
+    if result_versions and str(result_versions[-1]["version_id"]) != "original":
+        latest_rerun_delta_explained = load_json(
+            _rerun_result_root(job, str(result_versions[-1]["version_id"])) / "review_rerun_delta_explained.json"
+        )
     return {
         "job": job.as_dict(),
         "status_label": describe_job_status(job.status),
@@ -354,6 +478,13 @@ def build_job_detail_payload(job: JobRecord) -> dict[str, object]:
         "operator_summary": summarize_for_operator(job, quality_summary) if quality_summary else {},
         "log_bundle": load_log_bundle(job),
         "output_files": [artifact.as_dict() for artifact in discover_output_files(job)],
+        "result_versions": result_versions,
+        "latest_recommended_result": next((item for item in result_versions if item.get("recommended")), {}),
+        "latest_review_apply_summary": latest_review_apply_summary,
+        "latest_review_apply_preview_summary": load_json(review_dir / "review_apply_preview_summary.json"),
+        "latest_review_operation_summary": load_json(review_dir / "review_operation_summary.json"),
+        "latest_bulk_review_action_summary": load_json(review_dir / "bulk_review_action_summary.json"),
+        "latest_rerun_delta_explained": latest_rerun_delta_explained,
     }
 
 
@@ -395,4 +526,6 @@ def get_system_status(settings: WebAppSettings) -> SystemStatusRecord:
         auth_enabled=settings.auth_enabled,
         auth_required=settings.auth_required,
         worker_mode=settings.worker_mode,
+        queue_backend=settings.queue_backend,
+        operation_timeout_seconds=settings.operation_timeout_seconds,
     )
