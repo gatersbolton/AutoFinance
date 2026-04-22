@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import platform
 import re
 import shutil
 import uuid
@@ -14,7 +13,9 @@ from fastapi import HTTPException, UploadFile
 from project_paths import REPO_ROOT
 
 from .config import WebAppSettings
+from .deployment import build_system_status
 from .db import create_job, get_job, utc_now_iso
+from .labels import provider_mode_label_zh
 from .models import (
     JOB_MODE_EXISTING,
     JOB_MODE_UPLOAD,
@@ -23,8 +24,8 @@ from .models import (
     SUCCESS_LIKE_JOB_STATUSES,
     JobRecord,
     OutputArtifact,
-    SystemStatusRecord,
 )
+from .ocr_runtime import upload_provider_runtime_ready
 from .quality import (
     describe_job_status,
     load_json,
@@ -63,6 +64,19 @@ REVIEW_OUTPUT_DEFS = (
     ("operation_lock_summary", "复核操作锁摘要", "operation_lock_summary.json"),
     ("operation_retry_summary", "复核操作重试摘要", "operation_retry_summary.json"),
 )
+
+JOB_STAGE_LABELS_ZH = {
+    "uploaded": "已上传",
+    "ocr_pending": "已上传",
+    "ocr": "正在 OCR",
+    "worker_claimed": "处理中",
+    "standardize": "正在标准化",
+    "generated": "已生成结果",
+    "needs_review": "需要复核",
+    "failed": "失败",
+    "cancelled": "已取消",
+    "queued": "排队中",
+}
 
 
 def _is_within(path: Path, root: Path) -> bool:
@@ -310,18 +324,30 @@ def create_existing_ocr_job(settings: WebAppSettings, *, display_name: str, raw_
     return create_job(settings, job)
 
 
-async def create_upload_job(settings: WebAppSettings, *, display_name: str, files: Sequence[UploadFile]) -> JobRecord:
+async def create_upload_job(
+    settings: WebAppSettings,
+    *,
+    display_name: str,
+    provider_mode: str,
+    files: Sequence[UploadFile],
+) -> JobRecord:
     job_id = generate_job_id()
     workspace = ensure_job_workspace(settings, job_id)
     saved_files = await save_uploaded_files(settings, workspace["upload_dir"], files)
+    provider_runtime = upload_provider_runtime_ready(settings, provider_mode)
+    if not provider_runtime["runtime_ready"]:
+        safe_remove_tree(workspace["upload_dir"])
+        safe_remove_tree(workspace["job_root"])
+        safe_remove_tree(workspace["result_dir"])
+        safe_remove_tree(workspace["log_dir"])
+        raise ValueError(str(provider_runtime["runtime_message_zh"]))
     now = utc_now_iso()
-    credentials = settings.detect_ocr_credentials()
-    auto_queue = settings.auto_run_upload_ocr and bool(credentials.get("active_upload_method_ready", False))
+    auto_queue = settings.auto_run_upload_ocr
     job = JobRecord(
         job_id=job_id,
         display_name=_default_display_name(JOB_MODE_UPLOAD, display_name or saved_files[0].stem),
         mode=JOB_MODE_UPLOAD,
-        provider_mode="cloud_first",
+        provider_mode=str(provider_runtime["requested_provider_mode"]),
         input_path=str(workspace["upload_dir"]),
         source_image_dir=str(workspace["upload_dir"]),
         upload_dir=str(workspace["upload_dir"]),
@@ -332,11 +358,11 @@ async def create_upload_job(settings: WebAppSettings, *, display_name: str, file
         log_dir=str(workspace["log_dir"]),
         provider_priority=settings.provider_priority,
         status=JOB_STATUS_QUEUED if auto_queue else JOB_STATUS_CREATED,
-        current_stage="queued" if auto_queue else "ocr_pending",
+        current_stage="queued" if auto_queue else "uploaded",
         progress_summary=(
             "PDF 已上传并入队，等待执行 OCR。"
             if auto_queue
-            else "PDF 已上传。当前未自动执行 OCR；配置云 OCR 后可重新入队。"
+            else "PDF 已上传，可手动重新入队后执行 OCR。"
         ),
         created_at=now,
         updated_at=now,
@@ -358,6 +384,7 @@ def discover_output_files(job: JobRecord) -> list[OutputArtifact]:
     output_dir = Path(job.output_dir)
     result_dir = Path(job.result_dir)
     review_dir = _review_dir(job)
+    log_dir = Path(job.log_dir)
     artifacts: list[OutputArtifact] = []
     for slug, label, filename in COMMON_OUTPUT_DEFS:
         path = output_dir / filename
@@ -366,8 +393,17 @@ def discover_output_files(job: JobRecord) -> list[OutputArtifact]:
         ("job_summary", "任务摘要", "job_summary.json"),
         ("quality_summary", "质量摘要", "job_quality_summary.json"),
         ("logs", "任务日志", "job_log_bundle.json"),
+        ("ocr_stage_summary", "OCR 阶段摘要", "ocr_stage_summary.json"),
     ):
         path = result_dir / filename
+        artifacts.append(_artifact_from_path(slug, label, path, download_name=filename))
+    for slug, label, filename in (
+        ("ocr_stdout", "OCR stdout", "ocr_stdout.txt"),
+        ("ocr_stderr", "OCR stderr", "ocr_stderr.txt"),
+        ("standardize_stdout", "标准化 stdout", "standardize_stdout.txt"),
+        ("standardize_stderr", "标准化 stderr", "standardize_stderr.txt"),
+    ):
+        path = log_dir / filename
         artifacts.append(_artifact_from_path(slug, label, path, download_name=filename))
     for slug, label, filename in REVIEW_OUTPUT_DEFS:
         path = review_dir / filename
@@ -458,6 +494,90 @@ def list_existing_ocr_choices(settings: WebAppSettings) -> list[str]:
     return results
 
 
+def job_stage_label_zh(job: JobRecord) -> str:
+    if job.status == "failed":
+        return JOB_STAGE_LABELS_ZH["failed"]
+    if job.status == "needs_review":
+        return JOB_STAGE_LABELS_ZH["needs_review"]
+    if job.status in SUCCESS_LIKE_JOB_STATUSES:
+        return JOB_STAGE_LABELS_ZH["generated"]
+    return JOB_STAGE_LABELS_ZH.get(job.current_stage, job.current_stage or describe_job_status(job.status))
+
+
+def build_job_stage_flow(job: JobRecord) -> list[dict[str, object]]:
+    result_versions = list_result_versions(job)
+    has_rerun = any(str(item.get("version_id")) != "original" for item in result_versions)
+    stages = [
+        {
+            "slug": "upload",
+            "label_zh": "上传" if job.mode == JOB_MODE_UPLOAD else "已有 OCR",
+            "state": "done" if job.mode == JOB_MODE_UPLOAD or job.mode == JOB_MODE_EXISTING else "pending",
+            "status_label_zh": "已准备",
+        },
+        {
+            "slug": "ocr",
+            "label_zh": "OCR",
+            "state": "done" if job.mode == JOB_MODE_EXISTING else "pending",
+            "status_label_zh": "复用已有 OCR" if job.mode == JOB_MODE_EXISTING else "待执行",
+        },
+        {
+            "slug": "standardize",
+            "label_zh": "标准化",
+            "state": "pending",
+            "status_label_zh": "待执行",
+        },
+        {
+            "slug": "review",
+            "label_zh": "复核",
+            "state": "pending",
+            "status_label_zh": "按需进入",
+        },
+        {
+            "slug": "rerun",
+            "label_zh": "重新生成",
+            "state": "done" if has_rerun else "pending",
+            "status_label_zh": "已生成新版本" if has_rerun else "尚未执行",
+        },
+    ]
+    if job.mode == JOB_MODE_UPLOAD:
+        if job.current_stage in {"uploaded", "queued", "worker_claimed"} and job.status in {"created", "queued", "running"}:
+            stages[0]["state"] = "current"
+            stages[0]["status_label_zh"] = "已上传"
+        if job.current_stage == "ocr":
+            stages[1]["state"] = "current"
+            stages[1]["status_label_zh"] = "正在 OCR"
+        elif any(Path(job.ocr_output_dir).iterdir()) if Path(job.ocr_output_dir).exists() else False:
+            stages[1]["state"] = "done"
+            stages[1]["status_label_zh"] = "已完成"
+    else:
+        stages[0]["status_label_zh"] = "使用已有 OCR 输出"
+
+    if job.current_stage == "standardize":
+        stages[2]["state"] = "current"
+        stages[2]["status_label_zh"] = "正在标准化"
+        if job.mode == JOB_MODE_UPLOAD:
+            stages[1]["state"] = "done"
+            stages[1]["status_label_zh"] = "已完成"
+    elif job.status in SUCCESS_LIKE_JOB_STATUSES or job.status == "failed":
+        stages[2]["state"] = "done" if job.status in SUCCESS_LIKE_JOB_STATUSES else "current"
+        stages[2]["status_label_zh"] = "已完成" if job.status in SUCCESS_LIKE_JOB_STATUSES else "处理中断"
+
+    if job.status == "needs_review":
+        stages[3]["state"] = "current"
+        stages[3]["status_label_zh"] = "需要复核"
+    elif job.status in SUCCESS_LIKE_JOB_STATUSES:
+        stages[3]["state"] = "done"
+        stages[3]["status_label_zh"] = "可进入复核"
+    elif job.status == "failed":
+        for item in stages:
+            if item["state"] == "current":
+                item["status_label_zh"] = "失败"
+        if not any(item["state"] == "current" for item in stages):
+            stages[2]["state"] = "current"
+            stages[2]["status_label_zh"] = "失败"
+    return stages
+
+
 def build_job_detail_payload(job: JobRecord) -> dict[str, object]:
     write_output_manifest(job)
     quality_summary = load_quality_bundle(job)
@@ -472,6 +592,9 @@ def build_job_detail_payload(job: JobRecord) -> dict[str, object]:
     return {
         "job": job.as_dict(),
         "status_label": describe_job_status(job.status),
+        "stage_label_zh": job_stage_label_zh(job),
+        "stage_flow": build_job_stage_flow(job),
+        "provider_mode_label_zh": provider_mode_label_zh(job.provider_mode),
         "pipeline_summary": load_pipeline_summary(job),
         "job_summary": load_job_bundle(job),
         "quality_summary": quality_summary,
@@ -500,32 +623,5 @@ def safe_remove_tree(path: Path) -> None:
         shutil.rmtree(path)
 
 
-def get_system_status(settings: WebAppSettings) -> SystemStatusRecord:
-    runtime_directories = {
-        _repo_relative_or_absolute(path): path.exists()
-        for path in (
-            settings.runtime_root,
-            settings.uploads_root,
-            settings.jobs_root,
-            settings.results_root,
-            settings.logs_root,
-        )
-    }
-    return SystemStatusRecord(
-        app_name=settings.app_name,
-        app_version=settings.app_version,
-        environment=settings.env_mode,
-        python_version=platform.python_version(),
-        template_path=_repo_relative_or_absolute(settings.template_path),
-        template_exists=settings.template_path.exists(),
-        runtime_directories=runtime_directories,
-        available_provider_modes=list(settings.available_provider_modes),
-        redis_configured=bool(settings.redis_url.strip()),
-        ocr_credentials=settings.detect_ocr_credentials(),
-        local_worker_enabled=settings.enable_local_worker,
-        auth_enabled=settings.auth_enabled,
-        auth_required=settings.auth_required,
-        worker_mode=settings.worker_mode,
-        queue_backend=settings.queue_backend,
-        operation_timeout_seconds=settings.operation_timeout_seconds,
-    )
+def get_system_status(settings: WebAppSettings):
+    return build_system_status(settings)

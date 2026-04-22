@@ -178,6 +178,12 @@ pre {
     gap: 8px;
 }
 
+.field-help {
+    margin: 0;
+    color: var(--muted);
+    font-size: 0.92rem;
+}
+
 .field input[type="text"],
 .field input[type="file"],
 .field select {
@@ -362,6 +368,49 @@ td {
 .todo-note {
     color: var(--muted);
     font-size: 0.92rem;
+}
+
+.stage-flow {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+    gap: 14px;
+}
+
+.stage-card {
+    border: 1px solid var(--line);
+    border-radius: 16px;
+    padding: 16px;
+    background: #faf7f1;
+}
+
+.stage-card h3 {
+    margin-bottom: 8px;
+}
+
+.stage-card p:last-child {
+    margin-bottom: 0;
+    color: var(--muted);
+}
+
+.stage-card--done {
+    background: rgba(22, 128, 61, 0.08);
+    border-color: rgba(22, 128, 61, 0.2);
+}
+
+.stage-card--current {
+    background: rgba(13, 108, 93, 0.1);
+    border-color: rgba(13, 108, 93, 0.3);
+}
+
+.stage-card--pending {
+    opacity: 0.9;
+}
+
+.action-strip {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    margin: 0 0 24px;
 }
 
 .stat-card h2 {

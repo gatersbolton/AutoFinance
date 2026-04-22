@@ -11,10 +11,12 @@ from typing import Sequence
 from project_paths import REPO_ROOT
 
 from .config import WebAppSettings, load_settings
+from .deployment import queue_available, write_worker_heartbeat
 from .db import claim_next_queued_job, get_job, init_db, update_job, utc_now_iso
 from .jobs import discover_output_files, ensure_job_workspace, write_output_manifest
 from .models import JOB_MODE_UPLOAD, JOB_STATUS_FAILED, SUCCESS_LIKE_JOB_STATUSES, JobRecord
-from .operations import run_review_operation_once
+from .ocr_runtime import build_upload_ocr_command, execute_mock_ocr, upload_provider_runtime_ready
+from .operations import run_review_operation_once, run_rq_worker_forever
 from .quality import build_job_quality_summary, load_json
 
 
@@ -92,11 +94,13 @@ def _write_job_summary(
 ) -> dict[str, object]:
     output_files = [artifact.as_dict() for artifact in discover_output_files(job)]
     generated_files = [item["relative_path"] for item in output_files if item["exists"]]
+    ocr_stage_summary = load_json(Path(job.result_dir) / "ocr_stage_summary.json")
     payload = {
         "job_id": job.job_id,
         "display_name": job.display_name,
         "job_status": job.status,
         "mode": job.mode,
+        "provider_mode": job.provider_mode,
         "input_path": job.input_path,
         "ocr_output_dir": job.ocr_output_dir,
         "output_dir": job.output_dir,
@@ -112,6 +116,7 @@ def _write_job_summary(
         "user_friendly_error": job.user_friendly_error,
         "recommended_action": job.recommended_action,
         "quality_summary": quality_summary or {},
+        "ocr_stage_summary": ocr_stage_summary,
     }
     _write_json(Path(job.result_dir) / "job_summary.json", payload)
     return payload
@@ -153,24 +158,75 @@ def _build_standardize_command(job: JobRecord, settings: WebAppSettings, input_d
     return command
 
 
-def _build_ocr_command(job: JobRecord, settings: WebAppSettings) -> list[str]:
-    return [
-        settings.python_executable,
-        "OCR.py",
-        "--method",
-        settings.upload_ocr_method,
-        "--input",
-        job.upload_dir,
-        "--output",
-        job.ocr_output_dir,
-    ]
-
-
 def _stderr_tail(log_dir: str, filename: str) -> str:
     path = Path(log_dir) / filename
     if not path.exists():
         return ""
     return _tail_text(path, limit_chars=4000)
+
+
+def _write_ocr_stage_summary(job: JobRecord, payload: dict[str, object]) -> None:
+    _write_json(Path(job.result_dir) / "ocr_stage_summary.json", payload)
+
+
+def _run_upload_ocr(settings: WebAppSettings, job: JobRecord) -> tuple[int, list[str], dict[str, object]]:
+    stdout_path = Path(job.log_dir) / "ocr_stdout.txt"
+    stderr_path = Path(job.log_dir) / "ocr_stderr.txt"
+    command, provider_resolution = build_upload_ocr_command(
+        settings,
+        upload_dir=Path(job.upload_dir),
+        output_dir=Path(job.ocr_output_dir),
+        provider_mode=job.provider_mode,
+    )
+    command_text = _command_text(command)
+    provider_runtime = upload_provider_runtime_ready(settings, job.provider_mode)
+    if provider_runtime["mock_enabled"]:
+        mock_result = execute_mock_ocr(
+            output_dir=Path(job.ocr_output_dir),
+            provider_mode=str(provider_resolution["resolved_provider_mode"]),
+            stdout_path=stdout_path,
+            stderr_path=stderr_path,
+        )
+        summary = {
+            "job_id": job.job_id,
+            "requested_provider_mode": provider_resolution["requested_provider_mode"],
+            "resolved_provider_mode": provider_resolution["resolved_provider_mode"],
+            "provider_ready": provider_resolution["provider_ready"],
+            "used_mock": bool(mock_result["used_mock"]),
+            "cloud_ocr_executed": bool(mock_result["cloud_ocr_executed"]),
+            "mock_mode": mock_result["mock_mode"],
+            "mock_source_dir": mock_result["mock_source_dir"],
+            "returncode": int(mock_result["returncode"]),
+            "stdout_path": str(stdout_path),
+            "stderr_path": str(stderr_path),
+            "logical_command": command_text,
+        }
+        return int(mock_result["returncode"]), [command_text], summary
+
+    if provider_resolution["provider_ready"]:
+        result = _run_subprocess(
+            command=command,
+            stdout_path=stdout_path,
+            stderr_path=stderr_path,
+            timeout_seconds=job.timeout_seconds,
+        )
+        summary = {
+            "job_id": job.job_id,
+            "requested_provider_mode": provider_resolution["requested_provider_mode"],
+            "resolved_provider_mode": provider_resolution["resolved_provider_mode"],
+            "provider_ready": provider_resolution["provider_ready"],
+            "used_mock": False,
+            "cloud_ocr_executed": True,
+            "returncode": int(result.returncode),
+            "stdout_path": str(stdout_path),
+            "stderr_path": str(stderr_path),
+            "logical_command": command_text,
+        }
+        return int(result.returncode), [command_text], summary
+
+    if not provider_runtime["runtime_ready"]:
+        raise RuntimeError(str(provider_resolution["failure_message_zh"]))
+    raise RuntimeError(str(provider_resolution["failure_message_zh"]))
 
 
 def _mark_failed(
@@ -235,47 +291,36 @@ def execute_job(settings: WebAppSettings, job_id: str) -> JobRecord:
 
     try:
         if job.mode == JOB_MODE_UPLOAD:
-            if not settings.auto_run_upload_ocr:
+            provider_runtime = upload_provider_runtime_ready(settings, job.provider_mode)
+            if not provider_runtime["runtime_ready"]:
                 return _mark_failed(
                     job.job_id,
                     settings,
-                    raw_error_message="上传任务已保存，但当前未启用自动 OCR。请设置 WEBAPP_AUTO_RUN_UPLOAD_OCR=1 后重新入队。",
+                    raw_error_message=str(provider_runtime["runtime_message_zh"]),
                     exit_code=None,
                     commands=commands,
                     started_at_monotonic=started_at_monotonic,
                 )
-            credentials = settings.detect_ocr_credentials()
-            if not bool(credentials.get("active_upload_method_ready", False)):
-                return _mark_failed(
-                    job.job_id,
-                    settings,
-                    raw_error_message=f"上传任务缺少 {settings.upload_ocr_method} 所需云 OCR 凭据，未执行 OCR。",
-                    exit_code=None,
-                    commands=commands,
-                    started_at_monotonic=started_at_monotonic,
-                )
-
-            ocr_command = _build_ocr_command(job, settings)
-            commands.append(_command_text(ocr_command))
             update_job(
                 settings,
                 job.job_id,
                 current_stage="ocr",
                 progress_summary="正在执行 OCR。",
+            )
+            ocr_returncode, ocr_commands, ocr_summary = _run_upload_ocr(settings, job)
+            commands.extend(ocr_commands)
+            _write_ocr_stage_summary(job, ocr_summary)
+            update_job(
+                settings,
+                job.job_id,
                 command_executed="\n".join(commands),
             )
-            ocr_result = _run_subprocess(
-                command=ocr_command,
-                stdout_path=Path(job.log_dir) / "ocr_stdout.txt",
-                stderr_path=Path(job.log_dir) / "ocr_stderr.txt",
-                timeout_seconds=job.timeout_seconds,
-            )
-            if ocr_result.returncode != 0:
+            if ocr_returncode != 0:
                 return _mark_failed(
                     job.job_id,
                     settings,
                     raw_error_message=_stderr_tail(job.log_dir, "ocr_stderr.txt") or "OCR 子进程执行失败。",
-                    exit_code=ocr_result.returncode,
+                    exit_code=ocr_returncode,
                     commands=commands,
                     started_at_monotonic=started_at_monotonic,
                 )
@@ -330,7 +375,7 @@ def execute_job(settings: WebAppSettings, job_id: str) -> JobRecord:
     provisional_job = update_job(
         settings,
         job.job_id,
-        current_stage="completed",
+        current_stage="generated",
         finished_at=utc_now_iso(),
         error_message="",
         raw_error_message="",
@@ -347,10 +392,13 @@ def execute_job(settings: WebAppSettings, job_id: str) -> JobRecord:
         progress_summary = f"任务执行完成，发现 {generated_output_count} 个输出文件。"
     else:
         progress_summary = str(quality_summary.get("user_friendly_error", "")) or f"任务执行完成，发现 {generated_output_count} 个输出文件。"
+    final_status = str(quality_summary.get("final_job_status", provisional_job.status))
+    final_stage = "needs_review" if final_status == "needs_review" else "generated"
     job = update_job(
         settings,
         job.job_id,
-        status=str(quality_summary.get("final_job_status", provisional_job.status)),
+        status=final_status,
+        current_stage=final_stage,
         error_message=str(quality_summary.get("user_friendly_error", "")),
         raw_error_message=str(quality_summary.get("raw_error_message", "")),
         user_friendly_error=str(quality_summary.get("user_friendly_error", "")),
@@ -372,17 +420,23 @@ def execute_job(settings: WebAppSettings, job_id: str) -> JobRecord:
 
 def run_worker_once(settings: WebAppSettings) -> JobRecord | None:
     init_db(settings)
-    operation = run_review_operation_once(settings)
-    if operation is not None:
-        return None
+    if settings.queue_backend != "rq":
+        operation = run_review_operation_once(settings)
+        if operation is not None:
+            write_worker_heartbeat(settings, source="run_worker_once", note="processed review operation")
+            return None
     job = claim_next_queued_job(settings)
     if job is None:
+        write_worker_heartbeat(settings, source="run_worker_once", note="idle")
         return None
-    return execute_job(settings, job.job_id)
+    processed_job = execute_job(settings, job.job_id)
+    write_worker_heartbeat(settings, source="run_worker_once", note="processed job", job_id=processed_job.job_id)
+    return processed_job
 
 
 def run_worker_forever(settings: WebAppSettings, stop_event: threading.Event | None = None) -> None:
     init_db(settings)
+    write_worker_heartbeat(settings, source="run_worker_forever", note="worker started")
     while stop_event is None or not stop_event.is_set():
         job = run_worker_once(settings)
         if job is None:
@@ -411,12 +465,34 @@ class LocalWorkerThread:
         self._thread.join(timeout=max(self.settings.worker_poll_seconds + 1, 2))
 
 
+def run_worker_service(settings: WebAppSettings) -> None:
+    if settings.queue_backend != "rq":
+        run_worker_forever(settings)
+        return
+
+    stop_event = threading.Event()
+    poller_thread = threading.Thread(
+        target=run_worker_forever,
+        kwargs={"settings": settings, "stop_event": stop_event},
+        name="autofinance-job-poller",
+        daemon=True,
+    )
+    poller_thread.start()
+    write_worker_heartbeat(settings, source="run_worker_service", note="job poller + rq worker started")
+    try:
+        run_rq_worker_forever(settings)
+    finally:
+        stop_event.set()
+        poller_thread.join(timeout=max(settings.worker_poll_seconds + 1, 2))
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="AutoFinance web worker utilities.")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     worker_parser = subparsers.add_parser("run-worker", help="Run the local web worker.")
     worker_parser.add_argument("--once", action="store_true", help="Run at most one queued job and exit.")
+    subparsers.add_parser("run-service", help="Run the deployment worker service.")
 
     run_job_parser = subparsers.add_parser("run-job", help="Run a specific job immediately.")
     run_job_parser.add_argument("--job-id", required=True, help="Job id to execute.")
@@ -438,12 +514,18 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
         run_worker_forever(settings)
         return 0
+    if args.command == "run-service":
+        run_worker_service(settings)
+        return 0
     if args.command == "run-job":
         execute_job(settings, args.job_id)
         return 0
     if args.command == "healthcheck":
         settings.validate_runtime_configuration()
         init_db(settings)
+        queue_ok, queue_message = queue_available(settings)
+        if not queue_ok:
+            raise RuntimeError(queue_message)
         return 0
     parser.error(f"Unsupported command: {args.command}")
     return 2

@@ -15,10 +15,12 @@ from .jobs import (
     create_existing_ocr_job,
     create_upload_job,
     get_system_status,
+    job_stage_label_zh,
     list_existing_ocr_choices,
     require_job,
     resolve_download_artifact,
 )
+from .labels import provider_mode_label_zh
 from .models import ACTIVE_JOB_STATUSES
 from .operations import (
     DuplicateOperationError,
@@ -97,7 +99,11 @@ def _new_job_context(request: Request, *, error_message: str = "", submitted: di
         "default_existing_path": submitted.get("existing_ocr_path") or next(iter(list_existing_ocr_choices(settings)), ""),
         "submitted_mode": submitted.get("mode", "existing_ocr_outputs"),
         "submitted_display_name": submitted.get("display_name", ""),
+        "submitted_upload_provider_mode": submitted.get("upload_provider_mode", settings.upload_ocr_method),
         "upload_auto_run_enabled": settings.auto_run_upload_ocr,
+        "upload_provider_options": [
+            {"value": value, "label_zh": provider_mode_label_zh(value)} for value in settings.upload_provider_modes
+        ],
         "template_path": str(settings.template_path),
     }
 
@@ -175,13 +181,15 @@ def index(request: Request) -> HTMLResponse:
             "jobs": jobs[:5],
             "active_jobs": active_jobs,
             "describe_job_status": describe_job_status,
+            "job_stage_label_zh": job_stage_label_zh,
         },
     )
 
 
 @router.get("/jobs/new", response_class=HTMLResponse, dependencies=[Depends(password_gate)])
-def new_job(request: Request) -> HTMLResponse:
-    return _render(request, "new_job.html", _new_job_context(request))
+def new_job(request: Request, mode: str = "") -> HTMLResponse:
+    submitted = {"mode": mode} if mode in {"existing_ocr_outputs", "upload_pdf"} else {}
+    return _render(request, "new_job.html", _new_job_context(request, submitted=submitted))
 
 
 @router.post("/jobs", dependencies=[Depends(password_gate)], response_model=None)
@@ -190,6 +198,7 @@ async def create_job(
     mode: Annotated[str, Form(...)],
     display_name: Annotated[str, Form()] = "",
     existing_ocr_path: Annotated[str, Form()] = "",
+    upload_provider_mode: Annotated[str, Form()] = "",
     uploaded_files: Annotated[list[UploadFile] | None, File()] = None,
 ) -> Response:
     settings = get_settings(request)
@@ -197,12 +206,18 @@ async def create_job(
         "mode": mode,
         "display_name": display_name,
         "existing_ocr_path": existing_ocr_path,
+        "upload_provider_mode": upload_provider_mode,
     }
     try:
         if mode == "existing_ocr_outputs":
             job = create_existing_ocr_job(settings, display_name=display_name, raw_input_path=existing_ocr_path)
         elif mode == "upload_pdf":
-            job = await create_upload_job(settings, display_name=display_name, files=uploaded_files or [])
+            job = await create_upload_job(
+                settings,
+                display_name=display_name,
+                provider_mode=upload_provider_mode or settings.upload_ocr_method,
+                files=uploaded_files or [],
+            )
         else:
             raise ValueError(f"不支持的任务模式: {mode}")
     except ValueError as exc:
@@ -221,6 +236,8 @@ def jobs_page(request: Request) -> HTMLResponse:
             "jobs": jobs,
             "has_active_jobs": has_active_jobs,
             "describe_job_status": describe_job_status,
+            "job_stage_label_zh": job_stage_label_zh,
+            "provider_mode_label_zh": provider_mode_label_zh,
         },
     )
 

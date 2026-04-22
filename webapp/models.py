@@ -149,6 +149,22 @@ class SystemStatusRecord:
     worker_mode: str
     queue_backend: str
     operation_timeout_seconds: int
+    system_available: bool
+    system_available_label_zh: str
+    default_upload_provider_mode: str
+    default_upload_provider_label_zh: str
+    resolved_upload_provider_mode: str
+    resolved_upload_provider_label_zh: str
+    queue_available: bool
+    queue_status_message_zh: str
+    worker_available: bool
+    worker_status_message_zh: str
+    storage_writable: bool
+    storage_details: dict[str, dict[str, Any]]
+    recent_jobs: list[dict[str, Any]]
+    common_fault_hints: list[str]
+    worker_heartbeat: dict[str, Any]
+    max_upload_bytes: int
 
     def as_dict(self) -> dict[str, object]:
         return asdict(self)

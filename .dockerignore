@@ -5,4 +5,5 @@ __pycache__/
 data/generated/
 data/vendor/PaddleOCR/
 data/corpus/
+data/secrets/
 tests/

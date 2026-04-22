@@ -84,6 +84,7 @@ class WebAppSettings:
     queue_backend: str = "local"
     redis_url: str = ""
     operation_log_tail_chars: int = 4000
+    worker_heartbeat_stale_seconds: int = 90
     standardize_flags: tuple[str, ...] = field(
         default_factory=lambda: (
             "--enable-conflict-merge",
@@ -114,6 +115,10 @@ class WebAppSettings:
     @property
     def allowed_upload_extensions(self) -> tuple[str, ...]:
         return (".pdf",)
+
+    @property
+    def upload_provider_modes(self) -> tuple[str, ...]:
+        return ("cloud_first", "aliyun_table", "tencent_table_v3")
 
     @property
     def available_provider_modes(self) -> tuple[str, ...]:
@@ -165,9 +170,34 @@ class WebAppSettings:
         )
 
         active_ready = False
-        if self.upload_ocr_method.startswith("aliyun"):
+        resolved_upload_method = self.upload_ocr_method
+        cloud_first_order = [item.strip().lower() for item in self.provider_priority.split(",") if item.strip()]
+        normalized_order: list[str] = []
+        for item in cloud_first_order:
+            if item in {"aliyun", "aliyun_table"} and "aliyun_table" not in normalized_order:
+                normalized_order.append("aliyun_table")
+            if item in {"tencent", "tencent_table_v3"} and "tencent_table_v3" not in normalized_order:
+                normalized_order.append("tencent_table_v3")
+        for fallback in ("aliyun_table", "tencent_table_v3"):
+            if fallback not in normalized_order:
+                normalized_order.append(fallback)
+
+        if self.upload_ocr_method == "cloud_first":
+            resolved_upload_method = next(
+                (
+                    method
+                    for method in normalized_order
+                    if (method == "aliyun_table" and aliyun_configured)
+                    or (method == "tencent_table_v3" and tencent_configured)
+                ),
+                normalized_order[0],
+            )
+            active_ready = bool(aliyun_configured or tencent_configured)
+        elif self.upload_ocr_method.startswith("aliyun"):
+            resolved_upload_method = "aliyun_table"
             active_ready = aliyun_configured
         elif self.upload_ocr_method.startswith("tencent"):
+            resolved_upload_method = "tencent_table_v3"
             active_ready = tencent_configured
 
         return {
@@ -177,6 +207,8 @@ class WebAppSettings:
             "aliyun_configured": aliyun_configured,
             "tencent_configured": tencent_configured,
             "active_upload_method": self.upload_ocr_method,
+            "resolved_upload_method": resolved_upload_method,
+            "cloud_first_ready": bool(aliyun_configured or tencent_configured),
             "active_upload_method_ready": active_ready,
         }
 
@@ -240,6 +272,7 @@ def load_settings() -> WebAppSettings:
         queue_backend=os.environ.get("WEBAPP_QUEUE_BACKEND", "local").strip().lower() or "local",
         redis_url=os.environ.get("REDIS_URL", ""),
         operation_log_tail_chars=_env_int("WEBAPP_OPERATION_LOG_TAIL_CHARS", 4000),
+        worker_heartbeat_stale_seconds=_env_int("WEBAPP_WORKER_HEARTBEAT_STALE_SECONDS", 90),
     )
 
 

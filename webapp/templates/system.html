@@ -3,27 +3,36 @@
 {% block content %}
 <section class="page-heading">
     <div>
-        <p class="eyebrow">System</p>
-        <h1>系统状态</h1>
+        <p class="eyebrow">Deployment</p>
+        <h1>系统状态 / Demo 运维面板</h1>
     </div>
 </section>
 
 <section class="grid">
     <article class="card">
-        <h2>运行环境</h2>
+        <h2>系统是否可用</h2>
         <dl class="meta-list">
+            <div><dt>系统状态</dt><dd>{{ status.system_available_label_zh }}</dd></div>
             <div><dt>部署环境</dt><dd>{{ status.environment }}</dd></div>
-            <div><dt>App Version</dt><dd>{{ status.app_version }}</dd></div>
-            <div><dt>Python Version</dt><dd>{{ status.python_version }}</dd></div>
+            <div><dt>App 版本</dt><dd>{{ status.app_version }}</dd></div>
+            <div><dt>Python 版本</dt><dd>{{ status.python_version }}</dd></div>
+            <div><dt>认证要求</dt><dd>{{ status.auth_required }}</dd></div>
+            <div><dt>上传大小限制</dt><dd>{{ status.max_upload_bytes }} bytes</dd></div>
+        </dl>
+    </article>
+    <article class="card">
+        <h2>关键检查</h2>
+        <dl class="meta-list">
+            <div><dt>模板是否存在</dt><dd>{{ status.template_exists }}</dd></div>
+            <div><dt>OCR 密钥是否配置</dt><dd>{{ status.ocr_credentials.get("active_upload_method_ready") }}</dd></div>
+            <div><dt>当前默认 OCR 方式</dt><dd>{{ status.default_upload_provider_label_zh }}</dd></div>
+            <div><dt>cloud_first 实际落点</dt><dd>{{ status.resolved_upload_provider_label_zh }}</dd></div>
+            <div><dt>队列是否可用</dt><dd>{{ status.queue_available }}</dd></div>
+            <div><dt>队列说明</dt><dd>{{ status.queue_status_message_zh }}</dd></div>
+            <div><dt>Worker 是否可用</dt><dd>{{ status.worker_available }}</dd></div>
+            <div><dt>Worker 状态</dt><dd>{{ status.worker_status_message_zh }}</dd></div>
+            <div><dt>存储目录是否可写</dt><dd>{{ status.storage_writable }}</dd></div>
             <div><dt>Template Path</dt><dd><code>{{ status.template_path }}</code></dd></div>
-            <div><dt>Template Exists</dt><dd>{{ status.template_exists }}</dd></div>
-            <div><dt>Local Worker</dt><dd>{{ status.local_worker_enabled }}</dd></div>
-            <div><dt>Worker Mode</dt><dd>{{ status.worker_mode }}</dd></div>
-            <div><dt>Queue Backend</dt><dd>{{ status.queue_backend }}</dd></div>
-            <div><dt>Redis Configured</dt><dd>{{ status.redis_configured }}</dd></div>
-            <div><dt>Operation Timeout</dt><dd>{{ status.operation_timeout_seconds }}</dd></div>
-            <div><dt>Auth Enabled</dt><dd>{{ status.auth_enabled }}</dd></div>
-            <div><dt>Auth Required</dt><dd>{{ status.auth_required }}</dd></div>
         </dl>
     </article>
     <article class="card">
@@ -35,10 +44,10 @@
         </ul>
     </article>
     <article class="card">
-        <h2>Provider Modes</h2>
+        <h2>存储写入检测</h2>
         <ul class="plain-list">
-            {% for item in status.available_provider_modes %}
-                <li>{{ item }}</li>
+            {% for path, detail in status.storage_details.items() %}
+                <li><code>{{ path }}</code> · 可写={{ detail.writable }}{% if detail.error %} · {{ detail.error }}{% endif %}</li>
             {% endfor %}
         </ul>
     </article>
@@ -50,10 +59,34 @@
             <li>检测到解析异常：{{ status.ocr_credentials.get("secret_file_parse_error_present") }}</li>
             <li>阿里云 OCR 已配置：{{ status.ocr_credentials.get("aliyun_configured") }}</li>
             <li>腾讯 OCR 已配置：{{ status.ocr_credentials.get("tencent_configured") }}</li>
-            <li>当前上传 OCR 模式：{{ status.ocr_credentials.get("active_upload_method") }}</li>
+            <li>当前默认 OCR 模式：{{ status.ocr_credentials.get("active_upload_method_requested") }}</li>
+            <li>当前解析后的 OCR 模式：{{ status.ocr_credentials.get("resolved_upload_method") }}</li>
             <li>当前上传 OCR 模式可用：{{ status.ocr_credentials.get("active_upload_method_ready") }}</li>
+            <li>是否启用 smoke/mock OCR：{{ status.ocr_credentials.get("mock_enabled") }}</li>
         </ul>
-        <p class="todo-note">TODO: Stage 10/11 需要按角色限制系统状态详情显示范围。</p>
+    </article>
+</section>
+
+<section class="grid">
+    <article class="card">
+        <h2>最近任务</h2>
+        {% if status.recent_jobs %}
+            <ul class="plain-list">
+                {% for job in status.recent_jobs %}
+                <li><a href="/jobs/{{ job.job_id }}">{{ job.display_name }}</a> · {{ job.status_label_zh }} · {{ job.progress_summary }}</li>
+                {% endfor %}
+            </ul>
+        {% else %}
+            <p>暂无任务记录。</p>
+        {% endif %}
+    </article>
+    <article class="card">
+        <h2>常见故障提示</h2>
+        <ul class="plain-list">
+            {% for hint in status.common_fault_hints %}
+            <li>{{ hint }}</li>
+            {% endfor %}
+        </ul>
     </article>
 </section>
 {% endblock %}

@@ -45,6 +45,48 @@
     </div>
 </section>
 
+<section class="card">
+    <h2>处理阶段</h2>
+    <div class="stage-flow">
+        {% for stage in payload.stage_flow %}
+        <article class="stage-card stage-card--{{ stage.state }}">
+            <p class="eyebrow">{{ loop.index }}</p>
+            <h3>{{ stage.label_zh }}</h3>
+            <p>{{ stage.status_label_zh }}</p>
+        </article>
+        {% endfor %}
+    </div>
+    <p class="todo-note">当前阶段：{{ payload.stage_label_zh }}</p>
+</section>
+
+<section class="action-strip">
+    {% set workbook_artifact = namespace(item=None) %}
+    {% set logs_artifact = namespace(item=None) %}
+    {% for artifact in payload.output_files %}
+        {% if artifact.slug == "filled_workbook" %}
+            {% set workbook_artifact.item = artifact %}
+        {% endif %}
+        {% if artifact.slug == "logs" %}
+            {% set logs_artifact.item = artifact %}
+        {% endif %}
+    {% endfor %}
+    {% if workbook_artifact.item and workbook_artifact.item.exists %}
+    <a class="button button--primary" href="/jobs/{{ job.job_id }}/download/filled_workbook">下载会计报表</a>
+    {% endif %}
+    <a class="button button--secondary" href="/jobs/{{ job.job_id }}/review">进入人工复核</a>
+    {% if logs_artifact.item and logs_artifact.item.exists %}
+    <a class="button button--secondary" href="/jobs/{{ job.job_id }}/download/logs">下载日志</a>
+    {% endif %}
+</section>
+
+{% if payload.operator_summary.get("status_tone") == "danger" and payload.operator_summary.get("user_friendly_error") %}
+<section class="card card--error">
+    <h2>失败原因</h2>
+    <p>{{ payload.operator_summary.get("user_friendly_error") }}</p>
+    <p class="todo-note">建议处理：{{ payload.operator_summary.get("next_step") }}</p>
+</section>
+{% endif %}
+
 <section class="grid grid--detail">
     <article class="card">
         <h2>复核入口</h2>
@@ -105,8 +147,9 @@
         <dl class="meta-list">
             <div><dt>Job ID</dt><dd><code>{{ job.job_id }}</code></dd></div>
             <div><dt>状态</dt><dd><span class="status status--{{ job.status }}">{{ payload.status_label }}</span></dd></div>
-            <div><dt>流水线阶段</dt><dd>{{ job.current_stage }}</dd></div>
+            <div><dt>当前阶段</dt><dd>{{ payload.stage_label_zh }}</dd></div>
             <div><dt>模式</dt><dd>{{ job.mode }}</dd></div>
+            <div><dt>OCR 方式</dt><dd>{{ payload.provider_mode_label_zh }}</dd></div>
             <div><dt>Provider Priority</dt><dd><code>{{ job.provider_priority }}</code></dd></div>
             <div><dt>输入路径</dt><dd><code>{{ job.input_path }}</code></dd></div>
             <div><dt>输出目录</dt><dd><code>{{ job.output_dir }}</code></dd></div>

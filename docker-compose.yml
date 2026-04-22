@@ -1,13 +1,35 @@
 version: "3.9"
 
+x-webapp-env: &webapp-env
+  WEBAPP_ENV: ${WEBAPP_ENV:-dev}
+  WEBAPP_AUTH_REQUIRED: ${WEBAPP_AUTH_REQUIRED:-0}
+  WEBAPP_ADMIN_PASSWORD: ${WEBAPP_ADMIN_PASSWORD:-}
+  WEBAPP_ENABLE_LOCAL_WORKER: ${WEBAPP_ENABLE_LOCAL_WORKER:-0}
+  WEBAPP_QUEUE_BACKEND: ${WEBAPP_QUEUE_BACKEND:-local}
+  WEBAPP_AUTO_RUN_UPLOAD_OCR: ${WEBAPP_AUTO_RUN_UPLOAD_OCR:-0}
+  WEBAPP_UPLOAD_OCR_METHOD: ${WEBAPP_UPLOAD_OCR_METHOD:-cloud_first}
+  WEBAPP_PROVIDER_PRIORITY: ${WEBAPP_PROVIDER_PRIORITY:-aliyun,tencent}
+  WEBAPP_MAX_UPLOAD_BYTES: ${WEBAPP_MAX_UPLOAD_BYTES:-52428800}
+  WEBAPP_JOB_TIMEOUT_SECONDS: ${WEBAPP_JOB_TIMEOUT_SECONDS:-3600}
+  WEBAPP_OPERATION_TIMEOUT_SECONDS: ${WEBAPP_OPERATION_TIMEOUT_SECONDS:-3600}
+  WEBAPP_WORKER_POLL_SECONDS: ${WEBAPP_WORKER_POLL_SECONDS:-2}
+  WEBAPP_WORKER_HEARTBEAT_STALE_SECONDS: ${WEBAPP_WORKER_HEARTBEAT_STALE_SECONDS:-90}
+  WEBAPP_RUNTIME_ROOT: ${WEBAPP_RUNTIME_ROOT:-data/generated/web}
+  WEBAPP_UPLOADS_ROOT: ${WEBAPP_UPLOADS_ROOT:-data/generated/web/uploads}
+  WEBAPP_JOBS_ROOT: ${WEBAPP_JOBS_ROOT:-data/generated/web/jobs}
+  WEBAPP_RESULTS_ROOT: ${WEBAPP_RESULTS_ROOT:-data/generated/web/results}
+  WEBAPP_LOGS_ROOT: ${WEBAPP_LOGS_ROOT:-data/generated/web/logs}
+  WEBAPP_TEMPLATE_PATH: ${WEBAPP_TEMPLATE_PATH:-data/templates/会计报表.xlsx}
+  WEBAPP_SECRET_PATH: ${WEBAPP_SECRET_PATH:-data/secrets/secret}
+  REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+
 services:
   web:
     build: .
-    env_file:
-      - .env
     command: uvicorn webapp.main:app --host 0.0.0.0 --port 8000
-    ports:
-      - "${WEBAPP_PORT:-8000}:8000"
+    environment: *webapp-env
+    expose:
+      - "8000"
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz').read()"]
@@ -20,13 +42,12 @@ services:
 
   worker:
     build: .
-    env_file:
-      - .env
-    command: >
-      sh -c "if [ \"$WEBAPP_QUEUE_BACKEND\" = \"rq\" ];
-      then python -m webapp.operations run-rq-worker;
-      else python -m webapp.runner run-worker; fi"
+    command: python -m webapp.runner run-service
+    environment: *webapp-env
     restart: unless-stopped
+    depends_on:
+      redis:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "python", "-m", "webapp.runner", "healthcheck"]
       interval: 30s
@@ -39,7 +60,8 @@ services:
   redis:
     image: redis:7-alpine
     restart: unless-stopped
-    profiles: ["rq"]
+    volumes:
+      - redis-data:/data
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 30s
@@ -47,11 +69,31 @@ services:
       retries: 3
       start_period: 5s
 
+  nginx:
+    image: nginx:1.27-alpine
+    depends_on:
+      web:
+        condition: service_healthy
+    ports:
+      - "${NGINX_PORT:-80}:80"
+    restart: unless-stopped
+    volumes:
+      - ./deploy/aliyun/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1/healthz || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
   postgres:
     image: postgres:16-alpine
+    profiles: ["postgres"]
     environment:
       POSTGRES_DB: autofinance
       POSTGRES_USER: autofinance
       POSTGRES_PASSWORD: autofinance
     restart: unless-stopped
-    profiles: ["postgres"]
+
+volumes:
+  redis-data:

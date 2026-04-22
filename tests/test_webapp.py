@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import csv
 import json
+import os
 import shutil
+import subprocess
 import tempfile
 import time
 import unittest
@@ -13,7 +15,9 @@ from fastapi.testclient import TestClient
 from openpyxl import Workbook
 
 from project_paths import REPO_ROOT
+from scripts.deployment_check import main as deployment_check_main
 from webapp.config import WebAppSettings
+from webapp.deployment import run_deployment_preflight
 from webapp.db import (
     get_job,
     get_review_operation,
@@ -69,6 +73,27 @@ class WebAppTests(unittest.TestCase):
         )
         defaults.update(overrides)
         return WebAppSettings(**defaults)
+
+    def _write_secret_file(self, *, aliyun: bool = True, tencent: bool = False, secret_value: str = "demo-secret") -> None:
+        lines: list[str] = []
+        if aliyun:
+            lines.extend(
+                [
+                    "aliyun:",
+                    "  AccessKeyId: demo-id",
+                    f"  AccessKeySecret: {secret_value}",
+                ]
+            )
+        if tencent:
+            lines.extend(
+                [
+                    "",
+                    "tencent:",
+                    "  SecretId: demo-tencent-id",
+                    f"  SecretKey: {secret_value}",
+                ]
+            )
+        self.secret_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
     def _create_minimal_ocr_input(self) -> Path:
         target_doc_root = self.corpus_root / "CASE1"
@@ -526,6 +551,168 @@ class WebAppTests(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 400)
         self.assertIn("不支持的上传文件类型", response.text)
+
+    def test_upload_pdf_missing_ocr_credentials_returns_chinese_error(self):
+        response = self.client.post(
+            "/jobs",
+            data={
+                "mode": "upload_pdf",
+                "display_name": "missing secret",
+                "upload_provider_mode": "aliyun_table",
+            },
+            files={"uploaded_files": ("demo.pdf", b"%PDF-1.4\n%mock\n", "application/pdf")},
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("当前未配置阿里云 OCR 密钥", response.text)
+
+    def test_create_upload_pdf_job_with_selected_provider_and_mock_runtime(self):
+        settings = self.make_settings(auto_run_upload_ocr=True)
+        settings.ensure_directories()
+        init_db(settings)
+        with mock.patch.dict(
+            os.environ,
+            {
+                "WEBAPP_UPLOAD_OCR_MOCK_MODE": "copy_fixture",
+                "WEBAPP_UPLOAD_OCR_MOCK_SOURCE_DIR": str(self.sample_input_dir),
+            },
+            clear=False,
+        ):
+            with TestClient(create_app(settings)) as client:
+                response = client.post(
+                    "/jobs",
+                    data={
+                        "mode": "upload_pdf",
+                        "display_name": "upload demo",
+                        "upload_provider_mode": "tencent_table_v3",
+                    },
+                    files={"uploaded_files": ("demo.pdf", b"%PDF-1.4\n%mock\n", "application/pdf")},
+                    follow_redirects=False,
+                )
+        self.assertEqual(response.status_code, 303)
+        job_id = response.headers["location"].rstrip("/").split("/")[-1]
+        job = get_job(settings, job_id)
+        self.assertIsNotNone(job)
+        self.assertEqual(job.provider_mode, "tencent_table_v3")
+        self.assertEqual(job.status, "queued")
+        self.assertTrue((settings.uploads_root / job_id / "demo.pdf").exists())
+
+    def test_upload_pdf_worker_captures_ocr_and_standardize_logs_separately(self):
+        settings = self.make_settings(auto_run_upload_ocr=True)
+        settings.ensure_directories()
+        init_db(settings)
+        with mock.patch.dict(
+            os.environ,
+            {
+                "WEBAPP_UPLOAD_OCR_MOCK_MODE": "copy_fixture",
+                "WEBAPP_UPLOAD_OCR_MOCK_SOURCE_DIR": str(self.sample_input_dir),
+            },
+            clear=False,
+        ):
+            with TestClient(create_app(settings)) as client:
+                response = client.post(
+                    "/jobs",
+                    data={
+                        "mode": "upload_pdf",
+                        "display_name": "upload run",
+                        "upload_provider_mode": "cloud_first",
+                    },
+                    files={"uploaded_files": ("demo.pdf", b"%PDF-1.4\n%mock\n", "application/pdf")},
+                    follow_redirects=False,
+                )
+                self.assertEqual(response.status_code, 303)
+                job_id = response.headers["location"].rstrip("/").split("/")[-1]
+                with mock.patch("webapp.runner._run_subprocess", side_effect=self._fake_subprocess(profile="clean_success")):
+                    run_worker_once(settings)
+        job = get_job(settings, job_id)
+        self.assertIsNotNone(job)
+        self.assertEqual(job.status, "succeeded")
+        ocr_stdout = settings.logs_root / job_id / "ocr_stdout.txt"
+        standardize_stdout = settings.logs_root / job_id / "standardize_stdout.txt"
+        self.assertTrue(ocr_stdout.exists())
+        self.assertTrue(standardize_stdout.exists())
+        ocr_stage_summary = json.loads((settings.results_root / job_id / "ocr_stage_summary.json").read_text(encoding="utf-8"))
+        self.assertTrue(ocr_stage_summary["used_mock"])
+        self.assertFalse(ocr_stage_summary["cloud_ocr_executed"])
+        log_bundle = json.loads((settings.results_root / job_id / "job_log_bundle.json").read_text(encoding="utf-8"))
+        log_names = {item["name"] for item in log_bundle["log_files"]}
+        self.assertIn("ocr_stdout.txt", log_names)
+        self.assertIn("standardize_stdout.txt", log_names)
+
+    def test_deployment_preflight_success_and_script_writes_summary(self):
+        self._write_secret_file(aliyun=True)
+        settings = self.make_settings(
+            env_mode="prod",
+            auth_required=True,
+            admin_password="demo-pass",
+            upload_ocr_method="aliyun_table",
+        )
+        settings.ensure_directories()
+        summary = run_deployment_preflight(settings, deployment_profile="aliyun", min_free_bytes=1)
+        self.assertTrue(summary["pass"])
+
+        output_path = settings.runtime_root / "deployment_check_summary.json"
+        with mock.patch.dict(
+            os.environ,
+            {
+                "WEBAPP_ENV": "prod",
+                "WEBAPP_AUTH_REQUIRED": "1",
+                "WEBAPP_ADMIN_PASSWORD": "demo-pass",
+                "WEBAPP_QUEUE_BACKEND": "local",
+                "WEBAPP_UPLOAD_OCR_METHOD": "aliyun_table",
+                "WEBAPP_RUNTIME_ROOT": str(settings.runtime_root),
+                "WEBAPP_UPLOADS_ROOT": str(settings.uploads_root),
+                "WEBAPP_JOBS_ROOT": str(settings.jobs_root),
+                "WEBAPP_RESULTS_ROOT": str(settings.results_root),
+                "WEBAPP_LOGS_ROOT": str(settings.logs_root),
+                "WEBAPP_DB_PATH": str(settings.db_path),
+                "WEBAPP_TEMPLATE_PATH": str(settings.template_path),
+                "WEBAPP_SECRET_PATH": str(settings.secret_path),
+            },
+            clear=False,
+        ):
+            exit_code = deployment_check_main(["--profile", "aliyun", "--output", str(output_path), "--min-free-mb", "1"])
+        self.assertEqual(exit_code, 0)
+        self.assertTrue(output_path.exists())
+
+    def test_deployment_preflight_failure_when_prod_missing_password(self):
+        settings = self.make_settings(
+            env_mode="prod",
+            auth_required=True,
+            admin_password="",
+            upload_ocr_method="aliyun_table",
+        )
+        summary = run_deployment_preflight(settings, deployment_profile="aliyun", min_free_bytes=1)
+        self.assertFalse(summary["pass"])
+        error_text = "\n".join(summary["errors"])
+        self.assertIn("WEBAPP_ADMIN_PASSWORD", error_text)
+
+    def test_system_status_api_does_not_expose_secret_values(self):
+        self._write_secret_file(aliyun=True, secret_value="TOP_SECRET_STAGE11")
+        response = self.client.get("/api/system-status")
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn("TOP_SECRET_STAGE11", response.text)
+        self.assertNotIn("demo-id", response.text)
+
+    def test_docker_compose_config_validates_when_available(self):
+        if shutil.which("docker") is None:
+            self.skipTest("docker not installed")
+        compose_version = subprocess.run(
+            ["docker", "compose", "version"],
+            cwd=str(REPO_ROOT),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if compose_version.returncode != 0:
+            self.skipTest("docker compose plugin unavailable")
+        result = subprocess.run(
+            ["docker", "compose", "-f", "docker-compose.yml", "-f", "docker-compose.aliyun.yml", "config"],
+            cwd=str(REPO_ROOT),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, msg=result.stderr or result.stdout)
 
     def test_succeeded_with_warnings_job_quality_classification(self):
         job_id = self._create_job("warning job")

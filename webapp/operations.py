@@ -10,6 +10,7 @@ from typing import Any, Iterable, Sequence
 from project_paths import REPO_ROOT
 
 from .config import WebAppSettings, load_settings
+from .deployment import write_worker_heartbeat
 from .db import (
     claim_next_queued_review_operation,
     create_review_operation_if_unlocked,
@@ -598,6 +599,22 @@ def process_operation_from_queue(operation_id: str) -> str:
     return operation_id
 
 
+def run_rq_worker_forever(settings: WebAppSettings) -> None:
+    try:
+        from redis import Redis
+        from rq import Connection, Worker
+    except ImportError as exc:  # pragma: no cover
+        raise RuntimeError("当前环境未安装 rq/redis，无法启动 RQ worker。") from exc
+
+    if not settings.redis_url.strip():
+        raise RuntimeError("REDIS_URL 为空，无法启动 RQ worker。")
+    connection = Redis.from_url(settings.redis_url)
+    write_worker_heartbeat(settings, source="run_rq_worker_forever", note="rq worker started")
+    with Connection(connection):
+        worker = Worker(["review_operations"])
+        worker.work()
+
+
 def get_latest_review_operation_summary(job) -> dict[str, Any]:
     summary_path = get_review_dir(job) / "review_operation_summary.json"
     if summary_path.exists():
@@ -672,18 +689,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         execute_review_operation(settings, args.operation_id, already_claimed=False)
         return 0
     if args.command == "run-rq-worker":
-        try:
-            from redis import Redis
-            from rq import Connection, Worker
-        except ImportError as exc:  # pragma: no cover
-            raise RuntimeError("当前环境未安装 rq/redis，无法启动 RQ worker。") from exc
-
-        if not settings.redis_url.strip():
-            raise RuntimeError("REDIS_URL 为空，无法启动 RQ worker。")
-        connection = Redis.from_url(settings.redis_url)
-        with Connection(connection):
-            worker = Worker(["review_operations"])
-            worker.work()
+        run_rq_worker_forever(settings)
         return 0
     parser.error(f"Unsupported command: {args.command}")
     return 2

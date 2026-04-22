@@ -23,9 +23,10 @@
                     <th>Job ID</th>
                     <th>名称</th>
                     <th>状态</th>
+                    <th>阶段</th>
                     <th>创建时间</th>
                     <th>更新时间</th>
-                    <th>Provider Mode</th>
+                    <th>OCR 方式</th>
                     <th>进度摘要</th>
                     <th>详情</th>
                 </tr>
@@ -36,9 +37,10 @@
                     <td><code>{{ job.job_id }}</code></td>
                     <td>{{ job.display_name }}</td>
                     <td><span class="status status--{{ job.status }}">{{ describe_job_status(job.status) }}</span></td>
+                    <td>{{ job_stage_label_zh(job) }}</td>
                     <td>{{ job.created_at }}</td>
                     <td>{{ job.updated_at }}</td>
-                    <td>{{ job.provider_mode }}</td>
+                    <td>{{ provider_mode_label_zh(job.provider_mode) }}</td>
                     <td>{{ job.progress_summary }}</td>
                     <td><a href="/jobs/{{ job.job_id }}">查看</a></td>
                 </tr>

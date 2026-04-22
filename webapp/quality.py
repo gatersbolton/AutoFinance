@@ -88,6 +88,11 @@ def translate_job_issue(
             "当前环境缺少云 OCR 凭据，无法处理上传文件。",
             "请在部署环境中配置云 OCR 凭据，或改用已有 OCR 输出目录创建任务。",
         )
+    if "ocr 子进程执行失败" in text.lower() or ("ocr" in lower and exit_code not in (None, 0)):
+        return (
+            "OCR 阶段执行失败。",
+            "请先下载 OCR 日志，核对云 OCR 密钥、PDF 文件和网络连通性后再重试。",
+        )
     if "标准化子进程执行失败" in text or "standardize" in lower and exit_code not in (None, 0):
         return (
             "标准化命令执行失败。",
