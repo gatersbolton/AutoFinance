@@ -23,9 +23,14 @@ x-webapp-env: &webapp-env
   WEBAPP_SECRET_PATH: ${WEBAPP_SECRET_PATH:-data/secrets/secret}
   REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
 
+x-app-build: &app-build
+  context: .
+  args:
+    PIP_INDEX_URL: ${PIP_INDEX_URL:-https://mirrors.aliyun.com/pypi/simple}
+
 services:
   web:
-    build: .
+    build: *app-build
     command: uvicorn webapp.main:app --host 0.0.0.0 --port 8000
     environment: *webapp-env
     expose:
@@ -41,7 +46,7 @@ services:
       - ./data:/app/data
 
   worker:
-    build: .
+    build: *app-build
     command: python -m webapp.runner run-service
     environment: *webapp-env
     restart: unless-stopped

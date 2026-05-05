@@ -70,7 +70,10 @@ WEBAPP_QUEUE_BACKEND=local
 WEBAPP_AUTO_RUN_UPLOAD_OCR=1
 WEBAPP_UPLOAD_OCR_METHOD=cloud_first
 WEBAPP_PROVIDER_PRIORITY=aliyun,tencent
+PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple
 ```
+
+`PIP_INDEX_URL` is used only while building the Docker image. Keep the Alibaba Cloud mirror on small mainland China servers; override it only if your server has reliable access to another PyPI index.
 
 ## 5. Configure OCR credentials
 
@@ -228,7 +231,22 @@ Generated file:
 - OCR smoke/mock mode exists only for testing and smoke runs.
 - PaddleOCR remains pilot-only and is not part of the deployment default.
 
-## 14. Recommended next step after MVP
+## 14. Build troubleshooting
+
+If Docker build fails at `pip install` with `Could not find a version that satisfies the requirement ...`, first verify the active pip index can see the package:
+
+```bash
+docker run --rm python:3.10-slim python -m pip index versions tencentcloud-sdk-python-ocr -i https://mirrors.aliyun.com/pypi/simple
+```
+
+Then rebuild without stale cache:
+
+```bash
+docker compose --env-file .env.aliyun -f docker-compose.yml -f docker-compose.aliyun.yml build --no-cache web worker
+docker compose --env-file .env.aliyun -f docker-compose.yml -f docker-compose.aliyun.yml up -d
+```
+
+## 15. Recommended next step after MVP
 
 After the demo deployment is stable, the next practical step is:
 

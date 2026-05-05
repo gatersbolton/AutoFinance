@@ -211,23 +211,23 @@ class TencentOCRProvider(OCRProvider):
 
         credential_module = import_optional_module(
             "tencentcloud.common.credential",
-            "tencentcloud-sdk-python",
+            "tencentcloud-sdk-python-common",
         )
         client_profile_module = import_optional_module(
             "tencentcloud.common.profile.client_profile",
-            "tencentcloud-sdk-python",
+            "tencentcloud-sdk-python-common",
         )
         http_profile_module = import_optional_module(
             "tencentcloud.common.profile.http_profile",
-            "tencentcloud-sdk-python",
+            "tencentcloud-sdk-python-common",
         )
         ocr_client_module = import_optional_module(
             "tencentcloud.ocr.v20181119.ocr_client",
-            "tencentcloud-sdk-python",
+            "tencentcloud-sdk-python-ocr",
         )
         self._models_module = import_optional_module(
             "tencentcloud.ocr.v20181119.models",
-            "tencentcloud-sdk-python",
+            "tencentcloud-sdk-python-ocr",
         )
 
         credential = credential_module.Credential(

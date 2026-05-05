@@ -1,7 +1,12 @@
 FROM python:3.10-slim
 
+ARG PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple
+
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
+ENV PIP_DISABLE_PIP_VERSION_CHECK=1
+ENV PIP_DEFAULT_TIMEOUT=120
+ENV PIP_INDEX_URL=${PIP_INDEX_URL}
 ENV WEBAPP_ENV=prod
 ENV WEBAPP_ENABLE_LOCAL_WORKER=0
 ENV WEBAPP_QUEUE_BACKEND=local
@@ -11,7 +16,8 @@ ENV WEBAPP_AUTO_RUN_UPLOAD_OCR=1
 WORKDIR /app
 
 COPY requirements.txt /app/requirements.txt
-RUN pip install --no-cache-dir -r /app/requirements.txt
+RUN python -m pip install --no-cache-dir --upgrade pip setuptools wheel \
+    && python -m pip install --no-cache-dir -r /app/requirements.txt
 
 COPY . /app
 
