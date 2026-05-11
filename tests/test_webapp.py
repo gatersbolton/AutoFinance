@@ -52,6 +52,11 @@ from webapp.simple_flow import (
     raw_step_summary_path,
     source_preview_rotation_degrees,
 )
+from webapp.unified_review import (
+    format_metric_number,
+    parse_metric_number_input,
+    unified_review_dir,
+)
 
 
 class WebAppTests(unittest.TestCase):
@@ -176,7 +181,15 @@ class WebAppTests(unittest.TestCase):
             for row in rows:
                 writer.writerow(row)
 
-    def _create_raw_metrics_fixture(self, *, metric_name: str = "往来款", evidence_path: Path | None = None, bbox_json: str = '[{"x":1,"y":2},{"x":3,"y":4}]') -> Path:
+    def _create_raw_metrics_fixture(
+        self,
+        *,
+        metric_name: str = "往来款",
+        metric_value: str = "100",
+        evidence_path: Path | None = None,
+        bbox_json: str = '[{"x":1,"y":2},{"x":3,"y":4}]',
+        confidence: str = "",
+    ) -> Path:
         RAW_METRICS_GENERATED_ROOT.mkdir(parents=True, exist_ok=True)
         tempdir = tempfile.TemporaryDirectory(dir=RAW_METRICS_GENERATED_ROOT)
         self.addCleanup(tempdir.cleanup)
@@ -191,7 +204,7 @@ class WebAppTests(unittest.TestCase):
                     "当前条目日期": "2022-12-31",
                     "公司名": "AAA有限公司",
                     "指标名": metric_name,
-                    "指标数值": "100",
+                    "指标数值": metric_value,
                 }
             ],
             ["填表日期", "当前条目日期", "公司名", "指标名", "指标数值"],
@@ -208,9 +221,11 @@ class WebAppTests(unittest.TestCase):
                     "source_file": "fixture.json",
                     "provider": "aliyun_table",
                     "doc_id": "CASE1",
+                    "value_type": "amount",
+                    "confidence": confidence,
                 }
             ],
-            ["source_cell_ref", "page_no", "bbox_json", "evidence_path", "source_file", "provider", "doc_id"],
+            ["source_cell_ref", "page_no", "bbox_json", "evidence_path", "source_file", "provider", "doc_id", "value_type", "confidence"],
         )
         self.addCleanup(lambda: shutil.rmtree(STANDARD_METRICS_GENERATED_ROOT / Path(tempdir.name).name, ignore_errors=True))
         return raw_path
@@ -375,6 +390,22 @@ class WebAppTests(unittest.TestCase):
     def _attach_raw_summary_to_job(self, job_id: str, raw_path: Path) -> None:
         job = get_job(self.settings, job_id)
         self.assertIsNotNone(job)
+        payload = {
+            "pass": True,
+            "run_id": raw_path.parent.name,
+            "doc_id": raw_path.parent.parent.name,
+            "output_dir": str(raw_path.parent),
+            "raw_metrics_csv": str(raw_path),
+            "raw_metrics_xlsx": str(raw_path.parent / "raw_metrics.xlsx"),
+            "raw_metrics_detailed_csv": str(raw_path.parent / "raw_metrics_detailed.csv"),
+            "output_files": [str(raw_path), str(raw_path.parent / "raw_metrics_detailed.csv")],
+        }
+        raw_step_summary_path(job).parent.mkdir(parents=True, exist_ok=True)
+        raw_step_summary_path(job).write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    def _attach_raw_summary_to_document(self, doc_id: str, raw_path: Path) -> None:
+        document = load_document(self.settings, doc_id, refresh=False)
+        job = document_to_job(self.settings, document)
         payload = {
             "pass": True,
             "run_id": raw_path.parent.name,
@@ -1055,6 +1086,136 @@ class WebAppTests(unittest.TestCase):
         self.assertEqual(actions[-1]["selected_code"], "ZT_002")
         self.assertEqual(actions[-1]["selected_name"], "短期借款")
         self.assertTrue(str(actions_path.resolve()).startswith(str(self.runtime_root.resolve())))
+
+    def test_unified_proofread_page_loads_combined_table_and_saves_edits(self):
+        job_id = self._create_job("unified review")
+        raw_path = self._create_raw_metrics_fixture(metric_name="货币资金", metric_value="12345.67", confidence="0.92")
+        self.client.post(
+            f"/jobs/{job_id}/standard-metrics/run",
+            data={"raw_metrics_path": str(raw_path)},
+            follow_redirects=False,
+        )
+        response = self.client.get(f"/jobs/{job_id}/proofread")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("data-unified-proofread-workbench", response.text)
+        self.assertIn("source-panel", response.text)
+        self.assertIn("sheet-panel", response.text)
+        for text in ("原始术语", "指标数值", "标准术语", "状态"):
+            self.assertIn(text, response.text)
+        self.assertIn("12,345.67", response.text)
+        self.assertIn('class="confidence-switch"', response.text)
+        self.assertIn("data-confidence-text hidden", response.text)
+        self.assertIn("阿里云 92%", response.text)
+        self.assertNotIn(">通过</button>", response.text)
+        self.assertNotIn(">跳过</button>", response.text)
+        self.assertNotIn(">修改映射</button>", response.text)
+        self.assertNotIn("data-sheet-tabs", response.text)
+        self.assertNotIn("没有找到标准术语", response.text)
+
+        self.assertEqual(format_metric_number("396149420.62"), "396,149,420.62")
+        self.assertEqual(parse_metric_number_input("396,149,420.62")["value"], "396149420.62")
+
+        save_response = self.client.post(
+            f"/jobs/{job_id}/proofread/save",
+            json={
+                "reviewer_name": "auditor",
+                "edits": [
+                    {
+                        "item_id": "unirev_000001",
+                        "edit_type": "value_change",
+                        "previous_value": "12345.67",
+                        "new_value": "12,346.67",
+                    },
+                    {
+                        "item_id": "unirev_000001",
+                        "edit_type": "mapping_change",
+                        "previous_code": "ZT_001",
+                        "previous_name": "货币资金",
+                        "new_code": "ZT_002",
+                        "new_name": "短期借款",
+                    },
+                ],
+            },
+        )
+        self.assertEqual(save_response.status_code, 200)
+        job = get_job(self.settings, job_id)
+        action_dir = unified_review_dir(job)
+        actions_path = action_dir / "unified_review_actions.json"
+        csv_path = action_dir / "unified_review_actions.csv"
+        summary_path = action_dir / "unified_review_summary.json"
+        self.assertTrue(actions_path.exists())
+        self.assertTrue(csv_path.exists())
+        self.assertTrue(summary_path.exists())
+        actions = json.loads(actions_path.read_text(encoding="utf-8"))
+        self.assertEqual([item["edit_type"] for item in actions[-2:]], ["value_change", "mapping_change"])
+        self.assertEqual(actions[-2]["new_value"], "12346.67")
+        self.assertEqual(actions[-1]["new_code"], "ZT_002")
+        self.assertEqual(actions[-1]["new_name"], "短期借款")
+        saved_page = self.client.get(f"/jobs/{job_id}/proofread")
+        self.assertEqual(saved_page.status_code, 200)
+        self.assertIn("数值已修改", saved_page.text)
+        self.assertIn("术语已修改", saved_page.text)
+        self.assertNotIn(">已修改</span>", saved_page.text)
+        self.assertIn('data-value-changed="true"', saved_page.text)
+        self.assertIn('data-mapping-changed="true"', saved_page.text)
+        self.assertIn('data-original-value="12345.67"', saved_page.text)
+        self.assertIn('data-saved-value="12346.67"', saved_page.text)
+        self.assertIn('data-original-code="ZT_001"', saved_page.text)
+        self.assertIn('data-saved-code="ZT_002"', saved_page.text)
+        self.assertTrue((raw_review_dir(job) / "raw_review_actions.json").exists())
+        self.assertTrue((mapping_review_dir(job) / "mapping_review_actions.json").exists())
+        self.assertTrue(str(actions_path.resolve()).startswith(str(self.runtime_root.resolve())))
+        self.assertFalse((REPO_ROOT / "unified_review_actions.csv").exists())
+
+    def test_unified_proofread_rejects_invalid_numeric_edit_and_documents_link_to_it(self):
+        job_id = self._create_job("unified invalid")
+        raw_path = self._create_raw_metrics_fixture(metric_name="货币资金", metric_value="100")
+        self.client.post(
+            f"/jobs/{job_id}/standard-metrics/run",
+            data={"raw_metrics_path": str(raw_path)},
+            follow_redirects=False,
+        )
+        invalid = self.client.post(
+            f"/jobs/{job_id}/proofread/save",
+            json={"edits": [{"item_id": "unirev_000001", "edit_type": "value_change", "new_value": "abc"}]},
+        )
+        self.assertEqual(invalid.status_code, 400)
+        self.assertIn("数值格式有误", invalid.text)
+
+        doc_id = self._upload_library_pdf()
+        update_document_status(self.settings, doc_id, ocr_status=STATUS_COMPLETED, raw_metrics_status=STATUS_COMPLETED)
+        self._attach_raw_summary_to_document(doc_id, raw_path)
+        continue_response = self.client.get(f"/documents/{doc_id}/continue")
+        self.assertEqual(continue_response.status_code, 200)
+        self.assertIn(f'href="/documents/{doc_id}/proofread"', continue_response.text)
+
+    def test_unified_proofread_source_attrs_confidence_missing_and_autocomplete_bug_contract(self):
+        job_id = self._create_job("unified attrs")
+        raw_path = self._create_raw_metrics_fixture(metric_name="货币资金", metric_value="396149420.62", bbox_json="")
+        self.client.post(
+            f"/jobs/{job_id}/standard-metrics/run",
+            data={"raw_metrics_path": str(raw_path)},
+            follow_redirects=False,
+        )
+        response = self.client.get(f"/jobs/{job_id}/proofread")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("396,149,420.62", response.text)
+        self.assertIn("未记录", response.text)
+        self.assertIn("data-term-bbox=", response.text)
+        self.assertIn("data-value-bbox=", response.text)
+        self.assertIn("当前项目未记录位置", response.text)
+
+        script = (REPO_ROOT / "webapp" / "static" / "app.js").read_text(encoding="utf-8")
+        self.assertIn('if (!query.trim())', script)
+        self.assertIn('event.key === "Escape"', script)
+        self.assertIn('input.addEventListener("blur"', script)
+        self.assertIn('!event.target.closest(".standard-term-picker")', script)
+        self.assertIn("closeAutocompleteResults(root);", script)
+        self.assertIn('statusBadge("value_changed", "数值已修改")', script)
+        self.assertIn('statusBadge("term_changed", "术语已修改")', script)
+        self.assertIn("valueInput.dataset.savedValue", script)
+        self.assertNotIn('setAttribute("data-original-value"', script)
+        self.assertNotIn("search();\n    });\n    input.addEventListener(\"click\"", script)
 
     def test_standard_term_search_supports_code_name_and_pinyin_initials(self):
         for query in ("2", "002", "ZT_002", "短期", "借款", "dqjk"):

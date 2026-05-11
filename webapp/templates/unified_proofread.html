@@ -1,0 +1,189 @@
+{% extends "base.html" %}
+{% block title %}统一校对 | {{ settings.app_name }}{% endblock %}
+{% block content %}
+{% set base_url = review_base_url|default(url_prefix ~ '/jobs/' ~ job.job_id) %}
+{% set return_url = review_return_url|default(url_prefix ~ '/jobs/' ~ job.job_id) %}
+{% set save_endpoint = save_url|default(base_url ~ '/proofread/save') %}
+<section class="page-heading">
+    <div>
+        <p class="eyebrow">统一校对</p>
+        <h1>{{ job.display_name }}</h1>
+    </div>
+    <div class="actions">
+        <a class="button button--secondary" href="{{ return_url }}">返回结果</a>
+    </div>
+</section>
+
+{% if not items %}
+<section class="card">
+    <h2>暂无可校对数据</h2>
+    <p>{{ sheet.message or "请先提取原始数据。" }}</p>
+</section>
+{% else %}
+<section
+    class="ocr-workbench unified-proofread"
+    data-unified-proofread-workbench
+    data-save-url="{{ save_endpoint }}"
+    data-highlight-missing-text="当前项目未记录位置"
+    data-highlight-found-text="已高亮选中项目出处"
+>
+    <article class="card source-panel">
+        <div class="panel-heading">
+            <div class="source-title-block">
+                <h2>原始文件</h2>
+                <p class="todo-note">第 <span data-current-page>{{ item.get("source_page_no", "未记录") or "未记录" }}</span> 页</p>
+            </div>
+            {% if page_image_url %}
+            <div class="source-zoom-card source-zoom-card--header" data-source-zoom hidden>
+                <div class="source-zoom-window" data-source-zoom-window>
+                    <div class="source-zoom-highlight" data-source-zoom-highlight></div>
+                </div>
+            </div>
+            {% endif %}
+        </div>
+        {% if page_image_url %}
+        <div class="source-image-frame">
+            <img class="source-page-image" src="{{ page_image_url }}" alt="原始文件当前页" data-source-page-image>
+            <div class="source-highlight" data-source-highlight></div>
+        </div>
+        {% else %}
+        <p>未记录可预览文件。</p>
+        {% endif %}
+        <p class="selection-summary" data-highlight-status>
+            {% if item.get("source_bbox_json") %}点击右侧单元格可高亮出处。{% else %}当前项目未记录位置{% endif %}
+        </p>
+    </article>
+
+    <article class="card sheet-panel unified-sheet-panel">
+        <div class="unified-toolbar">
+            <label class="unified-search">
+                <span>搜索</span>
+                <input type="search" placeholder="输入术语、日期、金额或标准编码" data-unified-table-search>
+            </label>
+            <button class="confidence-switch" type="button" role="switch" aria-checked="false" aria-label="显示置信度" data-confidence-toggle>
+                <span class="confidence-switch__track">
+                    <span class="confidence-switch__knob"></span>
+                </span>
+                <span class="confidence-switch__label" data-confidence-toggle-label>显示置信度</span>
+            </button>
+            <button class="button button--primary" type="button" data-unified-save>保存修改</button>
+            <span class="save-status" data-unified-save-status></span>
+        </div>
+        <p class="todo-note unified-confidence-summary">
+            OCR置信度：已记录 {{ sheet.confidence_available_total }} 项，未记录 {{ sheet.confidence_missing_total }} 项
+        </p>
+
+        <div class="spreadsheet-wrap unified-spreadsheet-wrap">
+            <table class="spreadsheet-table unified-review-table" data-unified-table>
+                <thead>
+                    <tr>
+                        <th class="row-heading">原始术语</th>
+                        <th>当前条目日期</th>
+                        <th>指标数值</th>
+                        <th>标准术语</th>
+                        <th>状态</th>
+                        <th class="optional-column">来源页码</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for row in items %}
+                    {% if row.starts_section %}
+                    <tr class="table-section-row" data-section-header data-section-key="{{ row.section_key }}">
+                        <th colspan="6">{{ row.section_label }}</th>
+                    </tr>
+                    {% endif %}
+                    <tr
+                        class="unified-row {% if row.selected %}unified-row--selected{% endif %}"
+                        data-unified-row
+                        data-review-item-id="{{ row.review_item_id }}"
+                        data-raw-metric-id="{{ row.raw_metric_id }}"
+                        data-page-no="{{ row.source_page_no }}"
+                        data-page-image-url="{% if row.source_pdf_path %}{{ base_url }}/proofread/page-image/{{ row.review_item_id }}{% endif %}"
+                        data-bbox='{{ row.source_term_bbox_json | e }}'
+                        data-term-bbox='{{ row.source_term_bbox_json | e }}'
+                        data-value-bbox='{{ row.source_value_bbox_json | e }}'
+                        data-bbox-state="{{ row.bbox_state }}"
+                        data-original-metric-name="{{ row.original_metric_name }}"
+                        data-current-mapping-label="{{ row.current_mapping_label }}"
+                        data-section-key="{{ row.section_key }}"
+                        data-base-status-code="{{ row.base_status }}"
+                        data-base-status-label="{{ row.base_status_label }}"
+                        data-value-changed="{{ 'true' if row.value_changed else 'false' }}"
+                        data-mapping-changed="{{ 'true' if row.mapping_changed else 'false' }}"
+                    >
+                        <th class="row-heading unified-term-cell" data-unified-term-cell>
+                            <span>{{ row.original_metric_name or "未记录" }}</span>
+                            <span class="confidence-inline" data-confidence-text hidden>{{ row.confidence_display }}</span>
+                        </th>
+                        <td>{{ row.item_date or "未记录" }}</td>
+                        <td
+                            class="metric-value-cell {% if row.value_changed %}metric-cell--dirty{% endif %}"
+                            data-value-cell
+                            data-page-no="{{ row.source_page_no }}"
+                            data-bbox='{{ row.source_value_bbox_json | e }}'
+                            data-missing-highlight-message="当前数值未记录位置"
+                        >
+                            <div class="cell-edit-wrap">
+                                <input
+                                    class="metric-value-input"
+                                    type="text"
+                                    value="{{ row.display_value }}"
+                                    data-metric-value-input
+                                    data-original-value="{{ row.original_value_normalized }}"
+                                    data-current-value="{{ row.current_value }}"
+                                    data-saved-value="{{ row.current_value }}"
+                                    data-value-type="{{ row.value_type }}"
+                                    autocomplete="off"
+                                >
+                                <button class="cell-reset" type="button" data-reset-value hidden>重置</button>
+                            </div>
+                            <span class="cell-error" data-value-error hidden>数值格式有误</span>
+                        </td>
+                        <td class="standard-term-cell">
+                            <div
+                                class="standard-term-picker unified-standard-term-picker {% if row.mapping_changed %}mapping-row--dirty{% endif %}"
+                                data-mapping-picker
+                                data-original-code="{{ row.original_code }}"
+                                data-original-name="{{ row.original_name }}"
+                                data-current-code="{{ row.current_code }}"
+                                data-current-name="{{ row.current_name }}"
+                                data-saved-code="{{ row.current_code }}"
+                                data-saved-name="{{ row.current_name }}"
+                            >
+                                <div class="cell-edit-wrap">
+                                    <input
+                                        class="standard-term-input"
+                                        type="text"
+                                        value="{{ row.current_mapping_label }}"
+                                        placeholder="搜索标准术语，如：短期、借款、2、dqjk"
+                                        autocomplete="off"
+                                        data-standard-term-input
+                                    >
+                                    <button class="cell-reset" type="button" data-reset-mapping hidden>重置</button>
+                                </div>
+                                <input type="hidden" value="{{ row.current_code }}" data-selected-code>
+                                <input type="hidden" value="{{ row.current_name }}" data-selected-name>
+                                <div class="autocomplete-results" data-autocomplete-results hidden></div>
+                            </div>
+                        </td>
+                        <td data-status-cell>
+                            <div class="status-badge-list" data-status-badges>
+                                {% for badge in row.status_badges %}
+                                <span class="status status--mapping status--mapping-{{ badge.code }}" data-status-badge>{{ badge.label }}</span>
+                                {% endfor %}
+                            </div>
+                        </td>
+                        <td class="optional-column">{{ row.source_page_no or "未记录" }}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+
+        <div class="selection-summary" data-selection-summary>
+            当前选中：{{ item.original_metric_name }} / {{ item.current_mapping_label or "未映射" }}
+        </div>
+    </article>
+</section>
+{% endif %}
+{% endblock %}

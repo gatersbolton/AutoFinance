@@ -70,6 +70,8 @@ def load_simple_flow_state(job: JobRecord) -> dict[str, Any]:
     raw_summary = load_json(raw_step_summary_path(job))
     standard_summary = load_json(standard_step_summary_path(job))
     raw_metrics_csv = _portable_summary_file(raw_summary.get("raw_metrics_csv", ""), RAW_METRICS_GENERATED_ROOT / job.job_id, "raw_metrics.csv")
+    if raw_metrics_csv is None and standard_summary.get("input_path"):
+        raw_metrics_csv = _portable_summary_file(standard_summary.get("input_path", ""), RAW_METRICS_GENERATED_ROOT / job.job_id, "raw_metrics.csv")
     raw_metrics_xlsx = _portable_summary_file(raw_summary.get("raw_metrics_xlsx", ""), RAW_METRICS_GENERATED_ROOT / job.job_id, "raw_metrics.xlsx")
     standardized_metrics_csv = _portable_summary_file(
         standard_summary.get("standardized_metrics_csv", ""),
@@ -187,7 +189,7 @@ def run_standard_metrics_step(settings: WebAppSettings, job: JobRecord, *, raw_m
     return payload
 
 
-def load_raw_review_items(job: JobRecord) -> list[dict[str, Any]]:
+def load_raw_review_items(job: JobRecord, *, apply_actions: bool = True) -> list[dict[str, Any]]:
     state = load_simple_flow_state(job)
     raw_csv = Path(str(state.get("raw_metrics_csv", "") or ""))
     if not raw_csv.exists():
@@ -231,9 +233,11 @@ def load_raw_review_items(job: JobRecord) -> list[dict[str, Any]]:
                 "header_path": detailed.get("header_path", ""),
                 "period_role_raw": detailed.get("period_role_raw", ""),
                 "value_raw": detailed.get("value_raw", ""),
+                "value_type": detailed.get("value_type", ""),
+                "confidence": detailed.get("confidence", ""),
             }
         )
-    return _apply_raw_review_table_edits(job, items)
+    return _apply_raw_review_table_edits(job, items) if apply_actions else items
 
 
 def _apply_raw_review_table_edits(job: JobRecord, items: list[dict[str, Any]]) -> list[dict[str, Any]]:

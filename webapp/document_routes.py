@@ -5,7 +5,7 @@ from typing import Annotated
 from urllib.parse import urlencode
 
 from fastapi import APIRouter, Depends, File, HTTPException, Request, Response, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 
 from standard_map.registry import load_standard_registry
 
@@ -38,6 +38,7 @@ from .simple_flow import (
     save_raw_review_action,
     source_preview_rotation_degrees,
 )
+from .unified_review import build_unified_review_sheet, load_unified_review_items, save_unified_review_actions
 
 
 document_router = APIRouter()
@@ -182,6 +183,103 @@ def download_document_artifact(request: Request, doc_id: str, slug: str) -> File
     if not artifact.exists or not path.exists():
         raise HTTPException(status_code=404, detail="文件未生成。")
     return FileResponse(path=str(path), filename=artifact.download_name)
+
+
+@document_router.get("/documents/{doc_id}/proofread", response_class=HTMLResponse, dependencies=[Depends(password_gate)])
+def document_unified_proofread_page(request: Request, doc_id: str) -> HTMLResponse:
+    settings = get_settings(request)
+    document = load_document(settings, doc_id)
+    job = document_to_job(settings, document)
+    sheet = build_unified_review_sheet(job)
+    item = sheet.get("selected_item")
+    page_image_url = (
+        _app_url(request, f"/documents/{doc_id}/proofread/page-image/{item.get('review_item_id')}")
+        if item and item.get("source_pdf_path")
+        else ""
+    )
+    return _render(
+        request,
+        "unified_proofread.html",
+        {
+            "document": document,
+            "job": job,
+            "sheet": sheet,
+            "items": sheet["items"],
+            "item": item,
+            "page_image_url": page_image_url,
+            "review_base_url": _app_url(request, f"/documents/{doc_id}"),
+            "review_return_url": _app_url(request, f"/documents/{doc_id}/continue"),
+            "save_url": _app_url(request, f"/documents/{doc_id}/proofread/save"),
+        },
+    )
+
+
+@document_router.get("/documents/{doc_id}/proofread/items/{item_id}", response_class=HTMLResponse, dependencies=[Depends(password_gate)])
+def document_unified_proofread_item_page(request: Request, doc_id: str, item_id: str) -> HTMLResponse:
+    settings = get_settings(request)
+    document = load_document(settings, doc_id)
+    job = document_to_job(settings, document)
+    sheet = build_unified_review_sheet(job, item_id)
+    item = sheet.get("selected_item")
+    if item is None or str(item.get("review_item_id", "")) != item_id:
+        raise HTTPException(status_code=404, detail="统一校对项不存在。")
+    page_image_url = _app_url(request, f"/documents/{doc_id}/proofread/page-image/{item_id}") if item.get("source_pdf_path") else ""
+    return _render(
+        request,
+        "unified_proofread.html",
+        {
+            "document": document,
+            "job": job,
+            "sheet": sheet,
+            "items": sheet["items"],
+            "item": item,
+            "page_image_url": page_image_url,
+            "review_base_url": _app_url(request, f"/documents/{doc_id}"),
+            "review_return_url": _app_url(request, f"/documents/{doc_id}/continue"),
+            "save_url": _app_url(request, f"/documents/{doc_id}/proofread/save"),
+        },
+    )
+
+
+@document_router.get("/documents/{doc_id}/proofread/page-image/{item_id}", dependencies=[Depends(password_gate)])
+def document_unified_proofread_page_image(request: Request, doc_id: str, item_id: str) -> Response:
+    settings = get_settings(request)
+    job = document_to_job(settings, load_document(settings, doc_id))
+    item = find_review_item(load_unified_review_items(job), item_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail="统一校对项不存在。")
+    path = resolve_safe_source_file(settings, job, str(item.get("source_pdf_path", "")))
+    page_no = int(str(item.get("source_page_no", "") or "1"))
+    try:
+        import fitz
+    except Exception as exc:  # pragma: no cover
+        raise HTTPException(status_code=500, detail="PDF 渲染组件不可用。") from exc
+    try:
+        document = fitz.open(path)
+        page = document[page_no - 1]
+        matrix = fitz.Matrix(2, 2)
+        rotation = source_preview_rotation_degrees(item)
+        if rotation:
+            matrix = matrix.prerotate(rotation)
+        pixmap = page.get_pixmap(matrix=matrix, alpha=False)
+        content = pixmap.tobytes("png")
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"无法渲染第 {page_no} 页。") from exc
+    return Response(content=content, media_type="image/png")
+
+
+@document_router.post("/documents/{doc_id}/proofread/save", response_class=JSONResponse, dependencies=[Depends(password_gate)])
+async def document_unified_proofread_save(request: Request, doc_id: str) -> JSONResponse:
+    settings = get_settings(request)
+    job = document_to_job(settings, load_document(settings, doc_id))
+    payload = await request.json()
+    edits = payload.get("edits", []) if isinstance(payload, dict) else []
+    reviewer_name = str(payload.get("reviewer_name", "") or "") if isinstance(payload, dict) else ""
+    try:
+        summary = save_unified_review_actions(job, edits, reviewer_name=reviewer_name)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return JSONResponse(summary)
 
 
 @document_router.get("/documents/{doc_id}/raw-review", response_class=HTMLResponse, dependencies=[Depends(password_gate)])

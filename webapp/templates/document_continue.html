@@ -52,7 +52,7 @@
         {% else %}
         <div class="actions">
             <a class="button button--download" href="{{ url_prefix }}/documents/{{ document.doc_id }}/download/raw_metrics_csv">下载原始数据</a>
-            <a class="button button--review" href="{{ url_prefix }}/documents/{{ document.doc_id }}/raw-review">校对原始数据</a>
+            <a class="button button--review" href="{{ url_prefix }}/documents/{{ document.doc_id }}/proofread">校对数据和映射</a>
         </div>
         {% endif %}
     </article>
@@ -68,7 +68,7 @@
         {% elif simple_flow.standard_ready %}
         <div class="actions">
             <a class="button button--download" href="{{ url_prefix }}/documents/{{ document.doc_id }}/download/standardized_metrics_csv">下载标准化数据</a>
-            <a class="button button--review" href="{{ url_prefix }}/documents/{{ document.doc_id }}/mapping-review">校对术语映射</a>
+            <a class="button button--review" href="{{ url_prefix }}/documents/{{ document.doc_id }}/proofread">校对数据和映射</a>
         </div>
         {% endif %}
     </article>

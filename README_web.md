@@ -82,7 +82,7 @@ After Step 1, the page shows:
 
 ```text
 下载原始数据
-校对原始数据
+校对数据和映射
 一键生成标准化数据
 ```
 
@@ -105,13 +105,65 @@ After Step 2, the page shows:
 ```text
 下载原始数据
 下载标准化数据
-校对原始数据
-校对术语映射
+校对数据和映射
 ```
 
 ## Proofreading Pages
 
-The proofreading pages are available through document routes:
+The ordinary proofreading page is now the unified workbench:
+
+```text
+/documents/{doc_id}/proofread
+```
+
+It combines raw value proofreading and standard term mapping in one screen. The left side shows the source PDF page image and highlights the selected source term or value when a bbox is available. The right side is a continuous spreadsheet-like table:
+
+```text
+原始术语 | 当前条目日期 | 指标数值 | 标准术语 | 状态
+```
+
+OCR confidence is hidden by default. Use the slider-style `显示置信度` switch to show confidence inline next to each original term; missing confidence is shown as `未记录`.
+
+Value editing:
+
+- Numeric cells display thousands separators, for example `396149420.62` becomes `396,149,420.62`.
+- The editor accepts plain numbers and comma-formatted numbers.
+- On blur, parseable values are formatted again with thousands separators.
+- Invalid numeric input is marked in the cell and is rejected by the save endpoint.
+- Changed value cells are highlighted and show `重置`; reset restores the original extracted value.
+
+Mapping editing:
+
+- The standard term cell is a direct autocomplete input.
+- It supports standard code (`ZT_002`), numeric code (`2` or `002`), Chinese substring (`短期` / `借款`), aliases, and pinyin initials such as `dqjk` when the term index supports them.
+- Empty input does not show `没有找到标准术语`; no-results appears only after a non-empty query returns no matches.
+- Changed mapping cells are highlighted and show `重置`; reset restores the original system mapping.
+- The status column remains visible with Chinese labels such as `精确匹配`, `别名匹配`, `建议校对`, `未映射`, and `已修改`.
+
+Unified review actions are written under:
+
+```text
+data/generated/web/jobs/<job_id>/unified_review/
+data/generated/web/results/<job_id>/unified_review/
+```
+
+The main files are:
+
+```text
+unified_review_actions.csv
+unified_review_actions.json
+unified_review_summary.json
+```
+
+Compatibility raw-review and mapping-review action files may also be written under their existing review folders.
+
+Known limitations:
+
+- Some terms or numeric cells may not have a recorded bbox; the page reports `当前项目未记录位置` instead of failing.
+- Pinyin search depends on the available standard-term search index and fallback pinyin coverage.
+- OCR confidence may be missing from some providers or fallback inputs.
+
+The legacy proofreading pages remain available for direct access and compatibility:
 
 ```text
 /documents/{doc_id}/raw-review

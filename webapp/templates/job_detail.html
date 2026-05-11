@@ -39,7 +39,7 @@
             <div class="actions">
                 <a class="button button--secondary" href="{{ url_prefix }}/jobs/{{ job.job_id }}/download/raw_metrics_xlsx">下载原始数据表 Excel</a>
                 <a class="button button--secondary" href="{{ url_prefix }}/jobs/{{ job.job_id }}/download/raw_metrics_csv">下载原始数据表 CSV</a>
-                <a class="button button--secondary" href="{{ url_prefix }}/jobs/{{ job.job_id }}/raw-review">进入原始数据校对</a>
+                <a class="button button--secondary" href="{{ url_prefix }}/jobs/{{ job.job_id }}/proofread">进入统一校对</a>
             </div>
             {% endif %}
         </article>
@@ -54,7 +54,7 @@
             <div class="actions">
                 <a class="button button--secondary" href="{{ url_prefix }}/jobs/{{ job.job_id }}/download/standardized_metrics_xlsx">下载标准化数据表 Excel</a>
                 <a class="button button--secondary" href="{{ url_prefix }}/jobs/{{ job.job_id }}/download/standardized_metrics_csv">下载标准化数据表 CSV</a>
-                <a class="button button--secondary" href="{{ url_prefix }}/jobs/{{ job.job_id }}/mapping-review">进入术语映射校对</a>
+                <a class="button button--secondary" href="{{ url_prefix }}/jobs/{{ job.job_id }}/proofread">进入统一校对</a>
             </div>
             {% endif %}
         </article>

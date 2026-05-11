@@ -206,7 +206,7 @@ function initRawReviewSheet() {
     }
 }
 
-function closeAutocompleteResults(root) {
+function closeAutocompleteResults(root = document) {
     root.querySelectorAll("[data-autocomplete-results]").forEach((panel) => {
         panel.hidden = true;
         panel.replaceChildren();
@@ -249,20 +249,27 @@ function setMappingTerm(row, result) {
         selectedName.value = result.name || "";
     }
     row.setAttribute("data-current-mapping-label", displayLabel || "未映射");
-    if ((result.code || "") !== (row.getAttribute("data-previous-code") || "")) {
+    if (!row.matches("[data-unified-row]") && (result.code || "") !== (row.getAttribute("data-previous-code") || "")) {
         row.classList.add("mapping-row--dirty");
         if (statusLabel) {
-            statusLabel.textContent = "已修改";
+            statusLabel.textContent = "术语已修改";
         }
+    }
+    if (row.matches("[data-unified-row]")) {
+        markUnifiedMappingChanged(row, result);
     }
 }
 
-function renderAutocompleteResults(row, input, results, root) {
+function renderAutocompleteResults(row, input, results, root, query) {
     const panel = row.querySelector("[data-autocomplete-results]");
     if (!panel) {
         return;
     }
     panel.replaceChildren();
+    if (!query.trim()) {
+        panel.hidden = true;
+        return;
+    }
     if (!results.length) {
         const empty = document.createElement("div");
         empty.className = "autocomplete-empty";
@@ -280,11 +287,14 @@ function renderAutocompleteResults(row, input, results, root) {
         const reason = document.createElement("small");
         reason.textContent = result.match_reason || "";
         button.append(label, reason);
-        button.addEventListener("click", () => {
+        const chooseResult = (event) => {
+            event.preventDefault();
             setMappingTerm(row, result);
             closeAutocompleteResults(root);
             input.focus();
-        });
+        };
+        button.addEventListener("mousedown", chooseResult);
+        button.addEventListener("click", chooseResult);
         panel.appendChild(button);
     });
     panel.hidden = false;
@@ -308,17 +318,42 @@ function initStandardTermAutocomplete(input, row, root) {
                 return;
             }
             const payload = await response.json();
-            renderAutocompleteResults(row, input, Array.isArray(payload.results) ? payload.results : [], root);
+            renderAutocompleteResults(row, input, Array.isArray(payload.results) ? payload.results : [], root, query);
         } catch (error) {
             closeAutocompleteResults(root);
         }
     }
     input.addEventListener("input", search);
     input.addEventListener("focus", () => {
-        updateMappingRowSelection(row, root);
-        search();
+        if (root.matches("[data-mapping-review-workbench]")) {
+            updateMappingRowSelection(row, root);
+        } else if (root.matches("[data-unified-proofread-workbench]")) {
+            selectUnifiedRow(row, input);
+            updateMappingResetVisibility(input);
+        }
     });
-    input.addEventListener("click", () => updateMappingRowSelection(row, root));
+    input.addEventListener("click", () => {
+        if (root.matches("[data-mapping-review-workbench]")) {
+            updateMappingRowSelection(row, root);
+        } else if (root.matches("[data-unified-proofread-workbench]")) {
+            selectUnifiedRow(row, input);
+            updateMappingResetVisibility(input);
+        }
+    });
+    input.addEventListener("keydown", (event) => {
+        if (event.key === "Escape") {
+            closeAutocompleteResults(root);
+            input.blur();
+        }
+    });
+    input.addEventListener("blur", () => {
+        window.setTimeout(() => {
+            closeAutocompleteResults(root);
+            if (root.matches("[data-unified-proofread-workbench]")) {
+                updateMappingResetVisibility(input);
+            }
+        }, 120);
+    });
 }
 
 function initMappingReviewSheet() {
@@ -348,11 +383,502 @@ function initMappingReviewSheet() {
         updateMappingRowSelection(initiallySelected, root);
     }
     document.addEventListener("click", (event) => {
-        if (!root.contains(event.target)) {
+        if (!event.target.closest(".standard-term-picker")) {
             closeAutocompleteResults(root);
         }
     });
 }
+
+function formatMetricNumber(value, valueType = "") {
+    const text = String(value ?? "").trim();
+    if (!text) {
+        return "";
+    }
+    const normalizedType = String(valueType || "").toLowerCase();
+    if (text.includes("%") || ["ratio", "percentage", "percent"].includes(normalizedType)) {
+        return text;
+    }
+    const normalized = text.replace(/[,，]/g, "");
+    const match = normalized.match(/^([+-]?)(?:(\d+)(?:\.(\d*))?|\.(\d+))$/);
+    if (!match) {
+        return text;
+    }
+    const sign = match[1] || "";
+    const intPart = (match[2] || "0").replace(/^0+(?=\d)/, "") || "0";
+    const fracPart = match[3] !== undefined ? match[3] : match[4];
+    const grouped = intPart.replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+    if (fracPart === undefined) {
+        return `${sign}${grouped}`;
+    }
+    return `${sign}${grouped}.${fracPart}`;
+}
+
+function parseMetricNumberInput(value, valueType = "") {
+    const text = String(value ?? "").trim();
+    if (!text) {
+        return { valid: false, value: "", reason: "empty" };
+    }
+    const normalizedType = String(valueType || "").toLowerCase();
+    if (text.includes("%") || ["ratio", "percentage", "percent"].includes(normalizedType)) {
+        return { valid: false, value: text, reason: "ratio_or_percent_requires_explicit_handling" };
+    }
+    const normalized = text.replace(/[,，\s]/g, "");
+    const match = normalized.match(/^([+-]?)(?:(\d+)(?:\.(\d*))?|\.(\d+))$/);
+    if (!match) {
+        return { valid: false, value: text, reason: "invalid_number" };
+    }
+    const sign = match[1] || "";
+    if (match[4] !== undefined) {
+        return { valid: true, value: `${sign}0.${match[4]}`, reason: "" };
+    }
+    const intPart = (match[2] || "0").replace(/^0+(?=\d)/, "") || "0";
+    if (match[3] === undefined) {
+        return { valid: true, value: `${sign}${intPart}`, reason: "" };
+    }
+    return { valid: true, value: `${sign}${intPart}.${match[3]}`, reason: "" };
+}
+
+function statusBadge(code, label) {
+    const badge = document.createElement("span");
+    badge.className = `status status--mapping status--mapping-${code}`;
+    badge.dataset.statusBadge = "";
+    badge.textContent = label;
+    return badge;
+}
+
+function updateUnifiedStatus(row) {
+    const list = row.querySelector("[data-status-badges]");
+    if (!list) {
+        return;
+    }
+    list.replaceChildren();
+    if (row.dataset.valueChanged === "true") {
+        list.appendChild(statusBadge("value_changed", "数值已修改"));
+    }
+    if (row.dataset.mappingChanged === "true") {
+        list.appendChild(statusBadge("term_changed", "术语已修改"));
+    }
+    if (!list.children.length) {
+        list.appendChild(statusBadge(row.dataset.baseStatusCode || "unmapped", row.dataset.baseStatusLabel || "未映射"));
+    }
+}
+
+function isValueChangedFromOriginal(input) {
+    return (input.dataset.currentValue || "") !== (input.getAttribute("data-original-value") || "");
+}
+
+function isMappingChangedFromOriginal(picker) {
+    return (picker.dataset.currentCode || "") !== (picker.getAttribute("data-original-code") || "")
+        || (picker.dataset.currentName || "") !== (picker.getAttribute("data-original-name") || "");
+}
+
+function updateValueResetVisibility(input) {
+    const cell = input.closest("[data-value-cell]");
+    const reset = cell ? cell.querySelector("[data-reset-value]") : null;
+    if (reset) {
+        reset.hidden = !(document.activeElement === input && isValueChangedFromOriginal(input));
+    }
+}
+
+function updateMappingResetVisibility(input) {
+    const picker = input.closest("[data-mapping-picker]");
+    const reset = picker ? picker.querySelector("[data-reset-mapping]") : null;
+    if (reset) {
+        reset.hidden = !(document.activeElement === input && isMappingChangedFromOriginal(picker));
+    }
+}
+
+function selectUnifiedRow(row, target) {
+    const root = row.closest("[data-unified-proofread-workbench]");
+    if (!root) {
+        return;
+    }
+    root.querySelectorAll("[data-unified-row]").forEach((candidate) => {
+        candidate.classList.remove("unified-row--selected");
+    });
+    row.classList.add("unified-row--selected");
+    const summary = root.querySelector("[data-selection-summary]");
+    if (summary) {
+        const originalName = row.getAttribute("data-original-metric-name") || "未记录术语";
+        const mappingLabel = row.getAttribute("data-current-mapping-label") || "未映射";
+        summary.textContent = `当前选中：${originalName} / ${mappingLabel}`;
+    }
+    const image = root.querySelector("[data-source-page-image]");
+    const nextImageUrl = row.getAttribute("data-page-image-url") || "";
+    const highlightTarget = target && target.closest("[data-value-cell]") ? target.closest("[data-value-cell]") : row;
+    if (image && nextImageUrl && image.getAttribute("src") !== nextImageUrl) {
+        image.addEventListener("load", () => highlightSourceForCell(highlightTarget, root), { once: true });
+        image.setAttribute("src", nextImageUrl);
+        return;
+    }
+    highlightSourceForCell(highlightTarget, root);
+}
+
+function markUnifiedValueChanged(row, input) {
+    const cell = input.closest("[data-value-cell]");
+    const error = cell ? cell.querySelector("[data-value-error]") : null;
+    const parsed = parseMetricNumberInput(input.value, input.getAttribute("data-value-type") || "");
+    if (!parsed.valid) {
+        input.classList.add("metric-value-input--invalid");
+        if (error) {
+            error.hidden = false;
+        }
+        input.dataset.dirty = "false";
+        return;
+    }
+    input.classList.remove("metric-value-input--invalid");
+    if (error) {
+        error.hidden = true;
+    }
+    input.dataset.currentValue = parsed.value;
+    const originalValue = input.getAttribute("data-original-value") || "";
+    const savedValue = input.dataset.savedValue || originalValue;
+    const changedFromOriginal = parsed.value !== originalValue;
+    const resetPending = parsed.value === originalValue && savedValue !== originalValue;
+    input.dataset.dirty = parsed.value !== savedValue && !resetPending ? "true" : "false";
+    if (cell) {
+        cell.dataset.resetPending = resetPending ? "true" : "false";
+        cell.classList.toggle("metric-cell--dirty", changedFromOriginal);
+    }
+    row.dataset.valueChanged = changedFromOriginal ? "true" : "false";
+    updateValueResetVisibility(input);
+    updateUnifiedStatus(row);
+}
+
+function resetUnifiedValue(row, input) {
+    const cell = input.closest("[data-value-cell]");
+    const originalValue = input.getAttribute("data-original-value") || "";
+    const savedValue = input.dataset.savedValue || originalValue;
+    input.value = formatMetricNumber(originalValue, input.getAttribute("data-value-type") || "");
+    input.dataset.currentValue = originalValue;
+    input.dataset.dirty = "false";
+    input.classList.remove("metric-value-input--invalid");
+    if (cell) {
+        cell.dataset.resetPending = savedValue !== originalValue ? "true" : "false";
+        cell.classList.remove("metric-cell--dirty");
+        const error = cell.querySelector("[data-value-error]");
+        if (error) {
+            error.hidden = true;
+        }
+    }
+    row.dataset.valueChanged = "false";
+    updateValueResetVisibility(input);
+    updateUnifiedStatus(row);
+}
+
+function markUnifiedMappingChanged(row, result) {
+    const picker = row.querySelector("[data-mapping-picker]");
+    const input = row.querySelector("[data-standard-term-input]");
+    if (!picker) {
+        return;
+    }
+    picker.dataset.currentCode = result.code || "";
+    picker.dataset.currentName = result.name || "";
+    const originalCode = picker.getAttribute("data-original-code") || "";
+    const originalName = picker.getAttribute("data-original-name") || "";
+    const savedCode = picker.dataset.savedCode || originalCode;
+    const savedName = picker.dataset.savedName || originalName;
+    const changedFromOriginal = (result.code || "") !== originalCode || (result.name || "") !== originalName;
+    const resetPending = (result.code || "") === originalCode && (result.name || "") === originalName && (savedCode !== originalCode || savedName !== originalName);
+    picker.dataset.dirty = ((result.code || "") !== savedCode || (result.name || "") !== savedName) && !resetPending ? "true" : "false";
+    picker.dataset.resetPending = resetPending ? "true" : "false";
+    picker.classList.toggle("mapping-row--dirty", changedFromOriginal);
+    const label = `${result.code || ""} ${result.name || ""}`.trim();
+    row.setAttribute("data-current-mapping-label", label || "未映射");
+    row.dataset.mappingChanged = changedFromOriginal ? "true" : "false";
+    if (input) {
+        updateMappingResetVisibility(input);
+    }
+    updateUnifiedStatus(row);
+}
+
+function resetUnifiedMapping(row) {
+    const picker = row.querySelector("[data-mapping-picker]");
+    const input = row.querySelector("[data-standard-term-input]");
+    const selectedCode = row.querySelector("[data-selected-code]");
+    const selectedName = row.querySelector("[data-selected-name]");
+    if (!picker || !input) {
+        return;
+    }
+    const originalCode = picker.getAttribute("data-original-code") || "";
+    const originalName = picker.getAttribute("data-original-name") || "";
+    const savedCode = picker.dataset.savedCode || originalCode;
+    const savedName = picker.dataset.savedName || originalName;
+    const label = `${originalCode} ${originalName}`.trim();
+    input.value = label;
+    picker.dataset.currentCode = originalCode;
+    picker.dataset.currentName = originalName;
+    picker.dataset.dirty = "false";
+    picker.dataset.resetPending = savedCode !== originalCode || savedName !== originalName ? "true" : "false";
+    picker.classList.remove("mapping-row--dirty");
+    row.setAttribute("data-current-mapping-label", label || "未映射");
+    if (selectedCode) {
+        selectedCode.value = originalCode;
+    }
+    if (selectedName) {
+        selectedName.value = originalName;
+    }
+    row.dataset.mappingChanged = "false";
+    updateMappingResetVisibility(input);
+    updateUnifiedStatus(row);
+}
+
+function collectUnifiedEdits(root) {
+    const edits = [];
+    root.querySelectorAll("[data-unified-row]").forEach((row) => {
+        const itemId = row.getAttribute("data-review-item-id") || "";
+        const rawMetricId = row.getAttribute("data-raw-metric-id") || "";
+        const valueInput = row.querySelector("[data-metric-value-input]");
+        const valueCell = row.querySelector("[data-value-cell]");
+        if (valueInput && valueInput.dataset.dirty === "true") {
+            const savedValue = valueInput.dataset.savedValue || valueInput.getAttribute("data-original-value") || "";
+            edits.push({
+                item_id: itemId,
+                raw_metric_id: rawMetricId,
+                edit_type: "value_change",
+                previous_value: savedValue,
+                new_value: valueInput.dataset.currentValue || valueInput.value,
+            });
+        } else if (valueCell && valueCell.dataset.resetPending === "true") {
+            const savedValue = valueInput ? (valueInput.dataset.savedValue || valueInput.getAttribute("data-original-value") || "") : "";
+            edits.push({
+                item_id: itemId,
+                raw_metric_id: rawMetricId,
+                edit_type: "reset_value",
+                previous_value: savedValue,
+                new_value: valueInput ? (valueInput.getAttribute("data-original-value") || "") : "",
+            });
+        }
+        const picker = row.querySelector("[data-mapping-picker]");
+        if (picker && picker.dataset.dirty === "true") {
+            const savedCode = picker.dataset.savedCode || picker.getAttribute("data-original-code") || "";
+            const savedName = picker.dataset.savedName || picker.getAttribute("data-original-name") || "";
+            edits.push({
+                item_id: itemId,
+                raw_metric_id: rawMetricId,
+                edit_type: "mapping_change",
+                previous_code: savedCode,
+                previous_name: savedName,
+                new_code: picker.dataset.currentCode || "",
+                new_name: picker.dataset.currentName || "",
+            });
+        } else if (picker && picker.dataset.resetPending === "true") {
+            const savedCode = picker.dataset.savedCode || picker.getAttribute("data-original-code") || "";
+            const savedName = picker.dataset.savedName || picker.getAttribute("data-original-name") || "";
+            edits.push({
+                item_id: itemId,
+                raw_metric_id: rawMetricId,
+                edit_type: "reset_mapping",
+                previous_code: savedCode,
+                previous_name: savedName,
+                new_code: picker.getAttribute("data-original-code") || "",
+                new_name: picker.getAttribute("data-original-name") || "",
+            });
+        }
+    });
+    return edits;
+}
+
+function filterUnifiedRows(root) {
+    const queryInput = root.querySelector("[data-unified-table-search]");
+    if (!queryInput) {
+        return;
+    }
+    const query = queryInput.value.trim().toLowerCase();
+    const visibleSections = new Set();
+    root.querySelectorAll("[data-unified-row]").forEach((row) => {
+        const text = row.textContent.toLowerCase();
+        const visible = !query || text.includes(query);
+        row.hidden = !visible;
+        if (visible) {
+            visibleSections.add(row.getAttribute("data-section-key") || "");
+        }
+    });
+    root.querySelectorAll("[data-section-header]").forEach((header) => {
+        header.hidden = !visibleSections.has(header.getAttribute("data-section-key") || "");
+    });
+}
+
+async function saveUnifiedEdits(root) {
+    const status = root.querySelector("[data-unified-save-status]");
+    const button = root.querySelector("[data-unified-save]");
+    const edits = collectUnifiedEdits(root);
+    if (!edits.length) {
+        if (status) {
+            status.textContent = "没有需要保存的修改";
+        }
+        return;
+    }
+    if (button) {
+        button.disabled = true;
+    }
+    if (status) {
+        status.textContent = "正在保存...";
+    }
+    try {
+        const response = await fetch(root.getAttribute("data-save-url") || "", {
+            method: "POST",
+            headers: { "content-type": "application/json", accept: "application/json" },
+            body: JSON.stringify({ edits }),
+        });
+        if (!response.ok) {
+            const payload = await response.json().catch(() => ({}));
+            throw new Error(payload.detail || "保存失败");
+        }
+        root.querySelectorAll("[data-unified-row]").forEach((row) => {
+            const valueInput = row.querySelector("[data-metric-value-input]");
+            const valueCell = row.querySelector("[data-value-cell]");
+            if (valueInput) {
+                const originalValue = valueInput.getAttribute("data-original-value") || "";
+                const currentValue = valueInput.dataset.currentValue || originalValue;
+                if (valueCell && valueCell.dataset.resetPending === "true") {
+                    valueInput.dataset.savedValue = originalValue;
+                } else if (valueInput.dataset.dirty === "true") {
+                    valueInput.dataset.savedValue = currentValue;
+                }
+                valueInput.dataset.dirty = "false";
+                const changedFromOriginal = isValueChangedFromOriginal(valueInput);
+                if (valueCell) {
+                    valueCell.dataset.resetPending = "false";
+                    valueCell.classList.toggle("metric-cell--dirty", changedFromOriginal);
+                }
+                row.dataset.valueChanged = changedFromOriginal ? "true" : "false";
+                updateValueResetVisibility(valueInput);
+            }
+            const picker = row.querySelector("[data-mapping-picker]");
+            const mappingInput = row.querySelector("[data-standard-term-input]");
+            if (picker) {
+                const originalCode = picker.getAttribute("data-original-code") || "";
+                const originalName = picker.getAttribute("data-original-name") || "";
+                if (picker.dataset.resetPending === "true") {
+                    picker.dataset.savedCode = originalCode;
+                    picker.dataset.savedName = originalName;
+                } else if (picker.dataset.dirty === "true") {
+                    picker.dataset.savedCode = picker.dataset.currentCode || "";
+                    picker.dataset.savedName = picker.dataset.currentName || "";
+                }
+                picker.dataset.dirty = "false";
+                picker.dataset.resetPending = "false";
+                const mappingChangedFromOriginal = isMappingChangedFromOriginal(picker);
+                picker.classList.toggle("mapping-row--dirty", mappingChangedFromOriginal);
+                row.dataset.mappingChanged = mappingChangedFromOriginal ? "true" : "false";
+                if (mappingInput) {
+                    updateMappingResetVisibility(mappingInput);
+                }
+            }
+            updateUnifiedStatus(row);
+        });
+        if (status) {
+            status.textContent = "已保存";
+        }
+    } catch (error) {
+        if (status) {
+            status.textContent = error.message || "保存失败";
+        }
+    } finally {
+        if (button) {
+            button.disabled = false;
+        }
+    }
+}
+
+function initUnifiedProofreadWorkbench() {
+    const root = document.querySelector("[data-unified-proofread-workbench]");
+    if (!root) {
+        return;
+    }
+    const rows = Array.from(root.querySelectorAll("[data-unified-row]"));
+    rows.forEach((row) => {
+        row.addEventListener("click", (event) => selectUnifiedRow(row, event.target));
+        const valueInput = row.querySelector("[data-metric-value-input]");
+        if (valueInput) {
+            valueInput.value = formatMetricNumber(valueInput.value, valueInput.getAttribute("data-value-type") || "");
+            valueInput.addEventListener("focus", () => {
+                selectUnifiedRow(row, valueInput);
+                updateValueResetVisibility(valueInput);
+            });
+            valueInput.addEventListener("input", () => markUnifiedValueChanged(row, valueInput));
+            valueInput.addEventListener("blur", () => {
+                const parsed = parseMetricNumberInput(valueInput.value, valueInput.getAttribute("data-value-type") || "");
+                if (parsed.valid) {
+                    valueInput.value = formatMetricNumber(parsed.value, valueInput.getAttribute("data-value-type") || "");
+                }
+                window.setTimeout(() => updateValueResetVisibility(valueInput), 80);
+            });
+            const reset = row.querySelector("[data-reset-value]");
+            if (reset) {
+                reset.addEventListener("mousedown", (event) => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                });
+                reset.addEventListener("click", (event) => {
+                    event.stopPropagation();
+                    resetUnifiedValue(row, valueInput);
+                });
+            }
+        }
+        const standardInput = row.querySelector("[data-standard-term-input]");
+        if (standardInput) {
+            initStandardTermAutocomplete(standardInput, row, root);
+        }
+        const mappingReset = row.querySelector("[data-reset-mapping]");
+        if (mappingReset) {
+            mappingReset.addEventListener("mousedown", (event) => {
+                event.preventDefault();
+                event.stopPropagation();
+            });
+            mappingReset.addEventListener("click", (event) => {
+                event.stopPropagation();
+                resetUnifiedMapping(row);
+            });
+        }
+    });
+    const confidenceToggle = root.querySelector("[data-confidence-toggle]");
+    if (confidenceToggle) {
+        confidenceToggle.addEventListener("click", () => {
+            const texts = root.querySelectorAll("[data-confidence-text]");
+            const shouldShow = Array.from(texts).some((text) => text.hidden);
+            texts.forEach((text) => {
+                text.hidden = !shouldShow;
+            });
+            confidenceToggle.classList.toggle("confidence-switch--on", shouldShow);
+            confidenceToggle.setAttribute("aria-checked", shouldShow ? "true" : "false");
+            confidenceToggle.setAttribute("aria-label", shouldShow ? "隐藏置信度" : "显示置信度");
+            const label = confidenceToggle.querySelector("[data-confidence-toggle-label]");
+            if (label) {
+                label.textContent = shouldShow ? "隐藏置信度" : "显示置信度";
+            }
+        });
+    }
+    const searchInput = root.querySelector("[data-unified-table-search]");
+    if (searchInput) {
+        searchInput.addEventListener("input", () => filterUnifiedRows(root));
+    }
+    const saveButton = root.querySelector("[data-unified-save]");
+    if (saveButton) {
+        saveButton.addEventListener("click", () => saveUnifiedEdits(root));
+    }
+    const initiallySelected = root.querySelector(".unified-row--selected") || rows[0];
+    const image = root.querySelector("[data-source-page-image]");
+    if (image) {
+        image.addEventListener("load", () => {
+            if (initiallySelected) {
+                selectUnifiedRow(initiallySelected, initiallySelected);
+            }
+        });
+    }
+    if (initiallySelected) {
+        selectUnifiedRow(initiallySelected, initiallySelected);
+    }
+    document.addEventListener("click", (event) => {
+        if (!event.target.closest(".standard-term-picker")) {
+            closeAutocompleteResults(root);
+        }
+    });
+}
+
+window.formatMetricNumber = formatMetricNumber;
+window.parseMetricNumberInput = parseMetricNumberInput;
 
 document.addEventListener("DOMContentLoaded", () => {
     document.querySelectorAll('input[name="mode"]').forEach((input) => {
@@ -361,4 +887,5 @@ document.addEventListener("DOMContentLoaded", () => {
     toggleModePanels();
     initRawReviewSheet();
     initMappingReviewSheet();
+    initUnifiedProofreadWorkbench();
 });
