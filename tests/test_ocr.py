@@ -383,14 +383,19 @@ class OCRToolTests(unittest.TestCase):
         )
 
     def test_project_paths_include_stage9_web_roots(self):
+        self.assertTrue(str(project_paths.CORPUS_LIBRARY_ROOT).endswith("data\\corpus\\library"))
         self.assertTrue(str(project_paths.WEB_GENERATED_ROOT).endswith("data\\generated\\web"))
         self.assertTrue(str(project_paths.WEB_UPLOADS_ROOT).endswith("data\\generated\\web\\uploads"))
         self.assertTrue(str(project_paths.WEB_JOBS_ROOT).endswith("data\\generated\\web\\jobs"))
         self.assertTrue(str(project_paths.WEB_RESULTS_ROOT).endswith("data\\generated\\web\\results"))
         self.assertTrue(str(project_paths.WEB_LOGS_ROOT).endswith("data\\generated\\web\\logs"))
+        self.assertTrue(str(project_paths.WEB_DELETIONS_ROOT).endswith("data\\generated\\web\\deletions"))
         self.assertTrue(str(project_paths.WEB_DB_PATH).endswith("data\\generated\\web\\webapp.sqlite3"))
         self.assertTrue(
             str(project_paths.WEB_MVP_HARDENING_SUMMARY_PATH).endswith("data\\generated\\web\\web_mvp_hardening_summary.json")
+        )
+        self.assertTrue(
+            str(project_paths.WEB_DOCUMENT_LIBRARY_SUMMARY_PATH).endswith("data\\generated\\web\\document_library_summary.json")
         )
 
     def test_load_paddle_pilot_registry_resolves_doc_paths(self):

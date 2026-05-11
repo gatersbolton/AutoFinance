@@ -15,7 +15,7 @@
 </section>
 {% endif %}
 
-<form class="card form-stack" action="/jobs" method="post" enctype="multipart/form-data" data-job-form>
+<form class="card form-stack" action="{{ url_prefix }}/jobs" method="post" enctype="multipart/form-data" data-job-form>
     <div class="field">
         <label for="display_name">任务名称</label>
         <input id="display_name" name="display_name" type="text" value="{{ submitted_display_name }}" placeholder="可选，默认使用目录名或文件名">
@@ -78,7 +78,7 @@
 
     <div class="actions">
         <button class="button button--primary" type="submit">创建任务</button>
-        <a class="button button--secondary" href="/jobs">查看任务列表</a>
+        <a class="button button--secondary" href="{{ url_prefix }}/jobs">查看任务列表</a>
     </div>
 </form>
 {% endblock %}

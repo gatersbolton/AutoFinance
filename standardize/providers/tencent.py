@@ -19,7 +19,9 @@ def load_tencent_page(source: DiscoveredSource) -> ProviderPage:
 
     for table_index, table in enumerate(payload.get("TableDetections", []), start=1):
         table_cells: List[ProviderCell] = []
-        for cell in table.get("Cells", []):
+        raw_cells = list(table.get("Cells", []) or [])
+        coarse_polygon_key = detect_shared_table_polygon_key(raw_cells)
+        for cell in raw_cells:
             row_tl = cell.get("RowTl", -1)
             col_tl = cell.get("ColTl", -1)
             if row_tl is None or col_tl is None:
@@ -32,6 +34,9 @@ def load_tencent_page(source: DiscoveredSource) -> ProviderPage:
 
             row_start, row_end = normalize_tencent_range(cell.get("RowTl"), cell.get("RowBr"))
             col_start, col_end = normalize_tencent_range(cell.get("ColTl"), cell.get("ColBr"))
+            polygon = cell.get("Polygon") or None
+            if polygon is not None and polygon_key(polygon) == coarse_polygon_key:
+                polygon = None
             table_cells.append(
                 ProviderCell(
                     table_id=str(table_index),
@@ -40,7 +45,7 @@ def load_tencent_page(source: DiscoveredSource) -> ProviderPage:
                     col_start=col_start,
                     col_end=col_end,
                     text=str(cell.get("Text", "") or ""),
-                    bbox=cell.get("Polygon") or None,
+                    bbox=polygon,
                     confidence=float(cell["Confidence"]) if cell.get("Confidence") is not None else None,
                     cell_type=str(cell.get("Type", "body") or "body"),
                     meta={
@@ -71,15 +76,49 @@ def load_tencent_page(source: DiscoveredSource) -> ProviderPage:
 
 
 def normalize_tencent_range(start_raw: Any, end_raw: Any) -> tuple[int, int]:
-    """Normalize Tencent's mixed 1-based / 0-based range encoding."""
+    """Normalize Tencent's 0-based, end-exclusive table range encoding."""
 
     start = int(start_raw) if start_raw is not None else 0
-    end = int(end_raw) if end_raw is not None else start - 1
+    end = int(end_raw) if end_raw is not None else start + 1
 
-    normalized_start = start - 1 if start > 0 else start
-    normalized_end = end if end >= 0 else normalized_start
+    normalized_start = max(0, start)
+    normalized_end = max(normalized_start, end - 1)
 
     if normalized_end < normalized_start:
         normalized_end = normalized_start
     return normalized_start, normalized_end
 
+
+def detect_shared_table_polygon_key(cells: List[Dict[str, Any]]) -> str:
+    grid_cells = [
+        cell
+        for cell in cells
+        if cell.get("RowTl") is not None
+        and cell.get("ColTl") is not None
+        and int(cell.get("RowTl")) >= 0
+        and int(cell.get("ColTl")) >= 0
+    ]
+    if len(grid_cells) <= 1:
+        return ""
+    polygon_keys = [polygon_key(cell.get("Polygon")) for cell in grid_cells if cell.get("Polygon")]
+    if not polygon_keys:
+        return ""
+    unique_keys = set(polygon_keys)
+    if len(unique_keys) == 1 and len(polygon_keys) >= max(2, int(len(grid_cells) * 0.8)):
+        return polygon_keys[0]
+    return ""
+
+
+def polygon_key(polygon: Any) -> str:
+    if not isinstance(polygon, list):
+        return ""
+    points = []
+    for point in polygon:
+        if not isinstance(point, dict):
+            continue
+        x_value = point.get("X", point.get("x"))
+        y_value = point.get("Y", point.get("y"))
+        if x_value is None or y_value is None:
+            continue
+        points.append((round(float(x_value), 3), round(float(y_value), 3)))
+    return json.dumps(points, separators=(",", ":"), sort_keys=True) if points else ""

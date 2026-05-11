@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+{% block title %}确认删除 | {{ settings.app_name }}{% endblock %}
+{% block content %}
+<section class="page-heading">
+    <div>
+        <h1>确认删除</h1>
+    </div>
+    <a class="button button--secondary" href="{{ url_prefix }}/">返回首页</a>
+</section>
+
+{% if delete_plan.unsafe_paths %}
+<section class="notice notice--error">
+    删除路径安全检查失败，已停止删除。
+</section>
+{% endif %}
+
+<section class="card card--error">
+    <h2>将删除以下内容</h2>
+    <ul class="plain-list delete-list">
+        {% for item in delete_plan["items"] %}
+        <li>
+            <strong>{{ item.label }}</strong>
+            <span>{{ item.path }}</span>
+            <em>{% if item.exists %}存在{% else %}未生成{% endif %}</em>
+        </li>
+        {% endfor %}
+    </ul>
+    <p class="todo-note">演示模式下删除不可恢复。</p>
+    <div class="actions">
+        <form action="{{ url_prefix }}/documents/{{ document.doc_id }}/delete" method="post">
+            <button class="button button--danger" type="submit" {% if delete_plan.unsafe_paths %}disabled{% endif %}>确认删除</button>
+        </form>
+        <a class="button button--secondary" href="{{ url_prefix }}/">取消</a>
+    </div>
+</section>
+{% endblock %}

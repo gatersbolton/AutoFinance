@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -15,7 +16,8 @@ from raw_extract.metric_extractor import extract_raw_metric_candidates, select_a
 from raw_extract.models import MAIN_OUTPUT_COLUMNS, CompanyResolution, RawMetricCandidate
 from raw_extract.number_parser import parse_metric_number
 from raw_extract.table_rebuild import rebuild_logical_subtables
-from standardize.models import ProviderCell, ProviderPage
+from standardize.models import DiscoveredSource, ProviderCell, ProviderPage
+from standardize.providers.tencent import load_tencent_page, normalize_tencent_range
 
 
 class RawExtractTests(unittest.TestCase):
@@ -87,6 +89,105 @@ class RawExtractTests(unittest.TestCase):
         accepted, issues = select_accepted_candidates([first, second], include_blank=False, include_ratios=True)
         self.assertEqual(accepted[0].provider, "aliyun_table")
         self.assertIn("provider_value_conflict", {issue.issue_type for issue in issues})
+
+    def test_tencent_table_range_does_not_treat_line_numbers_as_metric_names(self):
+        self.assertEqual(normalize_tencent_range(0, 1), (0, 0))
+        self.assertEqual(normalize_tencent_range(1, 2), (1, 1))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            raw_path = Path(tmp) / "page_0001.json"
+            raw_path.write_text(
+                json.dumps(
+                    {
+                        "TableDetections": [
+                            {
+                                "Type": 1,
+                                "Cells": [
+                                    self._tencent_cell("项目", 0, 1, 0, 1),
+                                    self._tencent_cell("行次", 0, 1, 1, 2),
+                                    self._tencent_cell("本年累计数", 0, 1, 2, 3),
+                                    self._tencent_cell("上年累计数", 0, 1, 3, 4),
+                                    self._tencent_cell("一、主营业务收入", 1, 2, 0, 1),
+                                    self._tencent_cell("1", 1, 2, 1, 2),
+                                    self._tencent_cell("251,143,230.20", 1, 2, 2, 3),
+                                    self._tencent_cell("227,585,011.97", 1, 2, 3, 4),
+                                    self._tencent_cell("管理费用", 2, 3, 0, 1),
+                                    self._tencent_cell("2", 2, 3, 1, 2),
+                                    self._tencent_cell("8,252,343.59", 2, 3, 2, 3),
+                                    self._tencent_cell("8,410,412.77", 2, 3, 3, 4),
+                                ],
+                            }
+                        ]
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            page = load_tencent_page(
+                DiscoveredSource(
+                    doc_id="DTEST",
+                    page_no=1,
+                    provider="tencent_table_v3",
+                    provider_family="tencent",
+                    provider_dir=tmp,
+                    raw_file=str(raw_path),
+                    result_page_meta={"text": "利润及利润分配表\n编制单位：AAA有限公司\n2022年12月31日\n单位：元"},
+                )
+            )
+            _, subtables, _ = rebuild_logical_subtables([page])
+            company = resolve_company_name(doc_id="DTEST", pages=[page], input_dir=Path(tmp))
+            candidates, _ = extract_raw_metric_candidates(
+                subtables=subtables,
+                pages=[page],
+                company=company,
+                input_dir=Path(tmp),
+                source_image_dir=None,
+                provider_priority=["tencent_table_v3"],
+            )
+            accepted, _ = select_accepted_candidates(candidates, include_blank=False, include_ratios=True)
+
+        metric_names = {row.metric_name for row in accepted}
+        self.assertIn("主营业务收入", metric_names)
+        self.assertIn("管理费用", metric_names)
+        self.assertNotIn("1", metric_names)
+        self.assertNotIn("2", metric_names)
+
+    def test_tencent_shared_table_polygon_is_not_used_as_cell_bbox(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            raw_path = Path(tmp) / "page_0001.json"
+            shared_polygon = [{"X": 10, "Y": 10}, {"X": 500, "Y": 10}, {"X": 500, "Y": 400}, {"X": 10, "Y": 400}]
+            raw_path.write_text(
+                json.dumps(
+                    {
+                        "TableDetections": [
+                            {
+                                "Type": 1,
+                                "Cells": [
+                                    self._tencent_cell("项目", 0, 1, 0, 1, polygon=shared_polygon),
+                                    self._tencent_cell("行次", 0, 1, 1, 2, polygon=shared_polygon),
+                                    self._tencent_cell("货币资金", 1, 2, 0, 1, polygon=shared_polygon),
+                                    self._tencent_cell("1", 1, 2, 1, 2, polygon=shared_polygon),
+                                ],
+                            }
+                        ]
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            page = load_tencent_page(
+                DiscoveredSource(
+                    doc_id="DTEST",
+                    page_no=1,
+                    provider="tencent_table_v3",
+                    provider_family="tencent",
+                    provider_dir=tmp,
+                    raw_file=str(raw_path),
+                )
+            )
+
+        self.assertTrue(page.tables["1"])
+        self.assertTrue(all(cell.bbox is None for cell in page.tables["1"]))
 
     def test_output_chinese_headers_exactly(self):
         RAW_METRICS_GENERATED_ROOT.mkdir(parents=True, exist_ok=True)
@@ -171,6 +272,18 @@ class RawExtractTests(unittest.TestCase):
             duplicate_key="DTEST|income_statement|营业总额||2022-12-31|2022-12-31|ending",
         )
         return row
+
+    def _tencent_cell(self, text: str, row_tl: int, row_br: int, col_tl: int, col_br: int, *, polygon: list[dict] | None = None) -> dict:
+        return {
+            "Text": text,
+            "Confidence": 99,
+            "Type": "body",
+            "RowTl": row_tl,
+            "RowBr": row_br,
+            "ColTl": col_tl,
+            "ColBr": col_br,
+            "Polygon": polygon or [{"X": col_tl * 10, "Y": row_tl * 10}],
+        }
 
 
 if __name__ == "__main__":

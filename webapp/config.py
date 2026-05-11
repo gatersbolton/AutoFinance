@@ -7,11 +7,13 @@ from pathlib import Path
 from typing import Iterable
 
 from project_paths import (
+    CORPUS_LIBRARY_ROOT,
     CORPUS_ROOT,
     DEFAULT_SECRET_PATH,
     DEFAULT_TEMPLATE_PATH,
     REPO_ROOT,
     WEB_DB_PATH,
+    WEB_DELETIONS_ROOT,
     WEB_GENERATED_ROOT,
     WEB_JOBS_ROOT,
     WEB_LOGS_ROOT,
@@ -20,6 +22,7 @@ from project_paths import (
 )
 
 from . import APP_NAME, APP_VERSION
+from .base_path import normalize_base_path
 
 
 PACKAGE_ROOT = Path(__file__).resolve().parent
@@ -61,13 +64,16 @@ class WebAppSettings:
     app_name: str = APP_NAME
     app_version: str = APP_VERSION
     env_mode: str = "dev"
+    base_path: str = ""
     runtime_root: Path = WEB_GENERATED_ROOT
     uploads_root: Path = WEB_UPLOADS_ROOT
     jobs_root: Path = WEB_JOBS_ROOT
     results_root: Path = WEB_RESULTS_ROOT
     logs_root: Path = WEB_LOGS_ROOT
+    deletions_root: Path = WEB_DELETIONS_ROOT
     db_path: Path = WEB_DB_PATH
     corpus_root: Path = CORPUS_ROOT
+    library_root: Path = CORPUS_LIBRARY_ROOT
     template_path: Path = DEFAULT_TEMPLATE_PATH
     secret_path: Path = DEFAULT_SECRET_PATH
     enable_local_worker: bool = True
@@ -138,7 +144,15 @@ class WebAppSettings:
         return "in_process" if self.enable_local_worker else "external_worker"
 
     def ensure_directories(self) -> None:
-        for path in (self.runtime_root, self.uploads_root, self.jobs_root, self.results_root, self.logs_root):
+        for path in (
+            self.runtime_root,
+            self.uploads_root,
+            self.jobs_root,
+            self.results_root,
+            self.logs_root,
+            self.deletions_root,
+            self.library_root,
+        ):
             path.mkdir(parents=True, exist_ok=True)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -219,6 +233,9 @@ class WebAppSettings:
         normalized_queue_backend = (self.queue_backend or "local").strip().lower()
         if normalized_queue_backend not in {"local", "rq"}:
             raise RuntimeError(f"WEBAPP_QUEUE_BACKEND must be local or rq, got: {self.queue_backend}")
+        normalized_base_path = normalize_base_path(self.base_path)
+        if self.base_path != normalized_base_path:
+            raise RuntimeError(f"WEBAPP_BASE_PATH must be normalized, got: {self.base_path}")
         if self.auth_required and not self.admin_password:
             raise RuntimeError(
                 "WEBAPP_ADMIN_PASSWORD is required when authentication is enabled. "
@@ -245,17 +262,22 @@ def load_settings() -> WebAppSettings:
     jobs_root = _resolve_env_path("WEBAPP_JOBS_ROOT", runtime_root / "jobs")
     results_root = _resolve_env_path("WEBAPP_RESULTS_ROOT", runtime_root / "results")
     logs_root = _resolve_env_path("WEBAPP_LOGS_ROOT", runtime_root / "logs")
+    deletions_root = _resolve_env_path("WEBAPP_DELETIONS_ROOT", runtime_root / "deletions")
     db_path = _resolve_env_path("WEBAPP_DB_PATH", runtime_root / "webapp.sqlite3")
+    corpus_root = _resolve_env_path("WEBAPP_CORPUS_ROOT", CORPUS_ROOT)
 
     return WebAppSettings(
         env_mode=env_mode,
+        base_path=normalize_base_path(os.environ.get("WEBAPP_BASE_PATH", "")),
         runtime_root=runtime_root,
         uploads_root=uploads_root,
         jobs_root=jobs_root,
         results_root=results_root,
         logs_root=logs_root,
+        deletions_root=deletions_root,
         db_path=db_path,
-        corpus_root=_resolve_env_path("WEBAPP_CORPUS_ROOT", CORPUS_ROOT),
+        corpus_root=corpus_root,
+        library_root=_resolve_env_path("WEBAPP_LIBRARY_ROOT", corpus_root / "library"),
         template_path=_resolve_env_path("WEBAPP_TEMPLATE_PATH", DEFAULT_TEMPLATE_PATH),
         secret_path=_resolve_env_path("WEBAPP_SECRET_PATH", DEFAULT_SECRET_PATH),
         enable_local_worker=_env_bool("WEBAPP_ENABLE_LOCAL_WORKER", True),

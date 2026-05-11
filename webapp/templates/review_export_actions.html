@@ -13,9 +13,9 @@
         <p class="hero-copy">先导出当前已保存动作，再查看“预计会应用 / 预计会被拒绝”的预览，最后执行 apply 或 apply + rerun。Web 端只会操作当前任务的快照与结果目录，不会直接改写基础配置。</p>
     </div>
     <div class="actions">
-        <a class="button button--secondary" href="/jobs/{{ job.job_id }}/review">返回复核看板</a>
-        <a class="button button--secondary" href="/jobs/{{ job.job_id }}/review/items">返回复核项</a>
-        <a class="button button--secondary" href="/jobs/{{ job.job_id }}">返回任务详情</a>
+        <a class="button button--secondary" href="{{ url_prefix }}/jobs/{{ job.job_id }}/review">返回复核看板</a>
+        <a class="button button--secondary" href="{{ url_prefix }}/jobs/{{ job.job_id }}/review/items">返回复核项</a>
+        <a class="button button--secondary" href="{{ url_prefix }}/jobs/{{ job.job_id }}">返回任务详情</a>
     </div>
 </section>
 
@@ -41,19 +41,19 @@
 <section class="card">
     <h2>操作入口</h2>
     <div class="actions">
-        <form action="/jobs/{{ job.job_id }}/review/export-actions" method="post">
+        <form action="{{ url_prefix }}/jobs/{{ job.job_id }}/review/export-actions" method="post">
             <button class="button button--primary" type="submit">生成导出文件</button>
         </form>
-        <form action="/jobs/{{ job.job_id }}/review/apply-preview" method="get">
+        <form action="{{ url_prefix }}/jobs/{{ job.job_id }}/review/apply-preview" method="get">
             <button class="button button--secondary" type="submit">生成应用预览</button>
         </form>
-        <form action="/jobs/{{ job.job_id }}/review/apply" method="post">
+        <form action="{{ url_prefix }}/jobs/{{ job.job_id }}/review/apply" method="post">
             <button class="button button--secondary" type="submit">应用复核动作</button>
         </form>
-        <form action="/jobs/{{ job.job_id }}/review/apply-and-rerun" method="post">
+        <form action="{{ url_prefix }}/jobs/{{ job.job_id }}/review/apply-and-rerun" method="post">
             <button class="button button--secondary" type="submit">应用并重跑标准化</button>
         </form>
-        <form action="/jobs/{{ job.job_id }}/review/rerun" method="post">
+        <form action="{{ url_prefix }}/jobs/{{ job.job_id }}/review/rerun" method="post">
             <button class="button button--secondary" type="submit">仅重新生成</button>
         </form>
     </div>
@@ -114,12 +114,12 @@
         </dl>
         <div class="actions">
             {% if latest_operation_summary.get("can_cancel") %}
-            <form action="/jobs/{{ job.job_id }}/operations/{{ latest_operation_summary.get('operation_id') }}/cancel" method="post">
+            <form action="{{ url_prefix }}/jobs/{{ job.job_id }}/operations/{{ latest_operation_summary.get('operation_id') }}/cancel" method="post">
                 <button class="button button--secondary" type="submit">取消操作</button>
             </form>
             {% endif %}
             {% if latest_operation_summary.get("can_retry") %}
-            <form action="/jobs/{{ job.job_id }}/operations/{{ latest_operation_summary.get('operation_id') }}/retry" method="post">
+            <form action="{{ url_prefix }}/jobs/{{ job.job_id }}/operations/{{ latest_operation_summary.get('operation_id') }}/retry" method="post">
                 <button class="button button--secondary" type="submit">重试操作</button>
             </form>
             {% endif %}
@@ -177,7 +177,7 @@
                         <td>{% if artifact.exists %}已生成{% else %}未生成{% endif %}</td>
                         <td>
                             {% if artifact.exists %}
-                            <a href="/jobs/{{ job.job_id }}/download/{{ artifact.slug }}">下载</a>
+                            <a href="{{ url_prefix }}/jobs/{{ job.job_id }}/download/{{ artifact.slug }}">下载</a>
                             {% else %}
                             未生成
                             {% endif %}

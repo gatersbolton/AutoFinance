@@ -1,0 +1,428 @@
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Annotated
+from urllib.parse import urlencode
+
+from fastapi import APIRouter, Depends, File, HTTPException, Request, Response, UploadFile
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
+
+from standard_map.registry import load_standard_registry
+
+from .base_path import app_path
+from .document_library import (
+    MISSING_OCR_CREDENTIALS_MESSAGE,
+    build_delete_plan,
+    document_to_job,
+    execute_delete,
+    list_documents,
+    load_document,
+    run_document_ocr,
+    save_uploaded_documents,
+    update_document_status,
+)
+from .document_models import STATUS_COMPLETED, STATUS_FAILED, STATUS_RUNNING
+from .jobs import resolve_download_artifact
+from .routes import get_settings, password_gate
+from .simple_flow import (
+    build_mapping_review_sheet,
+    build_raw_review_sheet,
+    find_review_item,
+    load_mapping_review_items,
+    load_raw_review_items,
+    load_simple_flow_state,
+    resolve_safe_source_file,
+    run_raw_metrics_step,
+    run_standard_metrics_step,
+    save_mapping_review_action,
+    save_raw_review_action,
+    source_preview_rotation_degrees,
+)
+
+
+document_router = APIRouter()
+
+
+def _templates(request: Request):
+    return request.app.state.templates
+
+
+def _render(
+    request: Request,
+    template_name: str,
+    context: dict[str, object],
+    *,
+    status_code: int = 200,
+) -> HTMLResponse:
+    settings = get_settings(request)
+    payload = {"request": request, "settings": settings, "url_prefix": settings.base_path}
+    payload.update(context)
+    return _templates(request).TemplateResponse(request, template_name, payload, status_code=status_code)
+
+
+def _app_url(request: Request, path: str) -> str:
+    return app_path(get_settings(request).base_path, path)
+
+
+def _home_redirect(message: str = "", error: str = "") -> RedirectResponse:
+    if error:
+        return RedirectResponse(url=f"/?{urlencode({'error': error})}", status_code=303)
+    if message:
+        return RedirectResponse(url=f"/?{urlencode({'message': message})}", status_code=303)
+    return RedirectResponse(url="/", status_code=303)
+
+
+@document_router.get("/documents/upload", response_class=HTMLResponse, dependencies=[Depends(password_gate)])
+def upload_page(request: Request) -> HTMLResponse:
+    return _render(request, "document_upload.html", {"error_message": ""})
+
+
+@document_router.post("/documents/upload", dependencies=[Depends(password_gate)], response_model=None)
+async def upload_documents(
+    request: Request,
+    uploaded_files: Annotated[list[UploadFile] | None, File()] = None,
+) -> Response:
+    try:
+        await save_uploaded_documents(get_settings(request), uploaded_files or [])
+    except ValueError as exc:
+        return _render(request, "document_upload.html", {"error_message": str(exc)}, status_code=400)
+    return _home_redirect("文件已保存，可以点击“开始识别”。")
+
+
+@document_router.post("/documents/{doc_id}/start-ocr", dependencies=[Depends(password_gate)])
+def start_ocr(request: Request, doc_id: str) -> RedirectResponse:
+    try:
+        run_document_ocr(get_settings(request), doc_id, rerun=False)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="文件不存在。") from exc
+    except ValueError as exc:
+        message = MISSING_OCR_CREDENTIALS_MESSAGE if str(exc) == MISSING_OCR_CREDENTIALS_MESSAGE else str(exc)
+        return _home_redirect(error=message)
+    return _home_redirect("识别完成，可以点击“继续处理”。")
+
+
+@document_router.post("/documents/{doc_id}/rerun-ocr", dependencies=[Depends(password_gate)])
+def rerun_ocr(request: Request, doc_id: str) -> RedirectResponse:
+    try:
+        run_document_ocr(get_settings(request), doc_id, rerun=True)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="文件不存在。") from exc
+    except ValueError as exc:
+        message = MISSING_OCR_CREDENTIALS_MESSAGE if str(exc) == MISSING_OCR_CREDENTIALS_MESSAGE else str(exc)
+        return _home_redirect(error=message)
+    return _home_redirect("重新识别完成，可以继续处理。")
+
+
+@document_router.get("/documents/{doc_id}/continue", response_class=HTMLResponse, dependencies=[Depends(password_gate)])
+def continue_document(request: Request, doc_id: str) -> Response:
+    settings = get_settings(request)
+    try:
+        document = load_document(settings, doc_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="文件不存在。") from exc
+    if document.ocr_status != STATUS_COMPLETED:
+        return _home_redirect(error="请先点击“开始识别”。")
+    job = document_to_job(settings, document)
+    return _render(
+        request,
+        "document_continue.html",
+        {
+            "document": document,
+            "job": job,
+            "simple_flow": load_simple_flow_state(job),
+        },
+    )
+
+
+@document_router.post("/documents/{doc_id}/raw-metrics/run", dependencies=[Depends(password_gate)])
+def run_document_raw_metrics(request: Request, doc_id: str) -> RedirectResponse:
+    settings = get_settings(request)
+    try:
+        document = load_document(settings, doc_id)
+        if document.ocr_status != STATUS_COMPLETED:
+            return _home_redirect(error="请先点击“开始识别”。")
+        update_document_status(settings, doc_id, raw_metrics_status=STATUS_RUNNING, error_message="")
+        run_raw_metrics_step(settings, document_to_job(settings, document))
+        update_document_status(settings, doc_id, raw_metrics_status=STATUS_COMPLETED, error_message="")
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="文件不存在。") from exc
+    except ValueError as exc:
+        update_document_status(settings, doc_id, raw_metrics_status=STATUS_FAILED, error_message=str(exc))
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return RedirectResponse(url=f"/documents/{doc_id}/continue", status_code=303)
+
+
+@document_router.post("/documents/{doc_id}/standard-metrics/run", dependencies=[Depends(password_gate)])
+def run_document_standard_metrics(request: Request, doc_id: str) -> RedirectResponse:
+    settings = get_settings(request)
+    try:
+        document = load_document(settings, doc_id)
+        update_document_status(settings, doc_id, standard_metrics_status=STATUS_RUNNING, error_message="")
+        run_standard_metrics_step(settings, document_to_job(settings, document))
+        update_document_status(settings, doc_id, standard_metrics_status=STATUS_COMPLETED, error_message="")
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="文件不存在。") from exc
+    except ValueError as exc:
+        update_document_status(settings, doc_id, standard_metrics_status=STATUS_FAILED, error_message=str(exc))
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return RedirectResponse(url=f"/documents/{doc_id}/continue", status_code=303)
+
+
+@document_router.get("/documents/{doc_id}/download/{slug}", dependencies=[Depends(password_gate)])
+def download_document_artifact(request: Request, doc_id: str, slug: str) -> FileResponse:
+    settings = get_settings(request)
+    try:
+        document = load_document(settings, doc_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="文件不存在。") from exc
+    artifact = resolve_download_artifact(document_to_job(settings, document), slug)
+    if artifact is None:
+        raise HTTPException(status_code=404, detail="文件不存在。")
+    path = Path(artifact.path)
+    if not artifact.exists or not path.exists():
+        raise HTTPException(status_code=404, detail="文件未生成。")
+    return FileResponse(path=str(path), filename=artifact.download_name)
+
+
+@document_router.get("/documents/{doc_id}/raw-review", response_class=HTMLResponse, dependencies=[Depends(password_gate)])
+def document_raw_review_page(request: Request, doc_id: str) -> HTMLResponse:
+    settings = get_settings(request)
+    document = load_document(settings, doc_id)
+    job = document_to_job(settings, document)
+    sheet = build_raw_review_sheet(job)
+    item = sheet.get("selected_item")
+    page_image_url = _app_url(request, f"/documents/{doc_id}/raw-review/page-image/{item.get('review_item_id')}") if item else ""
+    return _render(
+        request,
+        "raw_review.html",
+        {
+            "job": job,
+            "sheet": sheet,
+            "item": item,
+            "page_image_url": page_image_url,
+            "review_base_url": _app_url(request, f"/documents/{doc_id}"),
+            "review_return_url": _app_url(request, f"/documents/{doc_id}/continue"),
+        },
+    )
+
+
+@document_router.get("/documents/{doc_id}/raw-review/items/{item_id}", response_class=HTMLResponse, dependencies=[Depends(password_gate)])
+def document_raw_review_item_page(request: Request, doc_id: str, item_id: str) -> HTMLResponse:
+    settings = get_settings(request)
+    job = document_to_job(settings, load_document(settings, doc_id))
+    sheet = build_raw_review_sheet(job, item_id)
+    item = sheet.get("selected_item")
+    if item is None or str(item.get("review_item_id", "")) != item_id:
+        raise HTTPException(status_code=404, detail="原始数据校对项不存在。")
+    page_image_url = _app_url(request, f"/documents/{doc_id}/raw-review/page-image/{item_id}") if item.get("source_pdf_path") else ""
+    return _render(
+        request,
+        "raw_review.html",
+        {
+            "job": job,
+            "sheet": sheet,
+            "item": item,
+            "page_image_url": page_image_url,
+            "review_base_url": _app_url(request, f"/documents/{doc_id}"),
+            "review_return_url": _app_url(request, f"/documents/{doc_id}/continue"),
+        },
+    )
+
+
+@document_router.get("/documents/{doc_id}/raw-review/page-image/{item_id}", dependencies=[Depends(password_gate)])
+def document_raw_review_page_image(request: Request, doc_id: str, item_id: str) -> Response:
+    settings = get_settings(request)
+    job = document_to_job(settings, load_document(settings, doc_id))
+    item = find_review_item(load_raw_review_items(job), item_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail="原始数据校对项不存在。")
+    path = resolve_safe_source_file(settings, job, str(item.get("source_pdf_path", "")))
+    page_no = int(str(item.get("source_page_no", "") or "1"))
+    try:
+        import fitz
+    except Exception as exc:  # pragma: no cover
+        raise HTTPException(status_code=500, detail="PDF 渲染组件不可用。") from exc
+    try:
+        document = fitz.open(path)
+        page = document[page_no - 1]
+        matrix = fitz.Matrix(2, 2)
+        rotation = source_preview_rotation_degrees(item)
+        if rotation:
+            matrix = matrix.prerotate(rotation)
+        pixmap = page.get_pixmap(matrix=matrix, alpha=False)
+        content = pixmap.tobytes("png")
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"无法渲染第 {page_no} 页。") from exc
+    return Response(content=content, media_type="image/png")
+
+
+@document_router.post("/documents/{doc_id}/raw-review/actions", dependencies=[Depends(password_gate)])
+async def document_raw_review_action_route(request: Request, doc_id: str) -> RedirectResponse:
+    settings = get_settings(request)
+    job = document_to_job(settings, load_document(settings, doc_id))
+    form = await request.form()
+    review_item_id = str(form.get("review_item_id", "")).strip()
+    action = str(form.get("action", "")).strip()
+    item = find_review_item(load_raw_review_items(job), review_item_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail="原始数据校对项不存在。")
+    edits = {}
+    edits_json = str(form.get("edits_json", "") or "")
+    if action in {"edit", "next_table"} and edits_json.strip():
+        import json
+
+        try:
+            edits = {"table_edits": json.loads(edits_json)}
+        except json.JSONDecodeError as exc:
+            raise HTTPException(status_code=400, detail="表格修改内容不是合法 JSON。") from exc
+    save_raw_review_action(job, item=item, action=action, edits=edits, reviewer_note=str(form.get("reviewer_note", "") or ""))
+    redirect_item_id = review_item_id
+    if action == "next_table":
+        sheet = build_raw_review_sheet(job, review_item_id)
+        redirect_item_id = str(sheet.get("next_item_id") or form.get("next_item_id") or review_item_id)
+    return RedirectResponse(url=f"/documents/{doc_id}/raw-review/items/{redirect_item_id}", status_code=303)
+
+
+@document_router.get("/documents/{doc_id}/mapping-review", response_class=HTMLResponse, dependencies=[Depends(password_gate)])
+def document_mapping_review_page(request: Request, doc_id: str) -> HTMLResponse:
+    settings = get_settings(request)
+    job = document_to_job(settings, load_document(settings, doc_id))
+    sheet = build_mapping_review_sheet(job)
+    item = sheet.get("selected_item")
+    page_image_url = (
+        _app_url(request, f"/documents/{doc_id}/mapping-review/page-image/{item.get('review_item_id')}")
+        if item and item.get("source_pdf_path")
+        else ""
+    )
+    return _render(
+        request,
+        "mapping_review.html",
+        {
+            "job": job,
+            "sheet": sheet,
+            "items": sheet["items"],
+            "item": item,
+            "page_image_url": page_image_url,
+            "review_base_url": _app_url(request, f"/documents/{doc_id}"),
+            "review_return_url": _app_url(request, f"/documents/{doc_id}/continue"),
+        },
+    )
+
+
+@document_router.get("/documents/{doc_id}/mapping-review/items/{item_id}", response_class=HTMLResponse, dependencies=[Depends(password_gate)])
+def document_mapping_review_item_page(request: Request, doc_id: str, item_id: str) -> HTMLResponse:
+    settings = get_settings(request)
+    job = document_to_job(settings, load_document(settings, doc_id))
+    sheet = build_mapping_review_sheet(job, item_id)
+    item = sheet.get("selected_item")
+    if item is None or str(item.get("review_item_id", "")) != item_id:
+        raise HTTPException(status_code=404, detail="术语映射校对项不存在。")
+    page_image_url = _app_url(request, f"/documents/{doc_id}/mapping-review/page-image/{item_id}") if item.get("source_pdf_path") else ""
+    return _render(
+        request,
+        "mapping_review.html",
+        {
+            "job": job,
+            "sheet": sheet,
+            "items": sheet["items"],
+            "item": item,
+            "page_image_url": page_image_url,
+            "review_base_url": _app_url(request, f"/documents/{doc_id}"),
+            "review_return_url": _app_url(request, f"/documents/{doc_id}/continue"),
+        },
+    )
+
+
+@document_router.get("/documents/{doc_id}/mapping-review/page-image/{item_id}", dependencies=[Depends(password_gate)])
+def document_mapping_review_page_image(request: Request, doc_id: str, item_id: str) -> Response:
+    settings = get_settings(request)
+    job = document_to_job(settings, load_document(settings, doc_id))
+    item = find_review_item(load_mapping_review_items(job), item_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail="术语映射校对项不存在。")
+    path = resolve_safe_source_file(settings, job, str(item.get("source_pdf_path", "")))
+    page_no = int(str(item.get("source_page_no", "") or "1"))
+    try:
+        import fitz
+    except Exception as exc:  # pragma: no cover
+        raise HTTPException(status_code=500, detail="PDF 渲染组件不可用。") from exc
+    try:
+        document = fitz.open(path)
+        page = document[page_no - 1]
+        matrix = fitz.Matrix(2, 2)
+        rotation = source_preview_rotation_degrees(item)
+        if rotation:
+            matrix = matrix.prerotate(rotation)
+        pixmap = page.get_pixmap(matrix=matrix, alpha=False)
+        content = pixmap.tobytes("png")
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"无法渲染第 {page_no} 页。") from exc
+    return Response(content=content, media_type="image/png")
+
+
+@document_router.get("/documents/{doc_id}/mapping-review/evidence/{item_id}", dependencies=[Depends(password_gate)])
+def document_mapping_review_evidence(request: Request, doc_id: str, item_id: str) -> FileResponse:
+    settings = get_settings(request)
+    job = document_to_job(settings, load_document(settings, doc_id))
+    item = find_review_item(load_mapping_review_items(job), item_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail="术语映射校对项不存在。")
+    path = resolve_safe_source_file(settings, job, str(item.get("source_pdf_path", "")))
+    return FileResponse(path=str(path), filename=path.name, media_type="application/pdf", content_disposition_type="inline")
+
+
+@document_router.post("/documents/{doc_id}/mapping-review/actions", dependencies=[Depends(password_gate)])
+async def document_mapping_review_action_route(request: Request, doc_id: str) -> RedirectResponse:
+    settings = get_settings(request)
+    job = document_to_job(settings, load_document(settings, doc_id))
+    form = await request.form()
+    review_item_id = str(form.get("review_item_id", "")).strip()
+    action = str(form.get("action", "")).strip()
+    item = find_review_item(load_mapping_review_items(job), review_item_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail="术语映射校对项不存在。")
+    selected_code = str(form.get("selected_code", "") or "")
+    selected_name = str(form.get("selected_name", "") or "")
+    if action == "change_mapping" and selected_code and not selected_name:
+        registry = load_standard_registry()
+        selected = registry.term_by_code.get(selected_code)
+        selected_name = selected.name if selected else selected_name
+    save_mapping_review_action(
+        job,
+        item=item,
+        action=action,
+        selected_code=selected_code,
+        selected_name=selected_name,
+        reviewer_note=str(form.get("reviewer_note", "") or ""),
+    )
+    return RedirectResponse(url=f"/documents/{doc_id}/mapping-review/items/{review_item_id}", status_code=303)
+
+
+@document_router.get("/documents/{doc_id}/delete-confirm", response_class=HTMLResponse, dependencies=[Depends(password_gate)])
+def delete_confirm(request: Request, doc_id: str) -> HTMLResponse:
+    settings = get_settings(request)
+    try:
+        document = load_document(settings, doc_id, refresh=False)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="文件不存在。") from exc
+    return _render(request, "document_delete_confirm.html", {"document": document, "delete_plan": build_delete_plan(settings, document)})
+
+
+@document_router.post("/documents/{doc_id}/delete", dependencies=[Depends(password_gate)])
+def delete_document(request: Request, doc_id: str) -> RedirectResponse:
+    try:
+        execute_delete(get_settings(request), doc_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="文件不存在。") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return _home_redirect("文件及相关结果已删除。")
+
+
+def build_home_context(request: Request, *, message: str = "", error: str = "") -> dict[str, object]:
+    settings = get_settings(request)
+    return {
+        "documents": list_documents(settings),
+        "message": message,
+        "error": error,
+    }

@@ -4,22 +4,17 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>{% block title %}{{ settings.app_name }}{% endblock %}</title>
-    <link rel="stylesheet" href="{{ url_for('static', path='style.css') }}">
-    <script defer src="{{ url_for('static', path='app.js') }}"></script>
+    <link rel="stylesheet" href="{{ url_prefix }}/static/style.css?v=zoom-wide-1">
+    <script>window.__APP_BASE_PATH__ = "{{ url_prefix }}";</script>
+    <script defer src="{{ url_prefix }}/static/app.js?v=zoom-wide-1"></script>
     {% block head %}{% endblock %}
 </head>
 <body>
     <header class="site-header">
         <div class="shell shell--header">
             <div>
-                <a class="brand" href="/">AutoFinance Web MVP</a>
-                <p class="subtitle">Cloud-first OCR orchestration for audit users. Paddle remains pilot-only.</p>
+                <a class="brand" href="{{ url_prefix }}/">财务报表数据提取</a>
             </div>
-            <nav class="nav-links">
-                <a href="/jobs/new">新建任务</a>
-                <a href="/jobs">任务列表</a>
-                <a href="/system">系统状态</a>
-            </nav>
         </div>
     </header>
     <main class="shell">

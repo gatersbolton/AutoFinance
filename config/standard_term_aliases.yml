@@ -1,0 +1,25 @@
+aliases:
+  - canonical_code: ZT_001
+    canonical_name: 货币资金
+    alias: 现金及现金等价物
+    alias_type: exact_alias
+    safe_auto_map: true
+    note: 常见报表列示名称。
+  - canonical_code: ZT_007
+    canonical_name: 应交税费
+    alias: 应交税金
+    alias_type: legacy_alias
+    safe_auto_map: true
+    note: 旧准则常见写法。
+  - canonical_code: ZT_008
+    canonical_name: 应付职工薪酬
+    alias: 应付工资
+    alias_type: legacy_alias
+    safe_auto_map: true
+    note: 旧科目名称。
+  - canonical_code: ZT_012
+    canonical_name: 其他应付款项
+    alias: 其他应付款
+    alias_type: legacy_alias
+    safe_auto_map: true
+    note: 旧科目名称。

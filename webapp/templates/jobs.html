@@ -11,7 +11,7 @@
         <p class="eyebrow">Jobs</p>
         <h1>任务列表</h1>
     </div>
-    <a class="button button--primary" href="/jobs/new">新建任务</a>
+    <a class="button button--primary" href="{{ url_prefix }}/jobs/new">新建任务</a>
 </section>
 
 <section class="card">
@@ -42,7 +42,7 @@
                     <td>{{ job.updated_at }}</td>
                     <td>{{ provider_mode_label_zh(job.provider_mode) }}</td>
                     <td>{{ job.progress_summary }}</td>
-                    <td><a href="/jobs/{{ job.job_id }}">查看</a></td>
+                    <td><a href="{{ url_prefix }}/jobs/{{ job.job_id }}">查看</a></td>
                 </tr>
                 {% endfor %}
             </tbody>

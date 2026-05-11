@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import secrets
+import json
 from pathlib import Path
 from typing import Annotated
 
@@ -8,6 +9,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Resp
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 
+from .base_path import app_path
 from .config import WebAppSettings
 from .db import cancel_job, list_jobs, requeue_job
 from .jobs import (
@@ -52,6 +54,22 @@ from .review import (
     resolve_evidence_file,
     save_review_action,
 )
+from .simple_flow import (
+    build_mapping_review_sheet,
+    build_raw_review_sheet,
+    find_review_item,
+    load_mapping_review_items,
+    load_raw_review_items,
+    load_simple_flow_state,
+    resolve_safe_source_file,
+    run_raw_metrics_step,
+    run_standard_metrics_step,
+    save_mapping_review_action,
+    save_raw_review_action,
+    source_preview_rotation_degrees,
+)
+from standard_map.registry import load_standard_registry
+from standard_map.search import search_standard_terms
 
 
 router = APIRouter()
@@ -85,9 +103,14 @@ def _render(
     status_code: int = 200,
 ) -> HTMLResponse:
     templates = get_templates(request)
-    payload = {"request": request, "settings": get_settings(request)}
+    settings = get_settings(request)
+    payload = {"request": request, "settings": settings, "url_prefix": settings.base_path}
     payload.update(context)
     return templates.TemplateResponse(request, template_name, payload, status_code=status_code)
+
+
+def _app_url(request: Request, path: str) -> str:
+    return app_path(get_settings(request).base_path, path)
 
 
 def _new_job_context(request: Request, *, error_message: str = "", submitted: dict[str, object] | None = None) -> dict[str, object]:
@@ -171,18 +194,13 @@ def _get_review_item_or_404(request: Request, job_id: str, review_item_id: str):
 
 
 @router.get("/", response_class=HTMLResponse, dependencies=[Depends(password_gate)])
-def index(request: Request) -> HTMLResponse:
-    jobs = list_jobs(get_settings(request), limit=20)
-    active_jobs = [job for job in jobs if job.status in ACTIVE_JOB_STATUSES]
+def index(request: Request, message: str = "", error: str = "") -> HTMLResponse:
+    from .document_routes import build_home_context
+
     return _render(
         request,
         "index.html",
-        {
-            "jobs": jobs[:5],
-            "active_jobs": active_jobs,
-            "describe_job_status": describe_job_status,
-            "job_stage_label_zh": job_stage_label_zh,
-        },
+        build_home_context(request, message=message, error=error),
     )
 
 
@@ -190,6 +208,11 @@ def index(request: Request) -> HTMLResponse:
 def new_job(request: Request, mode: str = "") -> HTMLResponse:
     submitted = {"mode": mode} if mode in {"existing_ocr_outputs", "upload_pdf"} else {}
     return _render(request, "new_job.html", _new_job_context(request, submitted=submitted))
+
+
+@router.get("/advanced", dependencies=[Depends(password_gate)])
+def advanced_redirect() -> RedirectResponse:
+    return RedirectResponse(url="/jobs", status_code=303)
 
 
 @router.post("/jobs", dependencies=[Depends(password_gate)], response_model=None)
@@ -264,8 +287,240 @@ def job_detail(request: Request, job_id: str) -> HTMLResponse:
             "auto_refresh": job.status in ACTIVE_JOB_STATUSES or active_operation,
             "latest_operation": latest_operation,
             "recent_operations": recent_operations,
+            "simple_flow": load_simple_flow_state(job),
         },
     )
+
+
+@router.post("/jobs/{job_id}/raw-metrics/run", dependencies=[Depends(password_gate)])
+def run_raw_metrics_route(request: Request, job_id: str) -> RedirectResponse:
+    settings = get_settings(request)
+    job = require_job(settings, job_id)
+    try:
+        run_raw_metrics_step(settings, job)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return RedirectResponse(url=f"/jobs/{job_id}", status_code=303)
+
+
+@router.post("/jobs/{job_id}/standard-metrics/run", dependencies=[Depends(password_gate)])
+def run_standard_metrics_route(
+    request: Request,
+    job_id: str,
+    raw_metrics_path: Annotated[str, Form()] = "",
+) -> RedirectResponse:
+    settings = get_settings(request)
+    job = require_job(settings, job_id)
+    try:
+        run_standard_metrics_step(settings, job, raw_metrics_path=raw_metrics_path)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return RedirectResponse(url=f"/jobs/{job_id}", status_code=303)
+
+
+@router.get("/jobs/{job_id}/raw-review", response_class=HTMLResponse, dependencies=[Depends(password_gate)])
+def raw_review_page(request: Request, job_id: str) -> HTMLResponse:
+    job = require_job(get_settings(request), job_id)
+    sheet = build_raw_review_sheet(job)
+    item = sheet.get("selected_item")
+    page_image_url = _app_url(request, f"/jobs/{job_id}/raw-review/page-image/{item.get('review_item_id')}") if item else ""
+    return _render(request, "raw_review.html", {"job": job, "sheet": sheet, "item": item, "page_image_url": page_image_url})
+
+
+@router.get("/jobs/{job_id}/raw-review/items/{item_id}", response_class=HTMLResponse, dependencies=[Depends(password_gate)])
+def raw_review_item_page(request: Request, job_id: str, item_id: str) -> HTMLResponse:
+    settings = get_settings(request)
+    job = require_job(settings, job_id)
+    sheet = build_raw_review_sheet(job, item_id)
+    item = sheet.get("selected_item")
+    if item is None or str(item.get("review_item_id", "")) != item_id:
+        raise HTTPException(status_code=404, detail="原始数据校对项不存在。")
+    page_image_url = _app_url(request, f"/jobs/{job_id}/raw-review/page-image/{item_id}") if item.get("source_pdf_path") else ""
+    return _render(request, "raw_review.html", {"job": job, "sheet": sheet, "item": item, "page_image_url": page_image_url})
+
+
+@router.get("/jobs/{job_id}/raw-review/page-image/{item_id}", dependencies=[Depends(password_gate)])
+def raw_review_page_image(request: Request, job_id: str, item_id: str) -> Response:
+    settings = get_settings(request)
+    job = require_job(settings, job_id)
+    item = find_review_item(load_raw_review_items(job), item_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail="原始数据校对项不存在。")
+    path = resolve_safe_source_file(settings, job, str(item.get("source_pdf_path", "")))
+    page_no = int(str(item.get("source_page_no", "") or "1"))
+    try:
+        import fitz
+    except Exception as exc:  # pragma: no cover
+        raise HTTPException(status_code=500, detail="PDF 渲染组件不可用。") from exc
+    try:
+        document = fitz.open(path)
+        page = document[page_no - 1]
+        matrix = fitz.Matrix(2, 2)
+        rotation = source_preview_rotation_degrees(item)
+        if rotation:
+            matrix = matrix.prerotate(rotation)
+        pixmap = page.get_pixmap(matrix=matrix, alpha=False)
+        content = pixmap.tobytes("png")
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"无法渲染第 {page_no} 页。") from exc
+    return Response(content=content, media_type="image/png")
+
+
+@router.get("/jobs/{job_id}/raw-review/evidence/{item_id}", dependencies=[Depends(password_gate)])
+def raw_review_evidence(request: Request, job_id: str, item_id: str) -> FileResponse:
+    settings = get_settings(request)
+    job = require_job(settings, job_id)
+    item = find_review_item(load_raw_review_items(job), item_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail="原始数据校对项不存在。")
+    path = resolve_safe_source_file(settings, job, str(item.get("source_pdf_path", "")))
+    return FileResponse(path=str(path), filename=path.name, media_type="application/pdf", content_disposition_type="inline")
+
+
+@router.post("/jobs/{job_id}/raw-review/actions", dependencies=[Depends(password_gate)])
+def raw_review_action_route(
+    request: Request,
+    job_id: str,
+    review_item_id: Annotated[str, Form(...)],
+    action: Annotated[str, Form(...)],
+    fill_date: Annotated[str, Form()] = "",
+    item_date: Annotated[str, Form()] = "",
+    company_name: Annotated[str, Form()] = "",
+    metric_name: Annotated[str, Form()] = "",
+    metric_value: Annotated[str, Form()] = "",
+    next_item_id: Annotated[str, Form()] = "",
+    edits_json: Annotated[str, Form()] = "",
+    reviewer_note: Annotated[str, Form()] = "",
+) -> RedirectResponse:
+    settings = get_settings(request)
+    job = require_job(settings, job_id)
+    item = find_review_item(load_raw_review_items(job), review_item_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail="原始数据校对项不存在。")
+    edits = {}
+    if action in {"edit", "next_table"}:
+        if edits_json.strip():
+            try:
+                edits = {"table_edits": json.loads(edits_json)}
+            except json.JSONDecodeError as exc:
+                raise HTTPException(status_code=400, detail="表格修改内容不是合法 JSON。") from exc
+        elif action == "edit":
+            edits = {
+                "填表日期": fill_date,
+                "当前条目日期": item_date,
+                "公司名": company_name,
+                "指标名": metric_name,
+                "指标数值": metric_value,
+            }
+    try:
+        save_raw_review_action(job, item=item, action=action, edits=edits, reviewer_note=reviewer_note)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    redirect_item_id = review_item_id
+    if action == "next_table":
+        sheet = build_raw_review_sheet(job, review_item_id)
+        redirect_item_id = str(sheet.get("next_item_id") or next_item_id or review_item_id)
+    return RedirectResponse(url=f"/jobs/{job_id}/raw-review/items/{redirect_item_id}", status_code=303)
+
+
+@router.get("/jobs/{job_id}/mapping-review", response_class=HTMLResponse, dependencies=[Depends(password_gate)])
+def mapping_review_page(request: Request, job_id: str) -> HTMLResponse:
+    job = require_job(get_settings(request), job_id)
+    sheet = build_mapping_review_sheet(job)
+    item = sheet.get("selected_item")
+    page_image_url = (
+        _app_url(request, f"/jobs/{job_id}/mapping-review/page-image/{item.get('review_item_id')}")
+        if item and item.get("source_pdf_path")
+        else ""
+    )
+    return _render(request, "mapping_review.html", {"job": job, "sheet": sheet, "items": sheet["items"], "item": item, "page_image_url": page_image_url})
+
+
+@router.get("/jobs/{job_id}/mapping-review/items/{item_id}", response_class=HTMLResponse, dependencies=[Depends(password_gate)])
+def mapping_review_item_page(request: Request, job_id: str, item_id: str) -> HTMLResponse:
+    settings = get_settings(request)
+    job = require_job(settings, job_id)
+    sheet = build_mapping_review_sheet(job, item_id)
+    item = sheet.get("selected_item")
+    if item is None or str(item.get("review_item_id", "")) != item_id:
+        raise HTTPException(status_code=404, detail="术语映射校对项不存在。")
+    page_image_url = _app_url(request, f"/jobs/{job_id}/mapping-review/page-image/{item_id}") if item.get("source_pdf_path") else ""
+    return _render(
+        request,
+        "mapping_review.html",
+        {"job": job, "sheet": sheet, "items": sheet["items"], "item": item, "page_image_url": page_image_url},
+    )
+
+
+@router.get("/jobs/{job_id}/mapping-review/page-image/{item_id}", dependencies=[Depends(password_gate)])
+def mapping_review_page_image(request: Request, job_id: str, item_id: str) -> Response:
+    settings = get_settings(request)
+    job = require_job(settings, job_id)
+    item = find_review_item(load_mapping_review_items(job), item_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail="术语映射校对项不存在。")
+    path = resolve_safe_source_file(settings, job, str(item.get("source_pdf_path", "")))
+    page_no = int(str(item.get("source_page_no", "") or "1"))
+    try:
+        import fitz
+    except Exception as exc:  # pragma: no cover
+        raise HTTPException(status_code=500, detail="PDF 渲染组件不可用。") from exc
+    try:
+        document = fitz.open(path)
+        page = document[page_no - 1]
+        matrix = fitz.Matrix(2, 2)
+        rotation = source_preview_rotation_degrees(item)
+        if rotation:
+            matrix = matrix.prerotate(rotation)
+        pixmap = page.get_pixmap(matrix=matrix, alpha=False)
+        content = pixmap.tobytes("png")
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"无法渲染第 {page_no} 页。") from exc
+    return Response(content=content, media_type="image/png")
+
+
+@router.get("/jobs/{job_id}/mapping-review/evidence/{item_id}", dependencies=[Depends(password_gate)])
+def mapping_review_evidence(request: Request, job_id: str, item_id: str) -> FileResponse:
+    settings = get_settings(request)
+    job = require_job(settings, job_id)
+    item = find_review_item(load_mapping_review_items(job), item_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail="术语映射校对项不存在。")
+    path = resolve_safe_source_file(settings, job, str(item.get("source_pdf_path", "")))
+    return FileResponse(path=str(path), filename=path.name, media_type="application/pdf", content_disposition_type="inline")
+
+
+@router.post("/jobs/{job_id}/mapping-review/actions", dependencies=[Depends(password_gate)])
+def mapping_review_action_route(
+    request: Request,
+    job_id: str,
+    review_item_id: Annotated[str, Form(...)],
+    action: Annotated[str, Form(...)],
+    selected_code: Annotated[str, Form()] = "",
+    selected_name: Annotated[str, Form()] = "",
+    reviewer_note: Annotated[str, Form()] = "",
+) -> RedirectResponse:
+    settings = get_settings(request)
+    job = require_job(settings, job_id)
+    item = find_review_item(load_mapping_review_items(job), review_item_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail="术语映射校对项不存在。")
+    if action == "change_mapping" and selected_code and not selected_name:
+        registry = load_standard_registry()
+        selected = registry.term_by_code.get(selected_code)
+        selected_name = selected.name if selected else selected_name
+    try:
+        save_mapping_review_action(
+            job,
+            item=item,
+            action=action,
+            selected_code=selected_code,
+            selected_name=selected_name,
+            reviewer_note=reviewer_note,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return RedirectResponse(url=f"/jobs/{job_id}/mapping-review/items/{review_item_id}", status_code=303)
 
 
 @router.get("/jobs/{job_id}/status", response_class=JSONResponse, dependencies=[Depends(password_gate)])
@@ -650,6 +905,12 @@ def system_page(request: Request) -> HTMLResponse:
 @router.get("/api/system-status", response_class=JSONResponse, dependencies=[Depends(password_gate)])
 def system_status_api(request: Request) -> JSONResponse:
     return JSONResponse(get_system_status(get_settings(request)).as_dict())
+
+
+@router.get("/api/standard-terms/search", response_class=JSONResponse, dependencies=[Depends(password_gate)])
+def standard_terms_search_api(request: Request, q: str = "", limit: int = 10) -> JSONResponse:
+    capped_limit = max(1, min(int(limit or 10), 20))
+    return JSONResponse({"query": q, "results": search_standard_terms(q, limit=capped_limit)})
 
 
 @router.get("/healthz", response_class=JSONResponse)

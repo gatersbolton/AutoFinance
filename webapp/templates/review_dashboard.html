@@ -8,9 +8,9 @@
         <p class="hero-copy">面向审计复核用户的统一工作台。这里会集中展示复核进度、自动应用兼容性、证据图片覆盖情况，以及导出 / 应用 / 重跑入口。</p>
     </div>
     <div class="actions">
-        <a class="button button--secondary" href="/jobs/{{ job.job_id }}">返回任务详情</a>
-        <a class="button button--secondary" href="/jobs/{{ job.job_id }}/review/items">打开复核项工作台</a>
-        <a class="button button--primary" href="/jobs/{{ job.job_id }}/review/export-actions">导出 / 预览 / 应用</a>
+        <a class="button button--secondary" href="{{ url_prefix }}/jobs/{{ job.job_id }}">返回任务详情</a>
+        <a class="button button--secondary" href="{{ url_prefix }}/jobs/{{ job.job_id }}/review/items">打开复核项工作台</a>
+        <a class="button button--primary" href="{{ url_prefix }}/jobs/{{ job.job_id }}/review/export-actions">导出 / 预览 / 应用</a>
     </div>
 </section>
 
@@ -193,7 +193,7 @@
                     <td><code>{{ artifact.relative_path }}</code></td>
                     <td>
                         {% if artifact.exists %}
-                        <a href="/jobs/{{ job.job_id }}/download/{{ artifact.slug }}">下载</a>
+                        <a href="{{ url_prefix }}/jobs/{{ job.job_id }}/download/{{ artifact.slug }}">下载</a>
                         {% else %}
                         不可用
                         {% endif %}

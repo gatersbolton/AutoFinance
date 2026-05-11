@@ -8,9 +8,9 @@
         <p class="hero-copy">按问题类型、优先级、自动应用兼容性和证据情况筛选复核项；支持逐条保存和批量动作，帮助审计用户高效处理积压。</p>
     </div>
     <div class="actions">
-        <a class="button button--secondary" href="/jobs/{{ job.job_id }}/review">返回复核看板</a>
-        <a class="button button--secondary" href="/jobs/{{ job.job_id }}">返回任务详情</a>
-        <a class="button button--primary" href="/jobs/{{ job.job_id }}/review/export-actions">导出 / 预览 / 应用</a>
+        <a class="button button--secondary" href="{{ url_prefix }}/jobs/{{ job.job_id }}/review">返回复核看板</a>
+        <a class="button button--secondary" href="{{ url_prefix }}/jobs/{{ job.job_id }}">返回任务详情</a>
+        <a class="button button--primary" href="{{ url_prefix }}/jobs/{{ job.job_id }}/review/export-actions">导出 / 预览 / 应用</a>
     </div>
 </section>
 
@@ -18,15 +18,15 @@
     <h2>快捷筛选</h2>
     <div class="actions quick-filter-strip">
         {% for option in filters.quick_filters %}
-        <a class="button button--secondary {% if selected_filters.quick_filter == option.value %}button--active{% endif %}" href="/jobs/{{ job.job_id }}/review/items?quick_filter={{ option.value }}">{{ option.label_zh }}</a>
+        <a class="button button--secondary {% if selected_filters.quick_filter == option.value %}button--active{% endif %}" href="{{ url_prefix }}/jobs/{{ job.job_id }}/review/items?quick_filter={{ option.value }}">{{ option.label_zh }}</a>
         {% endfor %}
-        <a class="button button--secondary" href="/jobs/{{ job.job_id }}/review/items">清空全部筛选</a>
+        <a class="button button--secondary" href="{{ url_prefix }}/jobs/{{ job.job_id }}/review/items">清空全部筛选</a>
     </div>
 </section>
 
 <section class="card">
     <h2>筛选</h2>
-    <form class="filter-grid" method="get" action="/jobs/{{ job.job_id }}/review/items">
+    <form class="filter-grid" method="get" action="{{ url_prefix }}/jobs/{{ job.job_id }}/review/items">
         <label class="field">
             <span class="label">状态</span>
             <select name="status">
@@ -122,7 +122,7 @@
         <input type="hidden" name="quick_filter" value="{{ selected_filters.quick_filter }}">
         <div class="actions">
             <button class="button button--primary" type="submit">应用筛选</button>
-            <a class="button button--secondary" href="/jobs/{{ job.job_id }}/review/items">清空</a>
+            <a class="button button--secondary" href="{{ url_prefix }}/jobs/{{ job.job_id }}/review/items">清空</a>
         </div>
     </form>
 </section>
@@ -152,7 +152,7 @@
 
 <section class="card">
     <h2>批量动作</h2>
-    <form id="bulk-action-form" class="action-form" action="/jobs/{{ job.job_id }}/review/bulk-action" method="post">
+    <form id="bulk-action-form" class="action-form" action="{{ url_prefix }}/jobs/{{ job.job_id }}/review/bulk-action" method="post">
         <input type="hidden" name="next_url" value="{{ request.url.path }}{% if request.url.query %}?{{ request.url.query }}{% endif %}">
         <div class="action-form__grid">
             <label class="field">
@@ -235,13 +235,13 @@
                     {% if item.meta.get("evidence_cell_available") or item.meta.get("evidence_row_available") or item.meta.get("evidence_table_available") %}
                     <div class="evidence-links">
                         {% if item.meta.get("evidence_cell_available") %}
-                        <a href="/jobs/{{ job.job_id }}/review/evidence/{{ item.review_item_id }}/cell" target="_blank">查看单元格证据</a>
+                        <a href="{{ url_prefix }}/jobs/{{ job.job_id }}/review/evidence/{{ item.review_item_id }}/cell" target="_blank">查看单元格证据</a>
                         {% endif %}
                         {% if item.meta.get("evidence_row_available") %}
-                        <a href="/jobs/{{ job.job_id }}/review/evidence/{{ item.review_item_id }}/row" target="_blank">查看行证据</a>
+                        <a href="{{ url_prefix }}/jobs/{{ job.job_id }}/review/evidence/{{ item.review_item_id }}/row" target="_blank">查看行证据</a>
                         {% endif %}
                         {% if item.meta.get("evidence_table_available") %}
-                        <a href="/jobs/{{ job.job_id }}/review/evidence/{{ item.review_item_id }}/table" target="_blank">查看表格证据</a>
+                        <a href="{{ url_prefix }}/jobs/{{ job.job_id }}/review/evidence/{{ item.review_item_id }}/table" target="_blank">查看表格证据</a>
                         {% endif %}
                     </div>
                     {% elif item.evidence_path %}
@@ -260,7 +260,7 @@
                 </div>
             </div>
 
-            <form class="action-form" action="/jobs/{{ job.job_id }}/review/actions" method="post">
+            <form class="action-form" action="{{ url_prefix }}/jobs/{{ job.job_id }}/review/actions" method="post">
                 <input type="hidden" name="review_item_id" value="{{ item.review_item_id }}">
                 <input type="hidden" name="next_url" value="{{ request.url.path }}{% if request.url.query %}?{{ request.url.query }}{% endif %}">
                 <div class="action-form__grid">

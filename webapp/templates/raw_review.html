@@ -1,0 +1,123 @@
+{% extends "base.html" %}
+{% block title %}原始数据校对 | {{ settings.app_name }}{% endblock %}
+{% block content %}
+{% set base_url = review_base_url|default(url_prefix ~ '/jobs/' ~ job.job_id) %}
+{% set return_url = review_return_url|default(url_prefix ~ '/jobs/' ~ job.job_id) %}
+<section class="page-heading">
+    <div>
+        <p class="eyebrow">原始数据校对</p>
+        <h1>{{ job.display_name }}</h1>
+    </div>
+    <div class="actions">
+        <a class="button button--secondary" href="{{ return_url }}">返回结果</a>
+    </div>
+</section>
+
+{% if not item %}
+<section class="card">
+    <h2>暂无可校对数据</h2>
+    <p>请先生成原始数据表。</p>
+</section>
+{% else %}
+<section class="ocr-workbench" data-raw-review-workbench>
+    <article class="card source-panel">
+        <div class="panel-heading">
+            <div class="source-title-block">
+                <h2>原始文件</h2>
+                <p class="todo-note">第 <span data-current-page>{{ item.get("source_page_no", "未记录") or "未记录" }}</span> 页</p>
+            </div>
+            {% if page_image_url %}
+            <div class="source-zoom-card source-zoom-card--header" data-source-zoom hidden>
+                <div class="source-zoom-window" data-source-zoom-window>
+                    <div class="source-zoom-highlight" data-source-zoom-highlight></div>
+                </div>
+            </div>
+            {% endif %}
+        </div>
+        {% if page_image_url %}
+        <div class="source-image-frame">
+            <img class="source-page-image" src="{{ page_image_url }}" alt="原始文件当前页" data-source-page-image>
+            <div class="source-highlight" data-source-highlight></div>
+        </div>
+        {% else %}
+        <p>未记录可预览文件。</p>
+        {% endif %}
+    </article>
+
+    <article class="card sheet-panel">
+        <div class="panel-heading">
+            <div>
+                <h2>提取表格</h2>
+                <p class="todo-note">按原始报表页和表格重组，可直接编辑单元格。</p>
+            </div>
+        </div>
+
+        <div class="sheet-tabs" data-sheet-tabs>
+            {% for group in sheet.groups %}
+            <a
+                class="button {% if group.selected %}button--active{% else %}button--secondary{% endif %}"
+                href="{{ base_url }}/raw-review/items/{{ group.first_item_id }}"
+                {% if group.selected %}data-selected-sheet-tab{% endif %}
+            >
+                {{ group.label }} · {{ group.count }}项
+            </a>
+            {% endfor %}
+        </div>
+
+        <div class="spreadsheet-wrap">
+            <table class="spreadsheet-table" data-spreadsheet-table>
+                <thead>
+                    <tr>
+                        <th class="row-heading">指标名</th>
+                        {% for column in sheet.columns %}
+                        <th>{{ column.label }}</th>
+                        {% endfor %}
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for row in sheet.rows %}
+                    <tr>
+                        <th class="row-heading" contenteditable="true" data-row-label data-row-index="{{ row.row_index }}">{{ row.label }}</th>
+                        {% for column in sheet.columns %}
+                            {% set cell = row.cells.get(column.col_index) %}
+                            {% if cell %}
+                            <td
+                                class="metric-cell {% if cell.review_item_id == item.review_item_id %}metric-cell--selected{% endif %}"
+                                contenteditable="true"
+                                data-editable-cell
+                                data-review-item-id="{{ cell.review_item_id }}"
+                                data-raw-metric-id="{{ cell.raw_metric_id }}"
+                                data-page-no="{{ cell.source_page_no }}"
+                                data-bbox='{{ cell.source_bbox_json | e }}'
+                                data-metric-name="{{ cell.get('指标名', '') }}"
+                                data-row-index="{{ row.row_index }}"
+                                data-col-index="{{ column.col_index }}"
+                            >{{ cell.get("指标数值", "") }}</td>
+                            {% else %}
+                            <td class="metric-cell metric-cell--empty" contenteditable="true" data-empty-cell data-row-index="{{ row.row_index }}" data-col-index="{{ column.col_index }}"></td>
+                            {% endif %}
+                        {% endfor %}
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+
+        <form class="raw-review-actions" action="{{ base_url }}/raw-review/actions" method="post" data-raw-sheet-form>
+            <input type="hidden" name="review_item_id" value="{{ item.review_item_id }}" data-selected-review-item>
+            <input type="hidden" name="next_item_id" value="{{ sheet.next_item_id or item.review_item_id }}">
+            <input type="hidden" name="edits_json" value="" data-edits-json>
+            <input type="hidden" name="reviewer_note" value="">
+            <div class="actions">
+                <button class="button button--primary" type="submit" name="action" value="edit">保存</button>
+                <button class="button button--secondary" type="submit" name="action" value="next_table" {% if not sheet.has_next_group %}disabled{% endif %}>下一页</button>
+            </div>
+        </form>
+
+        <div class="selection-summary" data-selection-summary>
+            当前选中：{{ item.get("指标名", "") }} / {{ item.get("指标数值", "") }}
+        </div>
+    </article>
+</section>
+{% endif %}
+{% endblock %}

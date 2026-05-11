@@ -31,6 +31,7 @@ from .quality import (
     load_json,
     summarize_for_operator,
 )
+from .simple_flow import load_simple_flow_state
 
 
 COMMON_OUTPUT_DEFS = (
@@ -389,6 +390,17 @@ def discover_output_files(job: JobRecord) -> list[OutputArtifact]:
     for slug, label, filename in COMMON_OUTPUT_DEFS:
         path = output_dir / filename
         artifacts.append(_artifact_from_path(slug, label, path, download_name=filename))
+
+    simple_state = load_simple_flow_state(job)
+    for slug, label, key, download_name in (
+        ("raw_metrics_csv", "原始数据表 CSV", "raw_metrics_csv", "raw_metrics.csv"),
+        ("raw_metrics_xlsx", "原始数据表 Excel", "raw_metrics_xlsx", "raw_metrics.xlsx"),
+        ("standardized_metrics_csv", "标准化数据表 CSV", "standardized_metrics_csv", "standardized_metrics.csv"),
+        ("standardized_metrics_xlsx", "标准化数据表 Excel", "standardized_metrics_xlsx", "standardized_metrics.xlsx"),
+    ):
+        raw_path = str(simple_state.get(key, "") or "")
+        path = Path(raw_path) if raw_path else output_dir / f"__missing_{slug}"
+        artifacts.append(_artifact_from_path(slug, label, path, download_name=download_name))
     for slug, label, filename in (
         ("job_summary", "任务摘要", "job_summary.json"),
         ("quality_summary", "质量摘要", "job_quality_summary.json"),

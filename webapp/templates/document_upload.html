@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block title %}上传新的 PDF | {{ settings.app_name }}{% endblock %}
+{% block content %}
+<section class="page-heading">
+    <div>
+        <h1>上传新的 PDF</h1>
+    </div>
+    <a class="button button--secondary" href="{{ url_prefix }}/">返回首页</a>
+</section>
+
+{% if error_message %}
+<section class="notice notice--error">{{ error_message }}</section>
+{% endif %}
+
+<section class="card">
+    <form class="form-stack" action="{{ url_prefix }}/documents/upload" method="post" enctype="multipart/form-data">
+        <div class="field">
+            <label class="label" for="uploaded_files">PDF 文件</label>
+            <input id="uploaded_files" name="uploaded_files" type="file" accept="application/pdf,.pdf" multiple required>
+            <p class="field-help">可以一次选择一个或多个 PDF。</p>
+        </div>
+        <div class="actions">
+            <button class="button button--primary" type="submit">保存 PDF</button>
+            <a class="button button--secondary" href="{{ url_prefix }}/">取消</a>
+        </div>
+    </form>
+</section>
+{% endblock %}

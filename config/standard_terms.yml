@@ -1,0 +1,84 @@
+terms:
+  - code: ZT_001
+    name: 货币资金
+    aliases:
+      - 货币资金
+      - 现金及现金等价物
+    statement_scope: balance_sheet
+    metric_type: amount
+    notes: 资产负债表货币资金项目。
+  - code: ZT_002
+    name: 短期借款
+    aliases:
+      - 短期借款
+    statement_scope: balance_sheet
+    metric_type: amount
+  - code: ZT_003
+    name: 应付票据
+    aliases:
+      - 应付票据
+    statement_scope: balance_sheet
+    metric_type: amount
+  - code: ZT_004
+    name: 应收票据
+    aliases:
+      - 应收票据
+    statement_scope: balance_sheet
+    metric_type: amount
+  - code: ZT_005
+    name: 应收账款
+    aliases:
+      - 应收账款
+    statement_scope: balance_sheet
+    metric_type: amount
+  - code: ZT_006
+    name: 存货
+    aliases:
+      - 存货
+    statement_scope: balance_sheet
+    metric_type: amount
+  - code: ZT_007
+    name: 应交税费
+    aliases:
+      - 应交税费
+    legacy_aliases:
+      - 应交税金
+    statement_scope: balance_sheet
+    metric_type: amount
+    notes: 旧准则“应交税金”在本阶段可安全映射到应交税费。
+  - code: ZT_008
+    name: 应付职工薪酬
+    aliases:
+      - 应付职工薪酬
+    legacy_aliases:
+      - 应付工资
+    statement_scope: balance_sheet
+    metric_type: amount
+  - code: ZT_009
+    name: 营业收入
+    aliases:
+      - 营业收入
+      - 主营业务收入
+    statement_scope: income_statement
+    metric_type: amount
+  - code: ZT_010
+    name: 净利润
+    aliases:
+      - 净利润
+    statement_scope: income_statement
+    metric_type: amount
+  - code: ZT_011
+    name: 应收票据及应收账款
+    aliases:
+      - 应收票据及应收账款
+    statement_scope: balance_sheet
+    metric_type: amount
+    notes: 汇总项默认进入人工校对，不自动等同于明细项。
+  - code: ZT_012
+    name: 其他应付款项
+    aliases:
+      - 其他应付款项
+    legacy_aliases:
+      - 其他应付款
+    statement_scope: balance_sheet
+    metric_type: amount

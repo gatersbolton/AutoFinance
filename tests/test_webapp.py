@@ -14,10 +14,19 @@ from unittest import mock
 from fastapi.testclient import TestClient
 from openpyxl import Workbook
 
-from project_paths import REPO_ROOT
+from project_paths import RAW_METRICS_GENERATED_ROOT, STANDARD_METRICS_GENERATED_ROOT, REPO_ROOT
 from scripts.deployment_check import main as deployment_check_main
+from standard_map.search import search_standard_terms
 from webapp.config import WebAppSettings
 from webapp.deployment import run_deployment_preflight
+from webapp.document_library import (
+    build_delete_plan,
+    document_to_job,
+    load_document,
+    update_document_status,
+    write_document,
+)
+from webapp.document_models import STATUS_COMPLETED
 from webapp.db import (
     get_job,
     get_review_operation,
@@ -31,6 +40,17 @@ from webapp.main import create_app
 from webapp.models import JobRecord
 from webapp.review import export_review_actions, get_review_dir, load_review_items, filter_review_items
 from webapp.runner import run_worker_once
+from webapp.simple_flow import (
+    _label_matches,
+    _normalize_ocr_label,
+    _resolve_mapping_term_bbox_json,
+    _resolve_source_table_cell_bbox_json,
+    load_simple_flow_state,
+    mapping_review_dir,
+    raw_review_dir,
+    raw_step_summary_path,
+    source_preview_rotation_degrees,
+)
 
 
 class WebAppTests(unittest.TestCase):
@@ -60,8 +80,10 @@ class WebAppTests(unittest.TestCase):
             jobs_root=self.runtime_root / "jobs",
             results_root=self.runtime_root / "results",
             logs_root=self.runtime_root / "logs",
+            deletions_root=self.runtime_root / "deletions",
             db_path=self.runtime_root / "webapp.sqlite3",
             corpus_root=self.corpus_root,
+            library_root=self.corpus_root / "library",
             template_path=self.template_path,
             secret_path=self.secret_path,
             enable_local_worker=False,
@@ -152,6 +174,218 @@ class WebAppTests(unittest.TestCase):
             writer.writeheader()
             for row in rows:
                 writer.writerow(row)
+
+    def _create_raw_metrics_fixture(self, *, metric_name: str = "往来款", evidence_path: Path | None = None, bbox_json: str = '[{"x":1,"y":2},{"x":3,"y":4}]') -> Path:
+        RAW_METRICS_GENERATED_ROOT.mkdir(parents=True, exist_ok=True)
+        tempdir = tempfile.TemporaryDirectory(dir=RAW_METRICS_GENERATED_ROOT)
+        self.addCleanup(tempdir.cleanup)
+        run_dir = Path(tempdir.name) / "RUN_WEB_TEST"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        raw_path = run_dir / "raw_metrics.csv"
+        self._write_csv(
+            raw_path,
+            [
+                {
+                    "填表日期": "2022-12-31",
+                    "当前条目日期": "2022-12-31",
+                    "公司名": "AAA有限公司",
+                    "指标名": metric_name,
+                    "指标数值": "100",
+                }
+            ],
+            ["填表日期", "当前条目日期", "公司名", "指标名", "指标数值"],
+        )
+        source_pdf = evidence_path or (self.corpus_root / "CASE1" / "input" / "sample.pdf")
+        self._write_csv(
+            run_dir / "raw_metrics_detailed.csv",
+            [
+                {
+                    "source_cell_ref": "CASE1:1:aliyun_table:0:1-1:2-2",
+                    "page_no": "1",
+                    "bbox_json": bbox_json,
+                    "evidence_path": str(source_pdf),
+                    "source_file": "fixture.json",
+                    "provider": "aliyun_table",
+                    "doc_id": "CASE1",
+                }
+            ],
+            ["source_cell_ref", "page_no", "bbox_json", "evidence_path", "source_file", "provider", "doc_id"],
+        )
+        self.addCleanup(lambda: shutil.rmtree(STANDARD_METRICS_GENERATED_ROOT / Path(tempdir.name).name, ignore_errors=True))
+        return raw_path
+
+    def _create_two_table_raw_metrics_fixture(self) -> Path:
+        RAW_METRICS_GENERATED_ROOT.mkdir(parents=True, exist_ok=True)
+        tempdir = tempfile.TemporaryDirectory(dir=RAW_METRICS_GENERATED_ROOT)
+        self.addCleanup(tempdir.cleanup)
+        run_dir = Path(tempdir.name) / "RUN_WEB_TEST"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        raw_path = run_dir / "raw_metrics.csv"
+        rows = [
+            {
+                "填表日期": "2022-12-31",
+                "当前条目日期": "2022-12-31",
+                "公司名": "AAA有限公司",
+                "指标名": "货币资金",
+                "指标数值": "100",
+            },
+            {
+                "填表日期": "2022-12-31",
+                "当前条目日期": "2022-12-31",
+                "公司名": "AAA有限公司",
+                "指标名": "短期借款",
+                "指标数值": "200",
+            },
+        ]
+        self._write_csv(raw_path, rows, ["填表日期", "当前条目日期", "公司名", "指标名", "指标数值"])
+        source_pdf = self.corpus_root / "CASE1" / "input" / "sample.pdf"
+        detailed_rows = [
+            {
+                "source_cell_ref": "CASE1:1:aliyun_table:1:1-1:2-2",
+                "page_no": "1",
+                "bbox_json": '[{"x":1,"y":2},{"x":3,"y":4}]',
+                "evidence_path": str(source_pdf),
+                "source_file": "fixture.json",
+                "provider": "aliyun_table",
+                "doc_id": "CASE1",
+                "table_id": "1",
+                "logical_subtable_id": "1_sub1",
+                "row_index": "1",
+                "col_index": "2",
+                "row_label_clean": "货币资金",
+            },
+            {
+                "source_cell_ref": "CASE1:1:aliyun_table:2:1-1:2-2",
+                "page_no": "1",
+                "bbox_json": '[{"x":5,"y":6},{"x":7,"y":8}]',
+                "evidence_path": str(source_pdf),
+                "source_file": "fixture.json",
+                "provider": "aliyun_table",
+                "doc_id": "CASE1",
+                "table_id": "2",
+                "logical_subtable_id": "2_sub1",
+                "row_index": "1",
+                "col_index": "2",
+                "row_label_clean": "短期借款",
+            },
+        ]
+        self._write_csv(
+            run_dir / "raw_metrics_detailed.csv",
+            detailed_rows,
+            [
+                "source_cell_ref",
+                "page_no",
+                "bbox_json",
+                "evidence_path",
+                "source_file",
+                "provider",
+                "doc_id",
+                "table_id",
+                "logical_subtable_id",
+                "row_index",
+                "col_index",
+                "row_label_clean",
+            ],
+        )
+        self.addCleanup(lambda: shutil.rmtree(STANDARD_METRICS_GENERATED_ROOT / Path(tempdir.name).name, ignore_errors=True))
+        return raw_path
+
+    def _upload_library_pdf(self, filename: str = "A公司财务报表.pdf") -> str:
+        response = self.client.post(
+            "/documents/upload",
+            files=[("uploaded_files", (filename, b"%PDF-1.4\n%mock\n%%EOF\n", "application/pdf"))],
+            follow_redirects=False,
+        )
+        self.assertEqual(response.status_code, 303)
+        doc_dirs = sorted((self.corpus_root / "library").iterdir(), key=lambda path: path.name)
+        self.assertTrue(doc_dirs)
+        return doc_dirs[-1].name
+
+    def _write_tiny_library_ocr(self, doc_id: str) -> None:
+        document = load_document(self.settings, doc_id, refresh=False)
+        provider_doc_dir = Path(document.ocr_output_dir) / "aliyun_table" / "demo_doc"
+        raw_dir = provider_doc_dir / "raw"
+        raw_dir.mkdir(parents=True, exist_ok=True)
+        cells = [
+            (1, 0, 0, 0, 0, "项目"),
+            (2, 0, 0, 1, 1, "行次"),
+            (3, 0, 0, 2, 2, "期初数"),
+            (4, 0, 0, 3, 3, "期末数"),
+            (5, 1, 1, 0, 0, "货币资金"),
+            (6, 1, 1, 1, 1, "1"),
+            (7, 1, 1, 2, 2, "100"),
+            (8, 1, 1, 3, 3, "200"),
+        ]
+        raw_payload = {
+            "Data": {
+                "content": "资产负债表\n编制单位：AAA有限公司\n2022年12月31日\n单位：元",
+                "tableHeadTail": [
+                    {
+                        "head": ["资产负债表", "编制单位：AAA有限公司", "2022年12月31日", "单位：元"],
+                        "tail": [],
+                    }
+                ],
+                "prism_tablesInfo": [
+                    {
+                        "tableId": "1",
+                        "xCellSize": 4,
+                        "yCellSize": 2,
+                        "cellInfos": [
+                            {
+                                "tableCellId": cell_id,
+                                "ysc": row_start,
+                                "yec": row_end,
+                                "xsc": col_start,
+                                "xec": col_end,
+                                "word": text,
+                                "pos": [
+                                    {"x": 10 + col_start * 80, "y": 20 + row_start * 30},
+                                    {"x": 70 + col_end * 80, "y": 20 + row_start * 30},
+                                    {"x": 70 + col_end * 80, "y": 45 + row_end * 30},
+                                    {"x": 10 + col_start * 80, "y": 45 + row_end * 30},
+                                ],
+                            }
+                            for cell_id, row_start, row_end, col_start, col_end, text in cells
+                        ],
+                    }
+                ],
+            }
+        }
+        (raw_dir / "page_0001.json").write_text(json.dumps(raw_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        (provider_doc_dir / "result.json").write_text(
+            json.dumps(
+                {
+                    "provider": "aliyun_table",
+                    "pages": [
+                        {
+                            "page_number": 1,
+                            "text": "资产负债表\n编制单位：AAA有限公司\n2022年12月31日\n单位：元",
+                            "raw_file": "raw/page_0001.json",
+                        }
+                    ],
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        update_document_status(self.settings, doc_id, ocr_status=STATUS_COMPLETED)
+
+    def _attach_raw_summary_to_job(self, job_id: str, raw_path: Path) -> None:
+        job = get_job(self.settings, job_id)
+        self.assertIsNotNone(job)
+        payload = {
+            "pass": True,
+            "run_id": raw_path.parent.name,
+            "doc_id": raw_path.parent.parent.name,
+            "output_dir": str(raw_path.parent),
+            "raw_metrics_csv": str(raw_path),
+            "raw_metrics_xlsx": str(raw_path.parent / "raw_metrics.xlsx"),
+            "raw_metrics_detailed_csv": str(raw_path.parent / "raw_metrics_detailed.csv"),
+            "output_files": [str(raw_path), str(raw_path.parent / "raw_metrics_detailed.csv")],
+        }
+        raw_step_summary_path(job).parent.mkdir(parents=True, exist_ok=True)
+        raw_step_summary_path(job).write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
     def _run_next_worker_item(self) -> None:
         run_worker_once(self.settings)
@@ -530,12 +764,430 @@ class WebAppTests(unittest.TestCase):
     def test_app_starts_and_home_page_returns_200(self):
         response = self.client.get("/")
         self.assertEqual(response.status_code, 200)
-        self.assertIn("AutoFinance Web MVP", response.text)
+        self.assertIn("财务报表数据提取", response.text)
+
+    def test_simplified_home_page_hides_old_technical_labels(self):
+        response = self.client.get("/")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("上传新的 PDF", response.text)
+        self.assertIn("已保存 PDF", response.text)
+        for text in ("新建任务", "待复核项目", "operation", "provider conflict", "raw JSON", "task id", "queue", "batch", "debug"):
+            self.assertNotIn(text, response.text)
 
     def test_new_job_page_returns_200(self):
         response = self.client.get("/jobs/new")
         self.assertEqual(response.status_code, 200)
         self.assertIn("新建任务", response.text)
+
+    def test_document_library_home_returns_200(self):
+        response = self.client.get("/")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("已保存 PDF", response.text)
+
+    def test_document_upload_saves_pdf_and_metadata_under_library(self):
+        doc_id = self._upload_library_pdf("B公司审计报告.pdf")
+        document = load_document(self.settings, doc_id, refresh=False)
+        self.assertTrue(Path(document.pdf_path).exists())
+        self.assertTrue(str(Path(document.pdf_path).resolve()).startswith(str((self.corpus_root / "library" / doc_id / "input").resolve())))
+        self.assertEqual(document.original_filename, "B公司审计报告.pdf")
+        self.assertTrue(Path(document.metadata_path).exists())
+
+    def test_document_home_no_ocr_button_state(self):
+        doc_id = self._upload_library_pdf()
+        response = self.client.get("/")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("开始识别", response.text)
+        self.assertIn("删除", response.text)
+        row_start = response.text.index("A公司财务报表.pdf")
+        row_text = response.text[row_start : row_start + 2000]
+        self.assertNotIn("继续处理", row_text)
+
+    def test_document_home_ocr_completed_button_state(self):
+        doc_id = self._upload_library_pdf()
+        update_document_status(self.settings, doc_id, ocr_status=STATUS_COMPLETED)
+        response = self.client.get("/")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("重新OCR", response.text)
+        self.assertIn("继续处理", response.text)
+
+    def test_document_continue_blocks_when_ocr_missing(self):
+        doc_id = self._upload_library_pdf()
+        response = self.client.get(f"/documents/{doc_id}/continue", follow_redirects=False)
+        self.assertEqual(response.status_code, 303)
+        self.assertIn("%E8%AF%B7%E5%85%88%E7%82%B9%E5%87%BB", response.headers["location"])
+
+    def test_document_step1_raw_extraction_from_fixture_ocr(self):
+        doc_id = self._upload_library_pdf()
+        self._write_tiny_library_ocr(doc_id)
+        response = self.client.post(f"/documents/{doc_id}/raw-metrics/run", follow_redirects=False)
+        self.assertEqual(response.status_code, 303)
+        document = load_document(self.settings, doc_id)
+        self.assertEqual(document.raw_metrics_status, STATUS_COMPLETED)
+        state = load_simple_flow_state(document_to_job(self.settings, document))
+        self.assertTrue(state["raw_ready"])
+        self.assertTrue(Path(state["raw_metrics_csv"]).exists())
+        self.assertTrue(str(Path(state["raw_metrics_csv"]).resolve()).startswith(str((RAW_METRICS_GENERATED_ROOT / doc_id).resolve())))
+
+    def test_document_step2_standard_mapping_after_raw_metrics_exists(self):
+        doc_id = self._upload_library_pdf()
+        self._write_tiny_library_ocr(doc_id)
+        self.client.post(f"/documents/{doc_id}/raw-metrics/run", follow_redirects=False)
+        response = self.client.post(f"/documents/{doc_id}/standard-metrics/run", follow_redirects=False)
+        self.assertEqual(response.status_code, 303)
+        document = load_document(self.settings, doc_id)
+        self.assertEqual(document.standard_metrics_status, STATUS_COMPLETED)
+        state = load_simple_flow_state(document_to_job(self.settings, document))
+        self.assertTrue(state["standard_ready"])
+        self.assertTrue(Path(state["standardized_metrics_csv"]).exists())
+
+    def test_document_delete_confirmation_lists_associated_files(self):
+        doc_id = self._upload_library_pdf()
+        self._write_tiny_library_ocr(doc_id)
+        (RAW_METRICS_GENERATED_ROOT / doc_id / "RUN_TEST").mkdir(parents=True, exist_ok=True)
+        (STANDARD_METRICS_GENERATED_ROOT / doc_id / "RUN_TEST").mkdir(parents=True, exist_ok=True)
+        response = self.client.get(f"/documents/{doc_id}/delete-confirm")
+        self.assertEqual(response.status_code, 200)
+        for text in ("原始 PDF", "OCR 输出", "原始数据结果", "标准化数据结果", "相关网页任务文件", "确认删除"):
+            self.assertIn(text, response.text)
+
+    def test_document_delete_action_removes_allowed_paths_and_writes_summary(self):
+        doc_id = self._upload_library_pdf()
+        self._write_tiny_library_ocr(doc_id)
+        raw_dir = RAW_METRICS_GENERATED_ROOT / doc_id / "RUN_TEST"
+        standard_dir = STANDARD_METRICS_GENERATED_ROOT / doc_id / "RUN_TEST"
+        raw_dir.mkdir(parents=True, exist_ok=True)
+        standard_dir.mkdir(parents=True, exist_ok=True)
+        (raw_dir / "raw_metrics.csv").write_text("x\n", encoding="utf-8")
+        (standard_dir / "standardized_metrics.csv").write_text("x\n", encoding="utf-8")
+        response = self.client.post(f"/documents/{doc_id}/delete", follow_redirects=False)
+        self.assertEqual(response.status_code, 303)
+        self.assertFalse((self.corpus_root / "library" / doc_id).exists())
+        self.assertFalse((RAW_METRICS_GENERATED_ROOT / doc_id).exists())
+        self.assertFalse((STANDARD_METRICS_GENERATED_ROOT / doc_id).exists())
+        summaries = sorted(self.settings.deletions_root.glob(f"{doc_id}_*_delete_summary.json"))
+        self.assertTrue(summaries)
+        summary = json.loads(summaries[-1].read_text(encoding="utf-8"))
+        self.assertEqual(summary["status"], "deleted")
+
+    def test_document_delete_rejects_unsafe_paths(self):
+        doc_id = self._upload_library_pdf()
+        document = load_document(self.settings, doc_id, refresh=False)
+        outside_pdf = self.temp_path / "outside.pdf"
+        outside_pdf.write_bytes(b"%PDF-1.4\n")
+        document.pdf_path = str(outside_pdf)
+        write_document(self.settings, document)
+        plan = build_delete_plan(self.settings, load_document(self.settings, doc_id, refresh=False))
+        self.assertTrue(plan["unsafe_paths"])
+        response = self.client.post(f"/documents/{doc_id}/delete", follow_redirects=False)
+        self.assertEqual(response.status_code, 400)
+        self.assertTrue((self.corpus_root / "library" / doc_id).exists())
+
+    def test_document_home_advanced_links_are_not_prominent(self):
+        response = self.client.get("/")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn('class="advanced-links"', response.text)
+        self.assertIn("管理员工具", response.text)
+        self.assertNotIn("Provider Priority", response.text)
+
+    def test_step2_route_runs_standard_map_on_raw_metrics_fixture(self):
+        job_id = self._create_job("step2 route")
+        raw_path = self._create_raw_metrics_fixture(metric_name="往来款")
+        response = self.client.post(
+            f"/jobs/{job_id}/standard-metrics/run",
+            data={"raw_metrics_path": str(raw_path)},
+            follow_redirects=False,
+        )
+        self.assertEqual(response.status_code, 303)
+        job = get_job(self.settings, job_id)
+        state = load_simple_flow_state(job)
+        self.assertTrue(state["standard_ready"])
+        self.assertTrue(Path(state["standardized_metrics_csv"]).exists())
+        self.assertTrue(str(Path(state["standardized_metrics_csv"]).resolve()).startswith(str(STANDARD_METRICS_GENERATED_ROOT.resolve())))
+
+    def test_raw_review_page_loads_and_raw_actions_are_saved(self):
+        job_id = self._create_job("raw review")
+        raw_path = self._create_raw_metrics_fixture(metric_name="货币资金")
+        self._attach_raw_summary_to_job(job_id, raw_path)
+        response = self.client.get(f"/jobs/{job_id}/raw-review")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("原始数据校对", response.text)
+        self.assertIn("data-sheet-tabs", response.text)
+        self.assertIn(">保存</button>", response.text)
+        self.assertIn(">下一页</button>", response.text)
+        self.assertNotIn("通过选中单元格", response.text)
+        self.assertNotIn("跳过选中单元格", response.text)
+        self.assertNotIn("保存表格修改", response.text)
+        action_response = self.client.post(
+            f"/jobs/{job_id}/raw-review/actions",
+            data={
+                "review_item_id": "rawrev_000001",
+                "action": "edit",
+                "edits_json": json.dumps(
+                    [
+                        {
+                            "review_item_id": "rawrev_000001",
+                            "raw_metric_id": "CASE1:1:aliyun_table:0:1-1:2-2",
+                            "row_index": "1",
+                            "col_index": "2",
+                            "metric_name": "货币资金",
+                            "value": "999.88",
+                        }
+                    ],
+                    ensure_ascii=False,
+                ),
+                "reviewer_note": "ok",
+            },
+            follow_redirects=False,
+        )
+        self.assertEqual(action_response.status_code, 303)
+        saved_response = self.client.get(f"/jobs/{job_id}/raw-review/items/rawrev_000001")
+        self.assertEqual(saved_response.status_code, 200)
+        self.assertIn("999.88", saved_response.text)
+        job = get_job(self.settings, job_id)
+        self.assertTrue((raw_review_dir(job) / "raw_review_actions.csv").exists())
+        self.assertTrue((raw_review_dir(job) / "raw_review_actions.json").exists())
+
+    def test_raw_review_next_table_saves_current_sheet_and_redirects(self):
+        job_id = self._create_job("raw review next")
+        raw_path = self._create_two_table_raw_metrics_fixture()
+        self._attach_raw_summary_to_job(job_id, raw_path)
+        response = self.client.post(
+            f"/jobs/{job_id}/raw-review/actions",
+            data={
+                "review_item_id": "rawrev_000001",
+                "action": "next_table",
+                "edits_json": json.dumps(
+                    [
+                        {
+                            "review_item_id": "rawrev_000001",
+                            "raw_metric_id": "CASE1:1:aliyun_table:1:1-1:2-2",
+                            "row_index": "1",
+                            "col_index": "2",
+                            "metric_name": "货币资金",
+                            "value": "321.00",
+                        }
+                    ],
+                    ensure_ascii=False,
+                ),
+            },
+            follow_redirects=False,
+        )
+        self.assertEqual(response.status_code, 303)
+        self.assertTrue(response.headers["location"].endswith("/jobs/%s/raw-review/items/rawrev_000002" % job_id))
+        saved_response = self.client.get(f"/jobs/{job_id}/raw-review/items/rawrev_000001")
+        self.assertEqual(saved_response.status_code, 200)
+        self.assertIn("321.00", saved_response.text)
+
+    def test_mapping_review_page_loads_and_mapping_actions_are_saved(self):
+        job_id = self._create_job("mapping review")
+        raw_path = self._create_raw_metrics_fixture(metric_name="货币资金")
+        self.client.post(
+            f"/jobs/{job_id}/standard-metrics/run",
+            data={"raw_metrics_path": str(raw_path)},
+            follow_redirects=False,
+        )
+        response = self.client.get(f"/jobs/{job_id}/mapping-review")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("术语映射校对", response.text)
+        self.assertIn('data-mapping-review-workbench', response.text)
+        self.assertIn('class="spreadsheet-table mapping-table"', response.text)
+        self.assertIn("原始术语", response.text)
+        self.assertIn("标准术语", response.text)
+        self.assertIn("搜索标准术语，如：短期、借款、2、dqjk", response.text)
+        self.assertIn("data-standard-term-input", response.text)
+        self.assertIn("data-mapping-cell", response.text)
+        self.assertIn("data-bbox=", response.text)
+        self.assertIn("data-page-no=", response.text)
+        self.assertNotIn("<th>指标数值</th>", response.text)
+        approve = self.client.post(
+            f"/jobs/{job_id}/mapping-review/actions",
+            data={"review_item_id": "maprev_000001", "action": "approve_mapping", "reviewer_note": "ok"},
+            follow_redirects=False,
+        )
+        self.assertEqual(approve.status_code, 303)
+        skip = self.client.post(
+            f"/jobs/{job_id}/mapping-review/actions",
+            data={"review_item_id": "maprev_000001", "action": "skip_mapping", "reviewer_note": "skip"},
+            follow_redirects=False,
+        )
+        self.assertEqual(skip.status_code, 303)
+        change = self.client.post(
+            f"/jobs/{job_id}/mapping-review/actions",
+            data={
+                "review_item_id": "maprev_000001",
+                "action": "change_mapping",
+                "selected_code": "ZT_002",
+                "selected_name": "短期借款",
+                "reviewer_note": "change",
+            },
+            follow_redirects=False,
+        )
+        self.assertEqual(change.status_code, 303)
+        job = get_job(self.settings, job_id)
+        actions_path = mapping_review_dir(job) / "mapping_review_actions.json"
+        self.assertTrue(actions_path.exists())
+        self.assertTrue((mapping_review_dir(job) / "mapping_review_actions.csv").exists())
+        actions = json.loads(actions_path.read_text(encoding="utf-8"))
+        self.assertEqual([item["action"] for item in actions], ["approve_mapping", "skip_mapping", "change_mapping"])
+        self.assertEqual(actions[-1]["original_metric_name"], "货币资金")
+        self.assertEqual(actions[-1]["previous_code"], "ZT_001")
+        self.assertEqual(actions[-1]["previous_name"], "货币资金")
+        self.assertEqual(actions[-1]["selected_code"], "ZT_002")
+        self.assertEqual(actions[-1]["selected_name"], "短期借款")
+        self.assertTrue(str(actions_path.resolve()).startswith(str(self.runtime_root.resolve())))
+
+    def test_standard_term_search_supports_code_name_and_pinyin_initials(self):
+        for query in ("2", "002", "ZT_002", "短期", "借款", "dqjk"):
+            results = search_standard_terms(query, limit=5)
+            self.assertTrue(results, query)
+            self.assertEqual(results[0]["code"], "ZT_002")
+            self.assertEqual(results[0]["name"], "短期借款")
+
+        response = self.client.get("/api/standard-terms/search?q=dqjk")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["results"][0]["display_label"], "ZT_002 短期借款")
+
+    def test_webapp_base_path_serves_pages_api_and_redirects(self):
+        settings = self.make_settings(base_path="/AutoFinance")
+        settings.ensure_directories()
+        init_db(settings)
+        with TestClient(create_app(settings)) as client:
+            response = client.get("/AutoFinance/")
+            self.assertEqual(response.status_code, 200)
+            self.assertIn('href="/AutoFinance/documents/upload"', response.text)
+            self.assertIn("/AutoFinance/static/style.css", response.text)
+            self.assertIn("/AutoFinance/static/app.js", response.text)
+            self.assertIn('window.__APP_BASE_PATH__ = "/AutoFinance"', response.text)
+            self.assertNotIn('href="/documents/upload"', response.text)
+
+            static_response = client.get("/AutoFinance/static/app.js")
+            self.assertEqual(static_response.status_code, 200)
+
+            api_response = client.get("/AutoFinance/api/standard-terms/search?q=2")
+            self.assertEqual(api_response.status_code, 200)
+            self.assertEqual(api_response.json()["results"][0]["display_label"], "ZT_002 短期借款")
+
+            redirect_response = client.get("/AutoFinance/advanced", follow_redirects=False)
+            self.assertEqual(redirect_response.status_code, 303)
+            self.assertEqual(redirect_response.headers["location"], "/AutoFinance/jobs")
+
+            health_response = client.get("/healthz")
+            self.assertEqual(health_response.status_code, 200)
+
+    def test_mapping_review_escapes_unsafe_bbox_and_keeps_source_attrs(self):
+        job_id = self._create_job("mapping unsafe bbox")
+        raw_path = self._create_raw_metrics_fixture(metric_name="货币资金", bbox_json='"><script>alert(1)</script>')
+        self.client.post(
+            f"/jobs/{job_id}/standard-metrics/run",
+            data={"raw_metrics_path": str(raw_path)},
+            follow_redirects=False,
+        )
+        response = self.client.get(f"/jobs/{job_id}/mapping-review")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("data-bbox=", response.text)
+        self.assertIn("data-bbox-state=", response.text)
+        self.assertNotIn("<script>alert(1)</script>", response.text)
+
+    def test_mapping_label_match_allows_ocr_tail_noise(self):
+        target = _normalize_ocr_label("负债和所有者权益(或股东权益)")
+        candidate = _normalize_ocr_label("负债和所有者权益(或股东权益包")
+        unrelated = _normalize_ocr_label("一年内到期的长期借款")
+        self.assertTrue(_label_matches(candidate, target))
+        self.assertFalse(_label_matches(unrelated, _normalize_ocr_label("长期借款")))
+
+    def test_tencent_shared_table_polygon_gets_grid_cell_bbox_for_review_highlight(self):
+        source_file = self.temp_path / "tencent_shared_polygon.json"
+        table_polygon = [
+            {"X": 100, "Y": 200},
+            {"X": 500, "Y": 200},
+            {"X": 500, "Y": 600},
+            {"X": 100, "Y": 600},
+        ]
+        source_file.write_text(
+            json.dumps(
+                {
+                    "Angle": 0,
+                    "TableDetections": [
+                        {
+                            "Type": "table",
+                            "TableCoordPoint": table_polygon,
+                            "Cells": [
+                                {"RowTl": 0, "RowBr": 1, "ColTl": 0, "ColBr": 1, "Text": "项目", "Polygon": table_polygon},
+                                {"RowTl": 0, "RowBr": 1, "ColTl": 2, "ColBr": 3, "Text": "期末数", "Polygon": table_polygon},
+                                {"RowTl": 2, "RowBr": 3, "ColTl": 0, "ColBr": 1, "Text": "货币资金", "Polygon": table_polygon},
+                                {"RowTl": 2, "RowBr": 3, "ColTl": 2, "ColBr": 3, "Text": "100", "Polygon": table_polygon},
+                                {"RowTl": 3, "RowBr": 4, "ColTl": 3, "ColBr": 4, "Text": "200", "Polygon": table_polygon},
+                            ],
+                        }
+                    ],
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        detailed = {
+            "source_file": str(source_file),
+            "table_id": "1",
+            "row_index": "2",
+            "col_index": "2",
+        }
+
+        value_bbox = json.loads(_resolve_source_table_cell_bbox_json(detailed))
+        self.assertEqual(value_bbox[0], {"x": 300.0, "y": 400.0})
+        self.assertEqual(value_bbox[2], {"x": 400.0, "y": 500.0})
+
+        term_bbox = json.loads(_resolve_mapping_term_bbox_json({}, detailed, "货币资金"))
+        self.assertEqual(term_bbox[0], {"x": 100.0, "y": 400.0})
+        self.assertEqual(term_bbox[2], {"x": 200.0, "y": 500.0})
+
+    def test_rotated_source_page_is_rendered_in_ocr_orientation(self):
+        source_file = self.temp_path / "rotated_page.json"
+        source_file.write_text(
+            json.dumps(
+                {
+                    "Data": {
+                        "angle": 90,
+                        "width": 1649,
+                        "height": 1157,
+                        "orgWidth": 1157,
+                        "orgHeight": 1649,
+                    }
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        self.assertEqual(source_preview_rotation_degrees({"source_file": str(source_file)}), -90)
+        tencent_source_file = self.temp_path / "tencent_rotated_page.json"
+        tencent_source_file.write_text(
+            json.dumps({"Angle": 27000, "Data": ""}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        self.assertEqual(source_preview_rotation_degrees({"source_file": str(tencent_source_file)}), -90)
+
+    def test_unsafe_evidence_pdf_paths_are_rejected(self):
+        outside_pdf = self.temp_path / "outside.pdf"
+        outside_pdf.write_bytes(b"%PDF-1.4\n%outside\n")
+        job_id = self._create_job("unsafe evidence")
+        raw_path = self._create_raw_metrics_fixture(metric_name="货币资金", evidence_path=outside_pdf)
+        self._attach_raw_summary_to_job(job_id, raw_path)
+        response = self.client.get(f"/jobs/{job_id}/raw-review/evidence/rawrev_000001")
+        self.assertEqual(response.status_code, 400)
+
+    def test_simple_flow_output_files_stay_under_data_generated(self):
+        job_id = self._create_job("path hygiene step2")
+        raw_path = self._create_raw_metrics_fixture(metric_name="往来款")
+        self.client.post(
+            f"/jobs/{job_id}/standard-metrics/run",
+            data={"raw_metrics_path": str(raw_path)},
+            follow_redirects=False,
+        )
+        job = get_job(self.settings, job_id)
+        state = load_simple_flow_state(job)
+        output_dir = Path(state["standard_summary"]["output_dir"]).resolve()
+        self.assertTrue(str(output_dir).startswith(str(STANDARD_METRICS_GENERATED_ROOT.resolve())))
+        self.assertTrue(str(Path(job.output_dir)).startswith(str(self.settings.jobs_root)))
+        self.assertFalse((REPO_ROOT / "standardized_metrics.csv").exists())
 
     def test_create_standardize_only_job_from_existing_ocr_path(self):
         job_id = self._create_job("CASE1 smoke")

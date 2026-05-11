@@ -14,6 +14,10 @@ _audit_tmp/
 reocr_results/
 review_pack/
 tmp/
+.playwright-cli/
+.env
+.env.local
+.env.*.local
 .venv*/
 __pycache__/
 .pytest_cache/

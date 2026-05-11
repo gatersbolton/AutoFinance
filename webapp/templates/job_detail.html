@@ -12,18 +12,52 @@
         <h1>{{ job.display_name }}</h1>
     </div>
     <div class="actions">
-        <a class="button button--secondary" href="/jobs/{{ job.job_id }}/review">复核看板</a>
-        <a class="button button--secondary" href="/jobs/{{ job.job_id }}/review/items">复核项</a>
         {% if can_queue %}
-        <form action="/jobs/{{ job.job_id }}/queue" method="post">
+        <form action="{{ url_prefix }}/jobs/{{ job.job_id }}/queue" method="post">
             <button class="button button--secondary" type="submit">重新入队</button>
         </form>
         {% endif %}
         {% if can_cancel %}
-        <form action="/jobs/{{ job.job_id }}/cancel" method="post">
+        <form action="{{ url_prefix }}/jobs/{{ job.job_id }}/cancel" method="post">
             <button class="button button--secondary" type="submit">取消任务</button>
         </form>
         {% endif %}
+    </div>
+</section>
+
+<section class="card">
+    <h2>两步生成</h2>
+    <div class="stage-flow">
+        <article class="stage-card {% if simple_flow.raw_ready %}stage-card--done{% else %}stage-card--current{% endif %}">
+            <p class="eyebrow">1</p>
+            <h3>原始数据表</h3>
+            <p>{% if simple_flow.raw_ready %}已生成{% else %}待生成{% endif %}</p>
+            <form action="{{ url_prefix }}/jobs/{{ job.job_id }}/raw-metrics/run" method="post">
+                <button class="button button--primary" type="submit">一键提取原始数据表</button>
+            </form>
+            {% if simple_flow.raw_ready %}
+            <div class="actions">
+                <a class="button button--secondary" href="{{ url_prefix }}/jobs/{{ job.job_id }}/download/raw_metrics_xlsx">下载原始数据表 Excel</a>
+                <a class="button button--secondary" href="{{ url_prefix }}/jobs/{{ job.job_id }}/download/raw_metrics_csv">下载原始数据表 CSV</a>
+                <a class="button button--secondary" href="{{ url_prefix }}/jobs/{{ job.job_id }}/raw-review">进入原始数据校对</a>
+            </div>
+            {% endif %}
+        </article>
+        <article class="stage-card {% if simple_flow.standard_ready %}stage-card--done{% elif simple_flow.raw_ready %}stage-card--current{% else %}stage-card--pending{% endif %}">
+            <p class="eyebrow">2</p>
+            <h3>标准化数据表</h3>
+            <p>{% if simple_flow.standard_ready %}已生成{% elif simple_flow.raw_ready %}可生成{% else %}请先生成原始数据表{% endif %}</p>
+            <form action="{{ url_prefix }}/jobs/{{ job.job_id }}/standard-metrics/run" method="post">
+                <button class="button button--primary" type="submit" {% if not simple_flow.raw_ready %}disabled{% endif %}>一键生成标准化数据表</button>
+            </form>
+            {% if simple_flow.standard_ready %}
+            <div class="actions">
+                <a class="button button--secondary" href="{{ url_prefix }}/jobs/{{ job.job_id }}/download/standardized_metrics_xlsx">下载标准化数据表 Excel</a>
+                <a class="button button--secondary" href="{{ url_prefix }}/jobs/{{ job.job_id }}/download/standardized_metrics_csv">下载标准化数据表 CSV</a>
+                <a class="button button--secondary" href="{{ url_prefix }}/jobs/{{ job.job_id }}/mapping-review">进入术语映射校对</a>
+            </div>
+            {% endif %}
+        </article>
     </div>
 </section>
 
@@ -70,12 +104,15 @@
             {% set logs_artifact.item = artifact %}
         {% endif %}
     {% endfor %}
-    {% if workbook_artifact.item and workbook_artifact.item.exists %}
-    <a class="button button--primary" href="/jobs/{{ job.job_id }}/download/filled_workbook">下载会计报表</a>
+    {% if simple_flow.standard_ready %}
+    <a class="button button--primary" href="{{ url_prefix }}/jobs/{{ job.job_id }}/download/standardized_metrics_xlsx">下载最终标准化结果</a>
+    {% elif simple_flow.raw_ready %}
+    <a class="button button--primary" href="{{ url_prefix }}/jobs/{{ job.job_id }}/download/raw_metrics_xlsx">下载原始数据表</a>
+    {% elif workbook_artifact.item and workbook_artifact.item.exists %}
+    <a class="button button--primary" href="{{ url_prefix }}/jobs/{{ job.job_id }}/download/filled_workbook">下载会计报表</a>
     {% endif %}
-    <a class="button button--secondary" href="/jobs/{{ job.job_id }}/review">进入人工复核</a>
     {% if logs_artifact.item and logs_artifact.item.exists %}
-    <a class="button button--secondary" href="/jobs/{{ job.job_id }}/download/logs">下载日志</a>
+    <a class="button button--secondary" href="{{ url_prefix }}/jobs/{{ job.job_id }}/download/logs">下载日志</a>
     {% endif %}
 </section>
 
@@ -101,8 +138,8 @@
             <div><dt>供应商识别冲突</dt><dd>{{ review_summary.provider_conflict_count }}</dd></div>
         </dl>
         <div class="actions">
-            <a class="button button--secondary" href="/jobs/{{ job.job_id }}/review">打开复核看板</a>
-            <a class="button button--secondary" href="/jobs/{{ job.job_id }}/review/export-actions">导出 / 应用复核动作</a>
+            <a class="button button--secondary" href="{{ url_prefix }}/jobs/{{ job.job_id }}/review">打开复核看板</a>
+            <a class="button button--secondary" href="{{ url_prefix }}/jobs/{{ job.job_id }}/review/export-actions">导出 / 应用复核动作</a>
         </div>
     </article>
 
@@ -133,7 +170,7 @@
                 <div class="download-tile">
                     <h3>{{ label }}</h3>
                     {% if found.item and found.item.exists %}
-                    <a class="button button--secondary" href="/jobs/{{ job.job_id }}/download/{{ slug }}">立即下载</a>
+                    <a class="button button--secondary" href="{{ url_prefix }}/jobs/{{ job.job_id }}/download/{{ slug }}">立即下载</a>
                     {% else %}
                     <p>未生成</p>
                     {% endif %}
@@ -182,21 +219,21 @@
                         <td>{% if version.recommended %}当前推荐结果{% else %}-{% endif %}</td>
                         <td>
                             {% if version.workbook_slug and version.workbook_exists %}
-                            <a href="/jobs/{{ job.job_id }}/download/{{ version.workbook_slug }}">下载</a>
+                            <a href="{{ url_prefix }}/jobs/{{ job.job_id }}/download/{{ version.workbook_slug }}">下载</a>
                             {% else %}
                             未生成
                             {% endif %}
                         </td>
                         <td>
                             {% if version.delta_slug and version.delta_exists %}
-                            <a href="/jobs/{{ job.job_id }}/download/{{ version.delta_slug }}">查看对比</a>
+                            <a href="{{ url_prefix }}/jobs/{{ job.job_id }}/download/{{ version.delta_slug }}">查看对比</a>
                             {% else %}
                             原始结果
                             {% endif %}
                         </td>
                         <td>
                             {% if version.delta_explained_slug and version.delta_explained_exists %}
-                            <a href="/jobs/{{ job.job_id }}/download/{{ version.delta_explained_slug }}">查看说明</a>
+                            <a href="{{ url_prefix }}/jobs/{{ job.job_id }}/download/{{ version.delta_explained_slug }}">查看说明</a>
                             {% else %}
                             原始结果
                             {% endif %}
@@ -221,7 +258,7 @@
             <div><dt>最新推荐版本</dt><dd>{{ payload.latest_recommended_result.get("label", "original") if payload.latest_recommended_result else "original" }}</dd></div>
         </dl>
         <div class="actions">
-            <a class="button button--secondary" href="/jobs/{{ job.job_id }}/review/export-actions">打开导出 / 应用页</a>
+            <a class="button button--secondary" href="{{ url_prefix }}/jobs/{{ job.job_id }}/review/export-actions">打开导出 / 应用页</a>
         </div>
     </article>
 </section>
@@ -266,12 +303,12 @@
         </dl>
         <div class="actions">
             {% if latest_operation.get("can_cancel") %}
-            <form action="/jobs/{{ job.job_id }}/operations/{{ latest_operation.get('operation_id') }}/cancel" method="post">
+            <form action="{{ url_prefix }}/jobs/{{ job.job_id }}/operations/{{ latest_operation.get('operation_id') }}/cancel" method="post">
                 <button class="button button--secondary" type="submit">取消操作</button>
             </form>
             {% endif %}
             {% if latest_operation.get("can_retry") %}
-            <form action="/jobs/{{ job.job_id }}/operations/{{ latest_operation.get('operation_id') }}/retry" method="post">
+            <form action="{{ url_prefix }}/jobs/{{ job.job_id }}/operations/{{ latest_operation.get('operation_id') }}/retry" method="post">
                 <button class="button button--secondary" type="submit">重试操作</button>
             </form>
             {% endif %}
@@ -347,7 +384,7 @@
                     <td><code>{{ artifact.relative_path }}</code></td>
                     <td>
                         {% if artifact.exists %}
-                        <a href="/jobs/{{ job.job_id }}/download/{{ artifact.slug }}">下载</a>
+                        <a href="{{ url_prefix }}/jobs/{{ job.job_id }}/download/{{ artifact.slug }}">下载</a>
                         {% else %}
                         未生成
                         {% endif %}

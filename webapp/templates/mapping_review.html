@@ -1,0 +1,137 @@
+{% extends "base.html" %}
+{% block title %}术语映射校对 | {{ settings.app_name }}{% endblock %}
+{% block content %}
+{% set base_url = review_base_url|default(url_prefix ~ '/jobs/' ~ job.job_id) %}
+{% set return_url = review_return_url|default(url_prefix ~ '/jobs/' ~ job.job_id) %}
+<section class="page-heading">
+    <div>
+        <p class="eyebrow">术语映射校对</p>
+        <h1>{{ job.display_name }}</h1>
+    </div>
+    <div class="actions">
+        <a class="button button--secondary" href="{{ return_url }}">返回结果</a>
+    </div>
+</section>
+
+{% if not items %}
+<section class="card">
+    <h2>暂无可校对映射</h2>
+    <p>请先生成标准化数据表。</p>
+</section>
+{% else %}
+<section
+    class="ocr-workbench"
+    data-mapping-review-workbench
+    data-highlight-missing-text="当前术语未记录位置"
+    data-highlight-found-text="已高亮选中术语出处"
+>
+    <article class="card source-panel">
+        <div class="panel-heading">
+            <div class="source-title-block">
+                <h2>原始文件</h2>
+                <p class="todo-note">第 <span data-current-page>{{ item.get("source_page_no", "未记录") or "未记录" }}</span> 页</p>
+            </div>
+            {% if page_image_url %}
+            <div class="source-zoom-card source-zoom-card--header" data-source-zoom hidden>
+                <div class="source-zoom-window" data-source-zoom-window>
+                    <div class="source-zoom-highlight" data-source-zoom-highlight></div>
+                </div>
+            </div>
+            {% endif %}
+        </div>
+        {% if page_image_url %}
+        <div class="source-image-frame">
+            <img class="source-page-image" src="{{ page_image_url }}" alt="原始文件当前页" data-source-page-image>
+            <div class="source-highlight" data-source-highlight></div>
+        </div>
+        {% else %}
+        <p>未记录可预览文件。</p>
+        {% endif %}
+        <p class="selection-summary" data-highlight-status>
+            {% if item.get("source_term_bbox_json") %}点击右侧行可高亮原始术语。{% else %}当前术语未记录位置{% endif %}
+        </p>
+    </article>
+
+    <article class="card sheet-panel">
+        <div class="panel-heading">
+            <div>
+                <h2>映射表格</h2>
+                <p class="todo-note">点击原始术语查看出处，在标准术语框中搜索并保存。</p>
+            </div>
+        </div>
+
+        <div class="spreadsheet-wrap">
+            <table class="spreadsheet-table mapping-table" data-mapping-table>
+                <thead>
+                    <tr>
+                        <th class="row-heading">原始术语</th>
+                        <th>标准术语</th>
+                        <th>状态</th>
+                        <th>操作</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for row in items %}
+                    {% set form_id = "mapping-form-" ~ row.review_item_id %}
+                    <tr
+                        class="mapping-row {% if row.selected %}mapping-row--selected{% endif %}"
+                        data-mapping-cell
+                        data-review-item-id="{{ row.review_item_id }}"
+                        data-raw-metric-id="{{ row.raw_metric_id }}"
+                        data-page-no="{{ row.source_page_no }}"
+                        data-bbox='{{ row.source_term_bbox_json | e }}'
+                        data-bbox-state="{{ row.bbox_state }}"
+                        data-page-image-url="{% if row.source_pdf_path %}{{ base_url }}/mapping-review/page-image/{{ row.review_item_id }}{% endif %}"
+                        data-original-metric-name="{{ row.original_metric_name }}"
+                        data-current-mapping-label="{{ row.current_mapping_label }}"
+                        data-previous-code="{{ row.current_code }}"
+                        data-previous-name="{{ row.current_name }}"
+                    >
+                        <th class="row-heading mapping-original-term">{{ row.original_metric_name or "未记录" }}</th>
+                        <td class="standard-term-cell">
+                            <div class="standard-term-picker">
+                                <input
+                                    class="standard-term-input"
+                                    form="{{ form_id }}"
+                                    name="standard_term_query"
+                                    type="text"
+                                    value="{{ row.current_mapping_label }}"
+                                    placeholder="搜索标准术语，如：短期、借款、2、dqjk"
+                                    autocomplete="off"
+                                    data-standard-term-input
+                                >
+                                <div class="autocomplete-results" data-autocomplete-results hidden></div>
+                            </div>
+                        </td>
+                        <td>
+                            <span class="status status--mapping status--mapping-{{ row.get('mapping_status', '') }}" data-mapping-status-label>{{ row.mapping_status_label }}</span>
+                            {% if row.issue_reason %}
+                            <span class="mapping-issue-note">{{ row.issue_reason }}</span>
+                            {% endif %}
+                        </td>
+                        <td>
+                            <form id="{{ form_id }}" class="mapping-row-form" action="{{ base_url }}/mapping-review/actions" method="post" data-mapping-action-form>
+                                <input type="hidden" name="review_item_id" value="{{ row.review_item_id }}">
+                                <input type="hidden" name="selected_code" value="{{ row.current_code }}" data-selected-code>
+                                <input type="hidden" name="selected_name" value="{{ row.current_name }}" data-selected-name>
+                                <input type="hidden" name="reviewer_note" value="">
+                                <div class="mapping-actions">
+                                    <button class="button button--primary" type="submit" name="action" value="approve_mapping">通过</button>
+                                    <button class="button button--secondary" type="submit" name="action" value="skip_mapping">跳过</button>
+                                    <button class="button button--secondary" type="submit" name="action" value="change_mapping">保存修改</button>
+                                </div>
+                            </form>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+
+        <div class="selection-summary" data-selection-summary>
+            当前选中：{{ item.original_metric_name }} / {{ item.current_mapping_label or "未映射" }}
+        </div>
+    </article>
+</section>
+{% endif %}
+{% endblock %}

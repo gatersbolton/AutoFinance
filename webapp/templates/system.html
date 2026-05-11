@@ -73,7 +73,7 @@
         {% if status.recent_jobs %}
             <ul class="plain-list">
                 {% for job in status.recent_jobs %}
-                <li><a href="/jobs/{{ job.job_id }}">{{ job.display_name }}</a> · {{ job.status_label_zh }} · {{ job.progress_summary }}</li>
+                <li><a href="{{ url_prefix }}/jobs/{{ job.job_id }}">{{ job.display_name }}</a> · {{ job.status_label_zh }} · {{ job.progress_summary }}</li>
                 {% endfor %}
             </ul>
         {% else %}
