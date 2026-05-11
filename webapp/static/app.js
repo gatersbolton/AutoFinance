@@ -49,6 +49,30 @@ function parseBbox(rawValue) {
     }
 }
 
+function updateSourceZoomPreview(image, zoomPanel, zoomWindow, zoomHighlight, bbox) {
+    zoomPanel.hidden = false;
+    const windowRect = zoomWindow.getBoundingClientRect();
+    const zoomWindowWidth = Math.max(1, zoomWindow.clientWidth || windowRect.width);
+    const zoomWindowHeight = Math.max(1, zoomWindow.clientHeight || windowRect.height);
+    const sourceWidth = Math.max(1, bbox.right - bbox.left);
+    const sourceHeight = Math.max(1, bbox.bottom - bbox.top);
+    const horizontalPreviewWidth = Math.max(sourceWidth * 1.7, sourceWidth + 96);
+    const zoom = Math.max(1.05, Math.min(2, (zoomWindowWidth * 0.86) / horizontalPreviewWidth));
+    const centerX = ((bbox.left + bbox.right) / 2) * zoom;
+    const centerY = ((bbox.top + bbox.bottom) / 2) * zoom;
+    const bboxWidth = Math.max(18, sourceWidth * zoom);
+    const bboxHeight = Math.max(12, sourceHeight * zoom);
+    zoomWindow.style.backgroundImage = `url("${image.currentSrc || image.src}")`;
+    zoomWindow.style.backgroundSize = `${image.naturalWidth * zoom}px ${image.naturalHeight * zoom}px`;
+    zoomWindow.style.backgroundPosition = `${(zoomWindowWidth / 2) - centerX}px ${(zoomWindowHeight / 2) - centerY}px`;
+    zoomHighlight.style.width = `${bboxWidth}px`;
+    zoomHighlight.style.height = `${bboxHeight}px`;
+    zoomHighlight.style.left = `${(zoomWindowWidth - bboxWidth) / 2}px`;
+    zoomHighlight.style.top = `${(zoomWindowHeight - bboxHeight) / 2}px`;
+    zoomWindow.dataset.zoomScale = zoom.toFixed(3);
+    zoomWindow.dataset.previewWidth = horizontalPreviewWidth.toFixed(2);
+}
+
 function highlightSourceForCell(cell, root) {
     const image = root.querySelector("[data-source-page-image]");
     const highlight = root.querySelector("[data-source-highlight]");
@@ -94,26 +118,17 @@ function highlightSourceForCell(cell, root) {
         });
     }
     if (zoomPanel && zoomWindow && zoomHighlight) {
-        const zoomWindowWidth = Math.max(1, zoomWindow.clientWidth);
-        const zoomWindowHeight = Math.max(1, zoomWindow.clientHeight);
-        const sourceWidth = Math.max(1, bbox.right - bbox.left);
-        const sourceHeight = Math.max(1, bbox.bottom - bbox.top);
-        const horizontalPreviewWidth = Math.max(sourceWidth * 1.7, sourceWidth + 96);
-        const zoom = Math.max(1.05, Math.min(2, (zoomWindowWidth * 0.86) / horizontalPreviewWidth));
-        const centerX = ((bbox.left + bbox.right) / 2) * zoom;
-        const centerY = ((bbox.top + bbox.bottom) / 2) * zoom;
-        const bboxWidth = Math.max(18, sourceWidth * zoom);
-        const bboxHeight = Math.max(12, (bbox.bottom - bbox.top) * zoom);
-        zoomPanel.hidden = false;
-        zoomWindow.style.backgroundImage = `url("${image.currentSrc || image.src}")`;
-        zoomWindow.style.backgroundSize = `${image.naturalWidth * zoom}px ${image.naturalHeight * zoom}px`;
-        zoomWindow.style.backgroundPosition = `${(zoomWindowWidth / 2) - centerX}px ${(zoomWindowHeight / 2) - centerY}px`;
-        zoomHighlight.style.width = `${bboxWidth}px`;
-        zoomHighlight.style.height = `${bboxHeight}px`;
-        zoomHighlight.style.left = `${(zoomWindowWidth - bboxWidth) / 2}px`;
-        zoomHighlight.style.top = `${(zoomWindowHeight - bboxHeight) / 2}px`;
-        zoomWindow.dataset.zoomScale = zoom.toFixed(3);
-        zoomWindow.dataset.previewWidth = horizontalPreviewWidth.toFixed(2);
+        const wasHidden = zoomPanel.hidden;
+        const zoomToken = `${cell.getAttribute("data-review-item-id") || ""}|${cell.getAttribute("data-raw-metric-id") || ""}|${cell.getAttribute("data-bbox") || ""}`;
+        zoomPanel.dataset.zoomToken = zoomToken;
+        updateSourceZoomPreview(image, zoomPanel, zoomWindow, zoomHighlight, bbox);
+        if (wasHidden) {
+            window.requestAnimationFrame(() => {
+                if (!zoomPanel.hidden && zoomPanel.dataset.zoomToken === zoomToken) {
+                    updateSourceZoomPreview(image, zoomPanel, zoomWindow, zoomHighlight, bbox);
+                }
+            });
+        }
     }
     if (status) {
         status.textContent = root.getAttribute("data-highlight-found-text") || "已高亮选中单元格出处";
@@ -506,12 +521,28 @@ function selectUnifiedRow(row, target) {
     const image = root.querySelector("[data-source-page-image]");
     const nextImageUrl = row.getAttribute("data-page-image-url") || "";
     const highlightTarget = target && target.closest("[data-value-cell]") ? target.closest("[data-value-cell]") : row;
+    const highlightToken = [
+        row.getAttribute("data-review-item-id") || "",
+        row.getAttribute("data-raw-metric-id") || "",
+        highlightTarget.getAttribute("data-bbox") || "",
+        String(window.performance ? window.performance.now() : Date.now()),
+    ].join("|");
+    root.dataset.highlightToken = highlightToken;
+    const applyHighlight = () => {
+        if (root.dataset.highlightToken === highlightToken) {
+            highlightSourceForCell(highlightTarget, root);
+        }
+    };
     if (image && nextImageUrl && image.getAttribute("src") !== nextImageUrl) {
-        image.addEventListener("load", () => highlightSourceForCell(highlightTarget, root), { once: true });
+        image.addEventListener("load", applyHighlight, { once: true });
         image.setAttribute("src", nextImageUrl);
         return;
     }
-    highlightSourceForCell(highlightTarget, root);
+    if (image && nextImageUrl && (!image.complete || !image.naturalWidth)) {
+        image.addEventListener("load", applyHighlight, { once: true });
+        return;
+    }
+    applyHighlight();
 }
 
 function markUnifiedValueChanged(row, input) {
@@ -860,12 +891,12 @@ function initUnifiedProofreadWorkbench() {
     }
     const initiallySelected = root.querySelector(".unified-row--selected") || rows[0];
     const image = root.querySelector("[data-source-page-image]");
-    if (image) {
+    if (image && !image.complete) {
         image.addEventListener("load", () => {
             if (initiallySelected) {
                 selectUnifiedRow(initiallySelected, initiallySelected);
             }
-        });
+        }, { once: true });
     }
     if (initiallySelected) {
         selectUnifiedRow(initiallySelected, initiallySelected);

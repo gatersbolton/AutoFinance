@@ -2,33 +2,45 @@
 {% block title %}继续处理 | {{ settings.app_name }}{% endblock %}
 {% block head %}
 <style>
-    .document-step-flow {
+    .document-action-panel {
+        max-width: 760px;
         margin-bottom: 120px !important;
-    }
-
-    .download-results-card {
-        margin-top: 0 !important;
         background: #fffdf8 !important;
         border-color: rgba(77, 85, 98, 0.22) !important;
     }
 
-    .download-results-actions {
+    .document-action-panel h2 {
+        margin-bottom: 8px;
+    }
+
+    .document-action-panel p {
+        color: var(--muted);
+        margin-bottom: 18px;
+    }
+
+    .document-action-actions {
+        display: flex;
+        flex-wrap: wrap;
         gap: 16px !important;
     }
 
-    .download-results-actions .button {
+    .document-action-actions .button {
         min-width: 148px !important;
         min-height: 45px !important;
     }
 
-    .download-results-actions .button--download {
+    .document-action-actions .button--download {
         background: #2f5d50 !important;
         color: #ffffff !important;
     }
 
-    .download-results-actions .button--review {
+    .document-action-actions .button--review {
         background: #4d5562 !important;
         color: #ffffff !important;
+    }
+
+    .document-action-actions form {
+        margin: 0;
     }
 </style>
 {% endblock %}
@@ -40,38 +52,38 @@
     <a class="button button--secondary" href="{{ url_prefix }}/">返回首页</a>
 </section>
 
-<section class="stage-flow document-step-flow">
-    <article class="stage-card {% if simple_flow.raw_ready %}stage-card--done{% else %}stage-card--current{% endif %}">
-        <p class="eyebrow">1</p>
-        <h2>原始数据</h2>
-        <p>{% if simple_flow.raw_ready %}已提取原始数据{% else %}识别完成后可提取原始数据{% endif %}</p>
-        {% if not simple_flow.raw_ready %}
-        <form action="{{ url_prefix }}/documents/{{ document.doc_id }}/raw-metrics/run" method="post">
-            <button class="button button--primary" type="submit">一键提取原始数据</button>
-        </form>
+<section class="card document-action-panel">
+    <h2>处理结果</h2>
+    <p>
+        {% if simple_flow.standard_ready %}
+        原始数据和标准化数据已生成。
+        {% elif simple_flow.raw_ready %}
+        原始数据已生成，可继续生成标准化数据。
         {% else %}
-        <div class="actions">
-            <a class="button button--download" href="{{ url_prefix }}/documents/{{ document.doc_id }}/download/raw_metrics_csv">下载原始数据</a>
-            <a class="button button--review" href="{{ url_prefix }}/documents/{{ document.doc_id }}/proofread">校对数据和映射</a>
-        </div>
+        识别完成后可提取原始数据。
         {% endif %}
-    </article>
-
-    <article class="stage-card {% if simple_flow.standard_ready %}stage-card--done{% elif simple_flow.raw_ready %}stage-card--current{% else %}stage-card--pending{% endif %}">
-        <p class="eyebrow">2</p>
-        <h2>标准化数据</h2>
-        <p>{% if simple_flow.standard_ready %}已生成标准化数据{% elif simple_flow.raw_ready %}可生成标准化数据{% else %}请先提取原始数据{% endif %}</p>
-        {% if simple_flow.raw_ready and not simple_flow.standard_ready %}
-        <form action="{{ url_prefix }}/documents/{{ document.doc_id }}/standard-metrics/run" method="post">
-            <button class="button button--primary" type="submit">一键生成标准化数据</button>
+    </p>
+    <div class="document-action-actions">
+        {% if simple_flow.raw_ready %}
+        <a class="button button--download" href="{{ url_prefix }}/documents/{{ document.doc_id }}/download/raw_metrics_csv">下载原始数据</a>
+        {% else %}
+        <form action="{{ url_prefix }}/documents/{{ document.doc_id }}/raw-metrics/run" method="post">
+            <button class="button button--primary" type="submit">提取原始数据</button>
         </form>
-        {% elif simple_flow.standard_ready %}
-        <div class="actions">
-            <a class="button button--download" href="{{ url_prefix }}/documents/{{ document.doc_id }}/download/standardized_metrics_csv">下载标准化数据</a>
-            <a class="button button--review" href="{{ url_prefix }}/documents/{{ document.doc_id }}/proofread">校对数据和映射</a>
-        </div>
         {% endif %}
-    </article>
+
+        {% if simple_flow.standard_ready %}
+        <a class="button button--download" href="{{ url_prefix }}/documents/{{ document.doc_id }}/download/standardized_metrics_csv">下载标准化数据</a>
+        {% elif simple_flow.raw_ready %}
+        <form action="{{ url_prefix }}/documents/{{ document.doc_id }}/standard-metrics/run" method="post">
+            <button class="button button--primary" type="submit">生成标准化数据</button>
+        </form>
+        {% endif %}
+
+        {% if simple_flow.raw_ready %}
+        <a class="button button--review" href="{{ url_prefix }}/documents/{{ document.doc_id }}/proofread">校对数据和映射</a>
+        {% endif %}
+    </div>
 </section>
 
 {% endblock %}

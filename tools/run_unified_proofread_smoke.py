@@ -37,6 +37,8 @@ def main() -> int:
         "numeric_edit_saved": False,
         "reset_button_present": False,
         "status_labels_pass": False,
+        "multi_row_highlight_pass": False,
+        "zoom_first_focus_pass": False,
         "source_highlight_pass": False,
         "old_routes_non_regression_pass": False,
         "path_hygiene_pass": False,
@@ -107,6 +109,70 @@ def main() -> int:
                 page.wait_for_timeout(300)
                 highlight_text = page.locator("[data-highlight-status]").first.text_content(timeout=5000) or ""
                 summary["source_highlight_pass"] = "已高亮" in highlight_text or "未记录位置" in highlight_text
+                highlight_pair = page.locator("[data-unified-row]").evaluate_all(
+                    """nodes => {
+                        let first = null;
+                        for (const node of nodes) {
+                            const bbox = node.getAttribute("data-bbox") || "";
+                            const id = node.getAttribute("data-review-item-id") || "";
+                            if (!bbox || !id) {
+                                continue;
+                            }
+                            if (!first) {
+                                first = { id, bbox };
+                            } else if (bbox !== first.bbox) {
+                                return [first.id, id];
+                            }
+                        }
+                        return [];
+                    }"""
+                )
+                if len(highlight_pair) == 2:
+                    highlight_positions = []
+                    for review_id in highlight_pair:
+                        candidate = page.locator(f'[data-review-item-id="{review_id}"]').first
+                        candidate.scroll_into_view_if_needed()
+                        candidate.locator("[data-unified-term-cell]").click()
+                        page.wait_for_timeout(700)
+                        highlight_positions.append(
+                            page.locator("[data-source-highlight]").evaluate(
+                                "node => `${node.style.left}|${node.style.top}|${node.style.width}|${node.style.height}`"
+                            )
+                        )
+                    summary["multi_row_highlight_pass"] = highlight_positions[0] != highlight_positions[1]
+                row = page.locator(f'[data-review-item-id="{target_id}"]').first
+                row.scroll_into_view_if_needed()
+                page.locator("[data-source-zoom]").evaluate("node => { node.hidden = true; }")
+                row.locator("[data-standard-term-input]").first.click()
+                page.wait_for_timeout(500)
+                first_zoom = page.locator("[data-source-zoom-window]").evaluate(
+                    """node => ({
+                        hidden: node.closest("[data-source-zoom]").hidden,
+                        width: node.clientWidth,
+                        height: node.clientHeight,
+                        scale: node.dataset.zoomScale || "",
+                        position: node.style.backgroundPosition || "",
+                        size: node.style.backgroundSize || ""
+                    })"""
+                )
+                row.locator("[data-standard-term-input]").first.click()
+                page.wait_for_timeout(180)
+                second_zoom = page.locator("[data-source-zoom-window]").evaluate(
+                    """node => ({
+                        hidden: node.closest("[data-source-zoom]").hidden,
+                        width: node.clientWidth,
+                        height: node.clientHeight,
+                        scale: node.dataset.zoomScale || "",
+                        position: node.style.backgroundPosition || "",
+                        size: node.style.backgroundSize || ""
+                    })"""
+                )
+                summary["zoom_first_focus_pass"] = bool(
+                    not first_zoom["hidden"]
+                    and first_zoom["width"] > 1
+                    and first_zoom["height"] > 1
+                    and first_zoom == second_zoom
+                )
 
                 input_box = row.locator("[data-standard-term-input]").first
                 value_input = row.locator("[data-metric-value-input]").first
@@ -270,6 +336,8 @@ def main() -> int:
             and summary["numeric_edit_saved"]
             and summary["reset_button_present"]
             and summary["status_labels_pass"]
+            and summary["multi_row_highlight_pass"]
+            and summary["zoom_first_focus_pass"]
             and summary["source_highlight_pass"]
             and summary["old_routes_non_regression_pass"]
             and summary["path_hygiene_pass"]

@@ -890,6 +890,14 @@ class WebAppTests(unittest.TestCase):
         state = load_simple_flow_state(document_to_job(self.settings, document))
         self.assertTrue(state["standard_ready"])
         self.assertTrue(Path(state["standardized_metrics_csv"]).exists())
+        continue_response = self.client.get(f"/documents/{doc_id}/continue")
+        self.assertEqual(continue_response.status_code, 200)
+        self.assertIn("document-action-panel", continue_response.text)
+        self.assertNotIn("stage-flow", continue_response.text)
+        self.assertNotIn("stage-card", continue_response.text)
+        self.assertIn(f'href="/documents/{doc_id}/download/raw_metrics_csv"', continue_response.text)
+        self.assertIn(f'href="/documents/{doc_id}/download/standardized_metrics_csv"', continue_response.text)
+        self.assertIn(f'href="/documents/{doc_id}/proofread"', continue_response.text)
 
     def test_document_delete_confirmation_lists_associated_files(self):
         doc_id = self._upload_library_pdf()
