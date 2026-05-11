@@ -23,6 +23,7 @@ from webapp.document_library import (
     build_delete_plan,
     document_to_job,
     load_document,
+    metadata_path_for,
     update_document_status,
     write_document,
 )
@@ -827,6 +828,25 @@ class WebAppTests(unittest.TestCase):
         self.assertTrue(state["raw_ready"])
         self.assertTrue(Path(state["raw_metrics_csv"]).exists())
         self.assertTrue(str(Path(state["raw_metrics_csv"]).resolve()).startswith(str((RAW_METRICS_GENERATED_ROOT / doc_id).resolve())))
+
+    def test_document_metadata_copied_from_windows_uses_current_library_paths(self):
+        doc_id = self._upload_library_pdf()
+        self._write_tiny_library_ocr(doc_id)
+        metadata_path = metadata_path_for(self.settings, doc_id)
+        payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+        payload["pdf_path"] = rf"C:\Users\gater\Desktop\Python\finance\AutoFinance\data\corpus\library\{doc_id}\input\A公司财务报表.pdf"
+        payload["input_dir"] = rf"C:\Users\gater\Desktop\Python\finance\AutoFinance\data\corpus\library\{doc_id}\input"
+        payload["ocr_output_dir"] = rf"C:\Users\gater\Desktop\Python\finance\AutoFinance\data\corpus\library\{doc_id}\ocr_outputs"
+        metadata_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+        document = load_document(self.settings, doc_id, refresh=False)
+        self.assertEqual(Path(document.input_dir).resolve(), (self.corpus_root / "library" / doc_id / "input").resolve())
+        self.assertEqual(Path(document.ocr_output_dir).resolve(), (self.corpus_root / "library" / doc_id / "ocr_outputs").resolve())
+
+        response = self.client.post(f"/documents/{doc_id}/raw-metrics/run", follow_redirects=False)
+        self.assertEqual(response.status_code, 303)
+        state = load_simple_flow_state(document_to_job(self.settings, load_document(self.settings, doc_id)))
+        self.assertTrue(state["raw_ready"])
 
     def test_document_step2_standard_mapping_after_raw_metrics_exists(self):
         doc_id = self._upload_library_pdf()

@@ -69,16 +69,44 @@ def write_json(path: Path, payload: Any) -> None:
 def load_simple_flow_state(job: JobRecord) -> dict[str, Any]:
     raw_summary = load_json(raw_step_summary_path(job))
     standard_summary = load_json(standard_step_summary_path(job))
+    raw_metrics_csv = _portable_summary_file(raw_summary.get("raw_metrics_csv", ""), RAW_METRICS_GENERATED_ROOT / job.job_id, "raw_metrics.csv")
+    raw_metrics_xlsx = _portable_summary_file(raw_summary.get("raw_metrics_xlsx", ""), RAW_METRICS_GENERATED_ROOT / job.job_id, "raw_metrics.xlsx")
+    standardized_metrics_csv = _portable_summary_file(
+        standard_summary.get("standardized_metrics_csv", ""),
+        STANDARD_METRICS_GENERATED_ROOT / job.job_id,
+        "standardized_metrics.csv",
+    )
+    standardized_metrics_xlsx = _portable_summary_file(
+        standard_summary.get("standardized_metrics_xlsx", ""),
+        STANDARD_METRICS_GENERATED_ROOT / job.job_id,
+        "standardized_metrics.xlsx",
+    )
     return {
         "raw_summary": raw_summary,
         "standard_summary": standard_summary,
-        "raw_metrics_csv": raw_summary.get("raw_metrics_csv", ""),
-        "raw_metrics_xlsx": raw_summary.get("raw_metrics_xlsx", ""),
-        "standardized_metrics_csv": standard_summary.get("standardized_metrics_csv", ""),
-        "standardized_metrics_xlsx": standard_summary.get("standardized_metrics_xlsx", ""),
-        "raw_ready": bool(raw_summary.get("raw_metrics_csv") and Path(str(raw_summary.get("raw_metrics_csv"))).exists()),
-        "standard_ready": bool(standard_summary.get("standardized_metrics_csv") and Path(str(standard_summary.get("standardized_metrics_csv"))).exists()),
+        "raw_metrics_csv": str(raw_metrics_csv) if raw_metrics_csv else str(raw_summary.get("raw_metrics_csv", "") or ""),
+        "raw_metrics_xlsx": str(raw_metrics_xlsx) if raw_metrics_xlsx else str(raw_summary.get("raw_metrics_xlsx", "") or ""),
+        "standardized_metrics_csv": str(standardized_metrics_csv) if standardized_metrics_csv else str(standard_summary.get("standardized_metrics_csv", "") or ""),
+        "standardized_metrics_xlsx": str(standardized_metrics_xlsx) if standardized_metrics_xlsx else str(standard_summary.get("standardized_metrics_xlsx", "") or ""),
+        "raw_ready": bool(raw_metrics_csv and raw_metrics_csv.exists()),
+        "standard_ready": bool(standardized_metrics_csv and standardized_metrics_csv.exists()),
     }
+
+
+def _portable_summary_file(raw_path: object, fallback_root: Path, filename: str) -> Path | None:
+    raw_value = str(raw_path or "").strip()
+    if raw_value:
+        candidate = Path(raw_value)
+        if not candidate.is_absolute():
+            candidate = REPO_ROOT / candidate
+        candidate = candidate.resolve()
+        if candidate.exists():
+            return candidate
+    if fallback_root.exists():
+        matches = sorted(fallback_root.rglob(filename), key=lambda path: path.stat().st_mtime if path.exists() else 0)
+        if matches:
+            return matches[-1].resolve()
+    return None
 
 
 def run_raw_metrics_step(settings: WebAppSettings, job: JobRecord) -> dict[str, Any]:

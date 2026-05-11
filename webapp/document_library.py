@@ -6,7 +6,7 @@ import shutil
 import subprocess
 import uuid
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any, Iterable, Sequence
 
 from fastapi import UploadFile
@@ -88,6 +88,7 @@ def write_json(path: Path, payload: Any) -> None:
 
 
 def write_document(settings: WebAppSettings, document: DocumentRecord) -> DocumentRecord:
+    _normalize_document_storage_paths(settings, document)
     payload = document.as_dict()
     payload["metadata_path"] = str(metadata_path_for(settings, document.doc_id))
     write_json(metadata_path_for(settings, document.doc_id), payload)
@@ -101,6 +102,9 @@ def load_document(settings: WebAppSettings, doc_id: str, *, refresh: bool = True
     document = DocumentRecord.from_metadata(load_json(path), metadata_path=str(path))
     if not document.doc_id:
         document.doc_id = validate_doc_id(doc_id)
+    normalized = _normalize_document_storage_paths(settings, document)
+    if normalized:
+        write_json(metadata_path_for(settings, document.doc_id), document.as_dict())
     return refresh_document_status(settings, document, persist=True) if refresh else document
 
 
@@ -115,8 +119,13 @@ def list_documents(settings: WebAppSettings) -> list[DocumentRecord]:
             continue
         try:
             document = DocumentRecord.from_metadata(load_json(metadata_path), metadata_path=str(metadata_path))
+            if not document.doc_id:
+                document.doc_id = validate_doc_id(child.name)
             if document.deleted_at:
                 continue
+            normalized = _normalize_document_storage_paths(settings, document)
+            if normalized:
+                write_json(metadata_path_for(settings, document.doc_id), document.as_dict())
             documents.append(refresh_document_status(settings, document, persist=True))
         except Exception:
             continue
@@ -181,6 +190,8 @@ async def save_uploaded_documents(settings: WebAppSettings, files: Sequence[Uplo
 
 def refresh_document_status(settings: WebAppSettings, document: DocumentRecord, *, persist: bool) -> DocumentRecord:
     changed = False
+    if _normalize_document_storage_paths(settings, document):
+        changed = True
     if document.ocr_status != STATUS_RUNNING and _ocr_outputs_exist(Path(document.ocr_output_dir)):
         if document.ocr_status != STATUS_COMPLETED:
             document.ocr_status = STATUS_COMPLETED
@@ -230,6 +241,7 @@ def _standard_step_summary_path(settings: WebAppSettings, doc_id: str) -> Path:
 
 
 def document_to_job(settings: WebAppSettings, document: DocumentRecord) -> JobRecord:
+    _normalize_document_storage_paths(settings, document)
     root = settings.jobs_root / document.doc_id
     output_dir = root / "standardize"
     result_dir = settings.results_root / document.doc_id
@@ -552,6 +564,67 @@ def resolve_maybe_relative(raw_path: str) -> Path:
     if not path.is_absolute():
         path = REPO_ROOT / path
     return path.resolve()
+
+
+def _normalize_document_storage_paths(settings: WebAppSettings, document: DocumentRecord) -> bool:
+    """Make copied document metadata portable across machines.
+
+    Local demo data can be moved from Windows to Linux by XFTP. Older
+    metadata may still contain absolute paths from the source machine, so the
+    web app should prefer the current document library layout when those paths
+    no longer exist.
+    """
+    changed = False
+    doc_id = validate_doc_id(document.doc_id)
+    root = document_root(settings, doc_id)
+    input_dir = root / "input"
+    ocr_output_dir = root / "ocr_outputs"
+    pdf_path = _canonical_pdf_path(input_dir, document.original_filename, document.pdf_path)
+    metadata_path = metadata_path_for(settings, doc_id)
+
+    replacements = {
+        "doc_id": doc_id,
+        "metadata_path": str(metadata_path),
+        "input_dir": str(input_dir),
+        "ocr_output_dir": str(ocr_output_dir),
+        "pdf_path": str(pdf_path),
+    }
+    for field, default_value in replacements.items():
+        current_value = str(getattr(document, field) or "")
+        should_replace = field in {"doc_id", "metadata_path"} and current_value != default_value
+        if field not in {"doc_id", "metadata_path"}:
+            should_replace = not current_value or not _stored_path_exists(current_value)
+        if should_replace:
+            setattr(document, field, default_value)
+            changed = True
+    return changed
+
+
+def _stored_path_exists(raw_path: str) -> bool:
+    if not raw_path:
+        return False
+    return resolve_maybe_relative(raw_path).exists()
+
+
+def _canonical_pdf_path(input_dir: Path, original_filename: str, stored_pdf_path: str) -> Path:
+    candidates: list[Path] = []
+    for raw_name in (original_filename, _portable_path_name(stored_pdf_path)):
+        name = sanitize_filename(raw_name)
+        if name:
+            candidates.append(input_dir / name)
+    candidates.extend(sorted(input_dir.glob("*.pdf")) if input_dir.exists() else [])
+    for candidate in candidates:
+        if candidate.exists() and candidate.is_file():
+            return candidate
+    return candidates[0] if candidates else input_dir / "upload.pdf"
+
+
+def _portable_path_name(raw_path: str) -> str:
+    if not raw_path:
+        return ""
+    if "\\" in raw_path:
+        return PureWindowsPath(raw_path).name
+    return Path(raw_path).name
 
 
 def is_within(path: Path, root: Path) -> bool:

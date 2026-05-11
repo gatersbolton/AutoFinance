@@ -215,6 +215,7 @@ tmp/
 ```
 
 Keep the accounting template at `data/templates/会计报表.xlsx` on the server, and place reusable PDFs/OCR outputs under `data/corpus/library/<doc_id>/` when testing without re-running OCR.
+If copied `metadata.json` files still contain absolute paths from another machine, the web app rebases missing document paths to the current `data/corpus/library/<doc_id>/input` and `ocr_outputs` directories.
 
 To reuse the existing local results by manual upload, copy these ignored paths into the server repo root with the same relative paths:
 
