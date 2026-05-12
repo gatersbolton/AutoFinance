@@ -1106,6 +1106,7 @@ class WebAppTests(unittest.TestCase):
         response = self.client.get(f"/jobs/{job_id}/proofread")
         self.assertEqual(response.status_code, 200)
         self.assertIn("data-unified-proofread-workbench", response.text)
+        self.assertIn("/static/app.js?v=proofread-highlight-20260512-1", response.text)
         self.assertIn("source-panel", response.text)
         self.assertIn("sheet-panel", response.text)
         for text in ("原始术语", "指标数值", "标准术语", "状态"):
