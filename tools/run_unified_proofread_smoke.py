@@ -39,6 +39,7 @@ def main() -> int:
         "status_labels_pass": False,
         "multi_row_highlight_pass": False,
         "zoom_first_focus_pass": False,
+        "delayed_initial_image_highlight_pass": False,
         "source_highlight_pass": False,
         "old_routes_non_regression_pass": False,
         "path_hygiene_pass": False,
@@ -294,6 +295,44 @@ def main() -> int:
                 mapping_response = page.goto(f"{base_url}/documents/D01/mapping-review", wait_until="networkidle")
                 mapping_ok = mapping_response is not None and mapping_response.status == 200 and page.locator("[data-mapping-review-workbench]").count() == 1
                 summary["old_routes_non_regression_pass"] = bool(raw_ok and mapping_ok)
+
+                slow_page = browser.new_page(viewport={"width": 1500, "height": 980})
+                delayed = {"done": False}
+
+                def delay_first_image(route):
+                    if not delayed["done"]:
+                        delayed["done"] = True
+                        slow_page.wait_for_timeout(1200)
+                    route.continue_()
+
+                slow_page.route("**/documents/D01/proofread/page-image/unirev_000001", delay_first_image)
+                slow_page.goto(page_url, wait_until="domcontentloaded")
+                delayed_target_id = slow_page.locator("[data-unified-row]").evaluate_all(
+                    """nodes => {
+                        const first = nodes[0] ? nodes[0].getAttribute("data-bbox") || "" : "";
+                        for (const node of nodes) {
+                            const id = node.getAttribute("data-review-item-id") || "";
+                            const bbox = node.getAttribute("data-bbox") || "";
+                            if (id && bbox && bbox !== first) {
+                                return id;
+                            }
+                        }
+                        return "";
+                    }"""
+                )
+                if delayed_target_id:
+                    delayed_row = slow_page.locator(f'[data-review-item-id="{delayed_target_id}"]').first
+                    delayed_row.scroll_into_view_if_needed()
+                    delayed_row.locator("[data-unified-term-cell]").click()
+                    expected_bbox = delayed_row.get_attribute("data-bbox")
+                    slow_page.wait_for_timeout(1800)
+                    selected = slow_page.locator(".unified-row--selected").first
+                    summary["delayed_initial_image_highlight_pass"] = bool(
+                        selected.get_attribute("data-review-item-id") == delayed_target_id
+                        and selected.get_attribute("data-bbox") == expected_bbox
+                        and slow_page.locator("[data-source-highlight]").evaluate("node => node.style.display") == "block"
+                    )
+                slow_page.close()
             finally:
                 browser.close()
 
@@ -338,6 +377,7 @@ def main() -> int:
             and summary["status_labels_pass"]
             and summary["multi_row_highlight_pass"]
             and summary["zoom_first_focus_pass"]
+            and summary["delayed_initial_image_highlight_pass"]
             and summary["source_highlight_pass"]
             and summary["old_routes_non_regression_pass"]
             and summary["path_hygiene_pass"]

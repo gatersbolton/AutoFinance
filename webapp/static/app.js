@@ -890,14 +890,6 @@ function initUnifiedProofreadWorkbench() {
         saveButton.addEventListener("click", () => saveUnifiedEdits(root));
     }
     const initiallySelected = root.querySelector(".unified-row--selected") || rows[0];
-    const image = root.querySelector("[data-source-page-image]");
-    if (image && !image.complete) {
-        image.addEventListener("load", () => {
-            if (initiallySelected) {
-                selectUnifiedRow(initiallySelected, initiallySelected);
-            }
-        }, { once: true });
-    }
     if (initiallySelected) {
         selectUnifiedRow(initiallySelected, initiallySelected);
     }
