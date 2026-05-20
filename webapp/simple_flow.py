@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
@@ -23,6 +24,7 @@ from .config import WebAppSettings
 from .models import JOB_MODE_UPLOAD, JobRecord
 
 
+_WINDOWS_ABSOLUTE_PATH_RE = re.compile(r"^[A-Za-z]:[\\/]")
 RAW_REVIEW_ACTIONS = {"approve", "skip", "edit", "next_table"}
 MAPPING_REVIEW_ACTIONS = {
     "reject",
@@ -265,6 +267,94 @@ def _existing_state_file(value: object) -> Path | None:
     return path if path.exists() and path.is_file() else None
 
 
+def _source_path_text(value: object) -> str:
+    return str(value or "").strip()
+
+
+def _source_path_filename(value: object) -> str:
+    text = _source_path_text(value)
+    if not text:
+        return ""
+    return text.replace("\\", "/").rstrip("/").rsplit("/", 1)[-1]
+
+
+def _coerce_source_path(value: object) -> Path | None:
+    text = _source_path_text(value)
+    if not text:
+        return None
+    path = Path(text)
+    if _WINDOWS_ABSOLUTE_PATH_RE.match(text):
+        return path
+    if not path.is_absolute():
+        path = REPO_ROOT / path
+    return path.resolve()
+
+
+def _source_image_dirs_for_job(job: JobRecord, doc_id: str = "") -> list[Path]:
+    dirs: list[Path] = []
+    for value in (job.source_image_dir, job.upload_dir):
+        text = _source_path_text(value)
+        if text:
+            dirs.append(Path(text))
+    if job.input_path:
+        input_path = Path(job.input_path)
+        dirs.append(input_path.parent / "input")
+    for identifier in (doc_id, job.job_id):
+        clean_id = _source_path_text(identifier)
+        if clean_id:
+            dirs.append(REPO_ROOT / "data" / "corpus" / "library" / clean_id / "input")
+            dirs.append(REPO_ROOT / "data" / "corpus" / clean_id / "input")
+
+    unique: list[Path] = []
+    seen: set[str] = set()
+    for directory in dirs:
+        try:
+            resolved = directory.resolve()
+        except OSError:
+            continue
+        key = str(resolved)
+        if key not in seen:
+            seen.add(key)
+            unique.append(resolved)
+    return unique
+
+
+def _pdf_files_in_dir(directory: Path) -> list[Path]:
+    if not directory.exists() or not directory.is_dir():
+        return []
+    return sorted(path.resolve() for path in directory.iterdir() if path.is_file() and path.suffix.lower() == ".pdf")
+
+
+def _fallback_source_pdf_for_job(job: JobRecord, raw_path: object = "", *, doc_id: str = "") -> Path | None:
+    filename = _source_path_filename(raw_path)
+    pdfs_by_dir: list[list[Path]] = []
+    for directory in _source_image_dirs_for_job(job, doc_id=doc_id):
+        if filename:
+            direct = directory / filename
+            if direct.exists() and direct.is_file():
+                return direct.resolve()
+        pdfs = _pdf_files_in_dir(directory)
+        pdfs_by_dir.append(pdfs)
+        if filename:
+            matches = [path for path in pdfs if path.name == filename]
+            if matches:
+                return matches[0]
+
+    for pdfs in pdfs_by_dir:
+        if len(pdfs) == 1:
+            return pdfs[0]
+    return None
+
+
+def resolve_source_pdf_for_job(job: JobRecord, raw_path: object = "", *, doc_id: str = "") -> str:
+    text = _source_path_text(raw_path)
+    path = _coerce_source_path(text)
+    if path is not None and path.exists() and path.is_file():
+        return str(path)
+    fallback = _fallback_source_pdf_for_job(job, text, doc_id=doc_id)
+    return str(fallback) if fallback is not None else text
+
+
 def load_raw_review_items(job: JobRecord, *, apply_actions: bool = True) -> list[dict[str, Any]]:
     state = load_simple_flow_state(job)
     raw_csv = Path(str(state.get("raw_metrics_csv", "") or ""))
@@ -285,6 +375,11 @@ def load_raw_review_items(job: JobRecord, *, apply_actions: bool = True) -> list
             )
         if not source_bbox_json:
             source_bbox_json = _resolve_source_table_cell_bbox_json(detailed)
+        source_pdf_path = resolve_source_pdf_for_job(
+            job,
+            detailed.get("evidence_path", ""),
+            doc_id=str(detailed.get("doc_id", "") or ""),
+        )
         items.append(
             {
                 "review_item_id": f"rawrev_{index:06d}",
@@ -296,7 +391,7 @@ def load_raw_review_items(job: JobRecord, *, apply_actions: bool = True) -> list
                 "指标数值": row.get("指标数值", ""),
                 "source_page_no": detailed.get("page_no", ""),
                 "source_bbox_json": source_bbox_json,
-                "source_pdf_path": detailed.get("evidence_path", ""),
+                "source_pdf_path": source_pdf_path,
                 "source_file": detailed.get("source_file", ""),
                 "provider": detailed.get("provider", ""),
                 "doc_id": detailed.get("doc_id", ""),
@@ -703,7 +798,11 @@ def _enrich_mapping_review_items(job: JobRecord, rows: list[dict[str, Any]]) -> 
         system_candidate_label = "" if is_unmapped_without_suggestion else _mapping_label(item.get("system_candidate_code", ""), item.get("system_candidate_name", ""))
         show_decision_actions, decision_note = _mapping_decision_action_state(item, mapping_status=mapping_status, mapping_method=mapping_method)
         source_page_no = str(item.get("source_page_no") or detailed.get("page_no") or "")
-        source_pdf_path = str(item.get("source_pdf_path") or detailed.get("evidence_path") or "")
+        source_pdf_path = resolve_source_pdf_for_job(
+            job,
+            item.get("source_pdf_path") or detailed.get("evidence_path") or "",
+            doc_id=str(detailed.get("doc_id") or item.get("doc_id") or ""),
+        )
         value_bbox_json = str(item.get("source_bbox_json") or detailed.get("bbox_json") or "")
         term_bbox_json = _resolve_mapping_term_bbox_json(item, detailed, original_name) or ""
         if _is_coarse_bbox_json(term_bbox_json):
@@ -1347,12 +1446,6 @@ def _serialize_action_value(value: Any) -> str:
 
 
 def resolve_safe_source_file(settings: WebAppSettings, job: JobRecord, raw_path: str) -> Path:
-    if not raw_path:
-        raise HTTPException(status_code=404, detail="未记录原始文件路径。")
-    path = Path(str(raw_path))
-    if not path.is_absolute():
-        path = REPO_ROOT / path
-    path = path.resolve()
     allowed_roots = [
         settings.corpus_root.resolve(),
         settings.uploads_root.resolve(),
@@ -1360,6 +1453,18 @@ def resolve_safe_source_file(settings: WebAppSettings, job: JobRecord, raw_path:
     ]
     if job.source_image_dir:
         allowed_roots.append(Path(job.source_image_dir).resolve())
+    path = _coerce_source_path(raw_path)
+    if path is not None and path.exists() and path.is_file():
+        if not any(_is_within(path, root) for root in allowed_roots):
+            raise HTTPException(status_code=400, detail="原始文件路径不在允许目录内。")
+        return path
+
+    fallback = _fallback_source_pdf_for_job(job, raw_path)
+    if fallback is not None:
+        path = fallback.resolve()
+    elif path is None:
+        raise HTTPException(status_code=404, detail="未记录原始文件路径。")
+
     if not any(_is_within(path, root) for root in allowed_roots):
         raise HTTPException(status_code=400, detail="原始文件路径不在允许目录内。")
     if not path.exists() or not path.is_file():

@@ -1628,6 +1628,20 @@ class WebAppTests(unittest.TestCase):
         response = self.client.get(f"/jobs/{job_id}/raw-review/evidence/rawrev_000001")
         self.assertEqual(response.status_code, 400)
 
+    def test_stale_evidence_path_falls_back_to_job_source_pdf(self):
+        job_id = self._create_job("stale evidence")
+        stale_local_path = Path("Z:/old-local-machine/missing-source.pdf")
+        raw_path = self._create_raw_metrics_fixture(metric_name="货币资金", evidence_path=stale_local_path)
+        self._attach_raw_summary_to_job(job_id, raw_path)
+
+        page = self.client.get(f"/jobs/{job_id}/raw-review")
+        self.assertEqual(page.status_code, 200)
+        self.assertIn("/raw-review/page-image/rawrev_000001", page.text)
+
+        evidence = self.client.get(f"/jobs/{job_id}/raw-review/evidence/rawrev_000001")
+        self.assertEqual(evidence.status_code, 200)
+        self.assertIn("application/pdf", evidence.headers.get("content-type", ""))
+
     def test_simple_flow_output_files_stay_under_data_generated(self):
         job_id = self._create_job("path hygiene step2")
         raw_path = self._create_raw_metrics_fixture(metric_name="往来款")
