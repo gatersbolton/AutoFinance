@@ -73,6 +73,38 @@ function updateSourceZoomPreview(image, zoomPanel, zoomWindow, zoomHighlight, bb
     zoomWindow.dataset.previewWidth = horizontalPreviewWidth.toFixed(2);
 }
 
+function sourceImageMatches(image, nextImageUrl, nextImageKey) {
+    if (!image) {
+        return false;
+    }
+    const currentKey = image.dataset.pageImageKey || "";
+    if (nextImageKey && currentKey === nextImageKey) {
+        return true;
+    }
+    return !nextImageKey && nextImageUrl && image.getAttribute("src") === nextImageUrl;
+}
+
+function ensureSourceImageReady(image, nextImageUrl, nextImageKey, callback) {
+    if (!image || !nextImageUrl) {
+        callback();
+        return;
+    }
+    const sameImage = sourceImageMatches(image, nextImageUrl, nextImageKey);
+    if (sameImage) {
+        if (image.complete && image.naturalWidth) {
+            callback();
+        } else {
+            image.addEventListener("load", callback, { once: true });
+        }
+        return;
+    }
+    image.addEventListener("load", callback, { once: true });
+    if (nextImageKey) {
+        image.dataset.pageImageKey = nextImageKey;
+    }
+    image.setAttribute("src", nextImageUrl);
+}
+
 function highlightSourceForCell(cell, root) {
     const image = root.querySelector("[data-source-page-image]");
     const highlight = root.querySelector("[data-source-highlight]");
@@ -114,7 +146,7 @@ function highlightSourceForCell(cell, root) {
         frame.scrollTo({
             left: Math.max(0, highlightCenterX - (frame.clientWidth / 2)),
             top: Math.max(0, highlightCenterY - (frame.clientHeight / 2)),
-            behavior: "smooth",
+            behavior: "auto",
         });
     }
     if (zoomPanel && zoomWindow && zoomHighlight) {
@@ -240,12 +272,24 @@ function updateMappingRowSelection(row, root) {
     }
     const image = root.querySelector("[data-source-page-image]");
     const nextImageUrl = row.getAttribute("data-page-image-url") || "";
-    if (image && nextImageUrl && image.getAttribute("src") !== nextImageUrl) {
-        image.addEventListener("load", () => highlightSourceForCell(row, root), { once: true });
-        image.setAttribute("src", nextImageUrl);
+    const nextImageKey = row.getAttribute("data-page-image-key") || "";
+    const highlightToken = [
+        row.getAttribute("data-review-item-id") || "",
+        row.getAttribute("data-raw-metric-id") || "",
+        row.getAttribute("data-bbox") || "",
+        String(window.performance ? window.performance.now() : Date.now()),
+    ].join("|");
+    root.dataset.highlightToken = highlightToken;
+    const applyHighlight = () => {
+        if (root.dataset.highlightToken === highlightToken) {
+            highlightSourceForCell(row, root);
+        }
+    };
+    if (image && nextImageUrl) {
+        ensureSourceImageReady(image, nextImageUrl, nextImageKey, applyHighlight);
         return;
     }
-    highlightSourceForCell(row, root);
+    applyHighlight();
 }
 
 function setMappingTerm(row, result) {
@@ -700,6 +744,7 @@ function selectUnifiedRow(row, target) {
     }
     const image = root.querySelector("[data-source-page-image]");
     const nextImageUrl = row.getAttribute("data-page-image-url") || "";
+    const nextImageKey = row.getAttribute("data-page-image-key") || "";
     const highlightTarget = target && target.closest("[data-value-cell]") ? target.closest("[data-value-cell]") : row;
     const highlightToken = [
         row.getAttribute("data-review-item-id") || "",
@@ -713,13 +758,8 @@ function selectUnifiedRow(row, target) {
             highlightSourceForCell(highlightTarget, root);
         }
     };
-    if (image && nextImageUrl && image.getAttribute("src") !== nextImageUrl) {
-        image.addEventListener("load", applyHighlight, { once: true });
-        image.setAttribute("src", nextImageUrl);
-        return;
-    }
-    if (image && nextImageUrl && (!image.complete || !image.naturalWidth)) {
-        image.addEventListener("load", applyHighlight, { once: true });
+    if (image && nextImageUrl) {
+        ensureSourceImageReady(image, nextImageUrl, nextImageKey, applyHighlight);
         return;
     }
     applyHighlight();

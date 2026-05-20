@@ -41,7 +41,7 @@
         </div>
         {% if page_image_url %}
         <div class="source-image-frame">
-            <img class="source-page-image" src="{{ page_image_url }}" alt="原始文件当前页" data-source-page-image>
+            <img class="source-page-image" src="{{ page_image_url }}" alt="原始文件当前页" data-source-page-image data-page-image-key="{{ item.source_pdf_path }}|{{ item.source_page_no }}|{{ item.source_file }}">
             <div class="source-highlight" data-source-highlight></div>
         </div>
         {% else %}
@@ -100,6 +100,7 @@
                         data-bbox='{{ row.source_term_bbox_json | e }}'
                         data-bbox-state="{{ row.bbox_state }}"
                         data-page-image-url="{% if row.source_pdf_path %}{{ base_url }}/mapping-review/page-image/{{ row.review_item_id }}{% endif %}"
+                        data-page-image-key="{{ row.source_pdf_path }}|{{ row.source_page_no }}|{{ row.source_file }}"
                         data-original-metric-name="{{ row.original_metric_name }}"
                         data-current-mapping-label="{{ row.current_mapping_label }}"
                         data-previous-code="{{ row.current_code }}"

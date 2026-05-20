@@ -37,6 +37,8 @@ MAPPING_REVIEW_ACTIONS = {
 _SOURCE_BLOCK_CACHE: dict[Path, list[dict[str, Any]]] = {}
 _SOURCE_TABLE_CELL_CACHE: dict[Path, list[dict[str, Any]]] = {}
 _SOURCE_PAGE_METADATA_CACHE: dict[Path, dict[str, Any]] = {}
+_SOURCE_PATH_RESOLUTION_CACHE: dict[tuple[str, ...], str] = {}
+_OCR_FILENAME_INDEX_CACHE: dict[str, dict[str, list[Path]]] = {}
 
 
 def job_root(job: JobRecord) -> Path:
@@ -319,10 +321,69 @@ def _source_image_dirs_for_job(job: JobRecord, doc_id: str = "") -> list[Path]:
     return unique
 
 
+def _source_ocr_dirs_for_job(job: JobRecord, doc_id: str = "") -> list[Path]:
+    dirs: list[Path] = []
+    for value in (job.input_path, job.ocr_output_dir):
+        text = _source_path_text(value)
+        if text:
+            dirs.append(Path(text))
+    for value in (job.source_image_dir, job.upload_dir):
+        text = _source_path_text(value)
+        if text:
+            dirs.append(Path(text).parent / "ocr_outputs")
+    for identifier in (doc_id, job.job_id):
+        clean_id = _source_path_text(identifier)
+        if clean_id:
+            dirs.append(REPO_ROOT / "data" / "corpus" / "library" / clean_id / "ocr_outputs")
+            dirs.append(REPO_ROOT / "data" / "corpus" / clean_id / "ocr_outputs")
+
+    unique: list[Path] = []
+    seen: set[str] = set()
+    for directory in dirs:
+        try:
+            resolved = directory.resolve()
+        except OSError:
+            continue
+        key = str(resolved)
+        if key not in seen:
+            seen.add(key)
+            unique.append(resolved)
+    return unique
+
+
 def _pdf_files_in_dir(directory: Path) -> list[Path]:
     if not directory.exists() or not directory.is_dir():
         return []
     return sorted(path.resolve() for path in directory.iterdir() if path.is_file() and path.suffix.lower() == ".pdf")
+
+
+def _resolution_cache_key(job: JobRecord, raw_value: object, *, doc_id: str = "", provider: str = "", page_no: str = "", kind: str = "") -> tuple[str, ...]:
+    return (
+        kind,
+        job.job_id,
+        _source_path_text(raw_value),
+        _source_path_text(doc_id),
+        _source_path_text(provider),
+        _source_path_text(page_no),
+        _source_path_text(job.input_path),
+        _source_path_text(job.ocr_output_dir),
+        _source_path_text(job.source_image_dir),
+        _source_path_text(job.upload_dir),
+    )
+
+
+def _ocr_filename_index(directory: Path) -> dict[str, list[Path]]:
+    key = str(directory.resolve())
+    cached = _OCR_FILENAME_INDEX_CACHE.get(key)
+    if cached is not None:
+        return cached
+    index: dict[str, list[Path]] = {}
+    if directory.exists() and directory.is_dir():
+        for path in directory.rglob("*.json"):
+            if path.is_file():
+                index.setdefault(path.name, []).append(path.resolve())
+    _OCR_FILENAME_INDEX_CACHE[key] = index
+    return index
 
 
 def _fallback_source_pdf_for_job(job: JobRecord, raw_path: object = "", *, doc_id: str = "") -> Path | None:
@@ -347,12 +408,89 @@ def _fallback_source_pdf_for_job(job: JobRecord, raw_path: object = "", *, doc_i
 
 
 def resolve_source_pdf_for_job(job: JobRecord, raw_path: object = "", *, doc_id: str = "") -> str:
+    cache_key = _resolution_cache_key(job, raw_path, doc_id=doc_id, kind="pdf")
+    cached = _SOURCE_PATH_RESOLUTION_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
     text = _source_path_text(raw_path)
     path = _coerce_source_path(text)
     if path is not None and path.exists() and path.is_file():
-        return str(path)
+        result = str(path)
+        _SOURCE_PATH_RESOLUTION_CACHE[cache_key] = result
+        return result
     fallback = _fallback_source_pdf_for_job(job, text, doc_id=doc_id)
-    return str(fallback) if fallback is not None else text
+    result = str(fallback) if fallback is not None else text
+    _SOURCE_PATH_RESOLUTION_CACHE[cache_key] = result
+    return result
+
+
+def resolve_source_file_for_job(job: JobRecord, raw_source_file: object = "", *, doc_id: str = "", provider: str = "", page_no: str = "") -> str:
+    cache_key = _resolution_cache_key(job, raw_source_file, doc_id=doc_id, provider=provider, page_no=page_no, kind="ocr_json")
+    cached = _SOURCE_PATH_RESOLUTION_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+    text = _source_path_text(raw_source_file)
+    path = _coerce_source_path(text)
+    if path is not None and path.exists() and path.is_file():
+        result = str(path)
+        _SOURCE_PATH_RESOLUTION_CACHE[cache_key] = result
+        return result
+
+    filename = _source_path_filename(text)
+    page_filename = ""
+    try:
+        page_number = int(str(page_no or "").strip())
+    except ValueError:
+        page_number = 0
+    if page_number > 0:
+        page_filename = f"page_{page_number:04d}.json"
+
+    wanted_filenames = [name for name in (filename, page_filename) if name]
+    if not wanted_filenames:
+        _SOURCE_PATH_RESOLUTION_CACHE[cache_key] = text
+        return text
+
+    candidates: list[Path] = []
+    for directory in _source_ocr_dirs_for_job(job, doc_id=doc_id):
+        if not directory.exists() or not directory.is_dir():
+            continue
+        for wanted in wanted_filenames:
+            candidates.extend(_ocr_filename_index(directory).get(wanted, []))
+    if not candidates:
+        _SOURCE_PATH_RESOLUTION_CACHE[cache_key] = text
+        return text
+
+    provider_hint = _source_path_text(provider).lower()
+    raw_hint = text.replace("\\", "/").lower()
+
+    def candidate_score(candidate: Path) -> tuple[int, int, str]:
+        lowered = str(candidate).replace("\\", "/").lower()
+        provider_penalty = 0 if provider_hint and provider_hint in lowered else 1
+        if raw_hint and provider_penalty:
+            for token in ("aliyun_table", "tencent_table_v3", "paddle_table_local"):
+                if token in raw_hint and token in lowered:
+                    provider_penalty = 0
+                    break
+        name_penalty = 0 if filename and candidate.name == filename else 1
+        return provider_penalty, name_penalty, lowered
+
+    result = str(sorted(set(candidates), key=candidate_score)[0])
+    _SOURCE_PATH_RESOLUTION_CACHE[cache_key] = result
+    return result
+
+
+def _resolve_detailed_source_paths(job: JobRecord, detailed: dict[str, Any]) -> dict[str, Any]:
+    resolved = dict(detailed)
+    doc_id = str(resolved.get("doc_id", "") or "")
+    resolved["source_file"] = resolve_source_file_for_job(
+        job,
+        resolved.get("source_file", ""),
+        doc_id=doc_id,
+        provider=str(resolved.get("provider", "") or ""),
+        page_no=str(resolved.get("page_no", "") or ""),
+    )
+    resolved["evidence_path"] = resolve_source_pdf_for_job(job, resolved.get("evidence_path", ""), doc_id=doc_id)
+    return resolved
 
 
 def load_raw_review_items(job: JobRecord, *, apply_actions: bool = True) -> list[dict[str, Any]]:
@@ -364,7 +502,7 @@ def load_raw_review_items(job: JobRecord, *, apply_actions: bool = True) -> list
     detailed_rows = read_csv_rows(raw_csv.parent / "raw_metrics_detailed.csv")
     items: list[dict[str, Any]] = []
     for index, row in enumerate(rows, start=1):
-        detailed = detailed_rows[index - 1] if index - 1 < len(detailed_rows) else {}
+        detailed = _resolve_detailed_source_paths(job, detailed_rows[index - 1] if index - 1 < len(detailed_rows) else {})
         raw_metric_id = str(detailed.get("source_cell_ref", "") or f"raw_{index:06d}")
         source_bbox_json = detailed.get("bbox_json", "") or _infer_bbox_json_from_source_blocks(detailed, row)
         if _is_coarse_bbox_json(source_bbox_json):
@@ -779,7 +917,10 @@ def build_mapping_review_sheet(job: JobRecord, selected_item_id: str = "") -> di
 
 
 def _enrich_mapping_review_items(job: JobRecord, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    detailed_lookup = _load_raw_detailed_lookup(job)
+    detailed_lookup = {
+        raw_metric_id: _resolve_detailed_source_paths(job, detailed)
+        for raw_metric_id, detailed in _load_raw_detailed_lookup(job).items()
+    }
     detailed_rows = _unique_detailed_rows(detailed_lookup.values())
     enriched: list[dict[str, Any]] = []
     for row in rows:

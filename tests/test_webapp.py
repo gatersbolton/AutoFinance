@@ -48,14 +48,18 @@ from webapp.simple_flow import (
     _resolve_mapping_term_bbox_json,
     _resolve_source_table_cell_bbox_json,
     combined_download_summary_path,
+    load_mapping_review_items,
+    load_raw_review_items,
     load_simple_flow_state,
     mapping_review_dir,
     raw_review_dir,
     raw_step_summary_path,
+    standard_step_summary_path,
     source_preview_rotation_degrees,
 )
 from webapp.unified_review import (
     format_metric_number,
+    load_unified_review_items,
     parse_metric_number_input,
     unified_review_dir,
 )
@@ -196,6 +200,7 @@ class WebAppTests(unittest.TestCase):
         metric_name: str = "往来款",
         metric_value: str = "100",
         evidence_path: Path | None = None,
+        source_file: Path | str | None = None,
         bbox_json: str = '[{"x":1,"y":2},{"x":3,"y":4}]',
         confidence: str = "",
     ) -> Path:
@@ -219,6 +224,7 @@ class WebAppTests(unittest.TestCase):
             ["填表日期", "当前条目日期", "公司名", "指标名", "指标数值"],
         )
         source_pdf = evidence_path or (self.corpus_root / "CASE1" / "input" / "sample.pdf")
+        detailed_source_file = source_file if source_file is not None else "fixture.json"
         self._write_csv(
             run_dir / "raw_metrics_detailed.csv",
             [
@@ -227,7 +233,7 @@ class WebAppTests(unittest.TestCase):
                     "page_no": "1",
                     "bbox_json": bbox_json,
                     "evidence_path": str(source_pdf),
-                    "source_file": "fixture.json",
+                    "source_file": str(detailed_source_file),
                     "provider": "aliyun_table",
                     "doc_id": "CASE1",
                     "value_type": "amount",
@@ -1150,6 +1156,7 @@ class WebAppTests(unittest.TestCase):
         self.assertIn("data-mapping-cell", response.text)
         self.assertIn("data-bbox=", response.text)
         self.assertIn("data-page-no=", response.text)
+        self.assertIn("data-page-image-key=", response.text)
         self.assertIn("精确匹配，无需决策", response.text)
         self.assertNotIn("不采纳", response.text)
         self.assertNotIn("仅本次采用", response.text)
@@ -1361,9 +1368,10 @@ class WebAppTests(unittest.TestCase):
         response = self.client.get(f"/jobs/{job_id}/proofread")
         self.assertEqual(response.status_code, 200)
         self.assertIn("data-unified-proofread-workbench", response.text)
-        self.assertIn("/static/app.js?v=proofread-bulk-preview-20260520-2", response.text)
+        self.assertIn("/static/app.js?v=proofread-source-cache-20260520-1", response.text)
         self.assertIn("source-panel", response.text)
         self.assertIn("sheet-panel", response.text)
+        self.assertIn("data-page-image-key=", response.text)
         for text in ("原始术语", "指标数值", "标准术语", "状态", "映射决策"):
             self.assertIn(text, response.text)
         self.assertIn("精确匹配，无需决策", response.text)
@@ -1641,6 +1649,82 @@ class WebAppTests(unittest.TestCase):
         evidence = self.client.get(f"/jobs/{job_id}/raw-review/evidence/rawrev_000001")
         self.assertEqual(evidence.status_code, 200)
         self.assertIn("application/pdf", evidence.headers.get("content-type", ""))
+
+    def test_stale_source_file_falls_back_for_rotation_and_term_bbox(self):
+        source_json = self.sample_input_dir / "aliyun_table" / "demo_doc" / "raw" / "page_0001.json"
+        source_json.write_text(
+            json.dumps(
+                {
+                    "Data": {
+                        "angle": 90,
+                        "prism_tablesInfo": [
+                            {
+                                "tableId": "0",
+                                "cellInfos": [
+                                    {"ysc": 1, "yec": 1, "xsc": 0, "xec": 0, "word": "短期借款", "pos": [10, 20, 80, 40]},
+                                    {"ysc": 1, "yec": 1, "xsc": 2, "xec": 2, "word": "100", "pos": [200, 20, 260, 40]},
+                                ],
+                            }
+                        ],
+                    }
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        job_id = self._create_job("stale source file")
+        stale_source_file = Path("C:/Users/gater/Desktop/Python/finance/AutoFinance/data/corpus/library/CASE1/ocr_outputs/aliyun_table/demo_doc/raw/page_0001.json")
+        raw_path = self._create_raw_metrics_fixture(metric_name="短期借款", source_file=stale_source_file)
+        self._attach_raw_summary_to_job(job_id, raw_path)
+        job = get_job(self.settings, job_id)
+
+        raw_items = load_raw_review_items(job)
+        self.assertEqual(Path(raw_items[0]["source_file"]).resolve(), source_json.resolve())
+        self.assertEqual(source_preview_rotation_degrees(raw_items[0]), -90)
+
+        standard_dir = STANDARD_METRICS_GENERATED_ROOT / "WEB_TEST_STALE_SOURCE" / "RUN_WEB_TEST"
+        self.addCleanup(lambda: shutil.rmtree(standard_dir.parent, ignore_errors=True))
+        standard_dir.mkdir(parents=True, exist_ok=True)
+        standard_csv = standard_dir / "standardized_metrics.csv"
+        self._write_csv(standard_csv, [{"raw_metric_id": "CASE1:1:aliyun_table:0:1-1:2-2"}], ["raw_metric_id"])
+        self._write_csv(
+            standard_dir / "mapping_review_items.csv",
+            [
+                {
+                    "review_item_id": "maprev_000001",
+                    "raw_metric_id": "CASE1:1:aliyun_table:0:1-1:2-2",
+                    "original_metric_name": "短期借款",
+                    "candidate_code": "ZT_002",
+                    "candidate_name": "短期借款",
+                    "mapping_status": "review_required",
+                    "mapping_method": "candidate",
+                    "source_page_no": "1",
+                }
+            ],
+            [
+                "review_item_id",
+                "raw_metric_id",
+                "original_metric_name",
+                "candidate_code",
+                "candidate_name",
+                "mapping_status",
+                "mapping_method",
+                "source_page_no",
+            ],
+        )
+        standard_step_summary_path(job).parent.mkdir(parents=True, exist_ok=True)
+        standard_step_summary_path(job).write_text(
+            json.dumps({"standardized_metrics_csv": str(standard_csv)}, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
+        mapping_items = load_mapping_review_items(job)
+        self.assertIn('"x":10.0', mapping_items[0]["source_term_bbox_json"])
+        self.assertNotIn('"x":200.0', mapping_items[0]["source_term_bbox_json"])
+
+        unified_items = load_unified_review_items(job)
+        self.assertIn('"x":10.0', unified_items[0]["source_term_bbox_json"])
+        self.assertNotIn('"x":200.0', unified_items[0]["source_term_bbox_json"])
 
     def test_simple_flow_output_files_stay_under_data_generated(self):
         job_id = self._create_job("path hygiene step2")

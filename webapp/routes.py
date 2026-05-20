@@ -390,7 +390,7 @@ def unified_proofread_page_image(request: Request, job_id: str, item_id: str) ->
         content = pixmap.tobytes("png")
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"无法渲染第 {page_no} 页。") from exc
-    return Response(content=content, media_type="image/png")
+    return Response(content=content, media_type="image/png", headers={"Cache-Control": "private, max-age=86400"})
 
 
 @router.post("/jobs/{job_id}/proofread/save", response_class=JSONResponse, dependencies=[Depends(password_gate)])
@@ -452,7 +452,7 @@ def raw_review_page_image(request: Request, job_id: str, item_id: str) -> Respon
         content = pixmap.tobytes("png")
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"无法渲染第 {page_no} 页。") from exc
-    return Response(content=content, media_type="image/png")
+    return Response(content=content, media_type="image/png", headers={"Cache-Control": "private, max-age=86400"})
 
 
 @router.get("/jobs/{job_id}/raw-review/evidence/{item_id}", dependencies=[Depends(password_gate)])
@@ -565,7 +565,7 @@ def mapping_review_page_image(request: Request, job_id: str, item_id: str) -> Re
         content = pixmap.tobytes("png")
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"无法渲染第 {page_no} 页。") from exc
-    return Response(content=content, media_type="image/png")
+    return Response(content=content, media_type="image/png", headers={"Cache-Control": "private, max-age=86400"})
 
 
 @router.get("/jobs/{job_id}/mapping-review/evidence/{item_id}", dependencies=[Depends(password_gate)])

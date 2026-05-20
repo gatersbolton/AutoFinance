@@ -36,7 +36,7 @@
         </div>
         {% if page_image_url %}
         <div class="source-image-frame">
-            <img class="source-page-image" src="{{ page_image_url }}" alt="原始文件当前页" data-source-page-image>
+            <img class="source-page-image" src="{{ page_image_url }}" alt="原始文件当前页" data-source-page-image data-page-image-key="{{ item.source_pdf_path }}|{{ item.source_page_no }}|{{ item.source_file }}">
             <div class="source-highlight" data-source-highlight></div>
         </div>
         {% else %}

@@ -43,7 +43,7 @@
         </div>
         {% if page_image_url %}
         <div class="source-image-frame">
-            <img class="source-page-image" src="{{ page_image_url }}" alt="原始文件当前页" data-source-page-image>
+            <img class="source-page-image" src="{{ page_image_url }}" alt="原始文件当前页" data-source-page-image data-page-image-key="{{ item.source_pdf_path }}|{{ item.source_page_no }}|{{ item.source_file }}">
             <div class="source-highlight" data-source-highlight></div>
         </div>
         {% else %}
@@ -121,6 +121,7 @@
                         data-raw-metric-id="{{ row.raw_metric_id }}"
                         data-page-no="{{ row.source_page_no }}"
                         data-page-image-url="{% if row.source_pdf_path %}{{ base_url }}/proofread/page-image/{{ row.review_item_id }}{% endif %}"
+                        data-page-image-key="{{ row.source_pdf_path }}|{{ row.source_page_no }}|{{ row.source_file }}"
                         data-bbox='{{ row.source_term_bbox_json | e }}'
                         data-term-bbox='{{ row.source_term_bbox_json | e }}'
                         data-value-bbox='{{ row.source_value_bbox_json | e }}'
