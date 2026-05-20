@@ -252,6 +252,8 @@ function setMappingTerm(row, result) {
     const input = row.querySelector("[data-standard-term-input]");
     const selectedCode = row.querySelector("[data-selected-code]");
     const selectedName = row.querySelector("[data-selected-name]");
+    const decisionCodes = row.querySelectorAll("[data-decision-selected-code]");
+    const decisionNames = row.querySelectorAll("[data-decision-selected-name]");
     const statusLabel = row.querySelector("[data-mapping-status-label]");
     const displayLabel = `${result.code} ${result.name}`.trim();
     if (input) {
@@ -263,6 +265,12 @@ function setMappingTerm(row, result) {
     if (selectedName) {
         selectedName.value = result.name || "";
     }
+    decisionCodes.forEach((field) => {
+        field.value = result.code || "";
+    });
+    decisionNames.forEach((field) => {
+        field.value = result.name || "";
+    });
     row.setAttribute("data-current-mapping-label", displayLabel || "未映射");
     if (!row.matches("[data-unified-row]") && (result.code || "") !== (row.getAttribute("data-previous-code") || "")) {
         row.classList.add("mapping-row--dirty");
@@ -272,6 +280,24 @@ function setMappingTerm(row, result) {
     }
     if (row.matches("[data-unified-row]")) {
         markUnifiedMappingChanged(row, result);
+    }
+}
+
+function syncMappingDecisionForm(form) {
+    const row = form.closest("[data-unified-row], [data-mapping-cell]");
+    if (!row) {
+        return;
+    }
+    const picker = row.querySelector("[data-mapping-picker]");
+    const selectedCode = form.querySelector("[data-decision-selected-code]") || form.querySelector("[data-selected-code]");
+    const selectedName = form.querySelector("[data-decision-selected-name]") || form.querySelector("[data-selected-name]");
+    const code = picker ? (picker.dataset.currentCode || picker.getAttribute("data-current-code") || "") : (row.querySelector("[data-selected-code]")?.value || "");
+    const name = picker ? (picker.dataset.currentName || picker.getAttribute("data-current-name") || "") : (row.querySelector("[data-selected-name]")?.value || "");
+    if (selectedCode) {
+        selectedCode.value = code;
+    }
+    if (selectedName) {
+        selectedName.value = name;
     }
 }
 
@@ -371,6 +397,156 @@ function initStandardTermAutocomplete(input, row, root) {
     });
 }
 
+function formatBulkThreshold(value) {
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric)) {
+        return "90%";
+    }
+    const percent = numeric <= 1 ? numeric * 100 : numeric;
+    return `${Math.round(percent * 10) / 10}%`;
+}
+
+function renderBulkConfidencePreview(panel, preview) {
+    panel.replaceChildren();
+    panel.hidden = false;
+    panel.dataset.previewState = "ready";
+
+    const title = document.createElement("strong");
+    title.textContent = `预览：AI置信度不低于 ${formatBulkThreshold(preview.threshold)} 的本次采纳`;
+    panel.appendChild(title);
+
+    const summary = document.createElement("p");
+    summary.textContent = `可本次采纳 ${preview.eligible_total || 0} 条，排除 ${preview.excluded_total || 0} 条。本操作只对当前文件生效，不会写入本地映射库。`;
+    panel.appendChild(summary);
+
+    const excludedReasons = preview.excluded_reasons || {};
+    const reasonEntries = Object.entries(excludedReasons).filter((entry) => Number(entry[1]) > 0);
+    if (reasonEntries.length) {
+        const reasons = document.createElement("p");
+        reasons.className = "bulk-confidence-preview__reasons";
+        reasons.textContent = `排除原因：${reasonEntries.map(([key, count]) => `${bulkConfidenceReasonLabel(key)} ${count} 条`).join("，")}`;
+        panel.appendChild(reasons);
+    }
+
+    const candidates = Array.isArray(preview.candidates) ? preview.candidates : [];
+    if (candidates.length) {
+        const list = document.createElement("ul");
+        candidates.slice(0, 5).forEach((candidate) => {
+            const item = document.createElement("li");
+            const rawName = candidate.raw_metric_name || candidate.original_metric_name || candidate.raw_metric_id || "未记录术语";
+            const standardName = candidate.selected_name || candidate.candidate_name || candidate.standard_name || candidate.selected_code || candidate.candidate_code || "未记录标准术语";
+            const confidenceValue = candidate.confidence ?? candidate.candidate_score;
+            const confidence = confidenceValue !== undefined ? ` · ${formatBulkThreshold(confidenceValue)}` : "";
+            item.textContent = `${rawName}：本次采纳为 ${standardName}${confidence}`;
+            list.appendChild(item);
+        });
+        if (candidates.length > 5) {
+            const more = document.createElement("li");
+            more.textContent = `另有 ${candidates.length - 5} 条候选未展开。`;
+            list.appendChild(more);
+        }
+        panel.appendChild(list);
+    }
+}
+
+function bulkConfidenceReasonLabel(reason) {
+    const labels = {
+        already_decided: "已经人工处理过",
+        status_not_reviewable: "当前状态不需要批量采纳",
+        unsafe_relation_type: "术语关系不够直接，需要人工单独判断",
+        missing_candidate_code: "没有可采纳的标准术语",
+        confidence_below_threshold: "置信度低于当前阈值",
+    };
+    return labels[reason] || "其他未归类原因";
+}
+
+function renderBulkConfidenceError(panel, message) {
+    panel.replaceChildren();
+    panel.hidden = false;
+    panel.dataset.previewState = "ready";
+    const text = document.createElement("p");
+    text.textContent = message;
+    panel.appendChild(text);
+}
+
+function hideBulkConfidencePreview(root) {
+    const panel = root.querySelector("[data-bulk-confidence-preview]");
+    if (panel) {
+        panel.replaceChildren();
+        panel.hidden = true;
+        panel.dataset.previewState = "";
+    }
+    root.querySelectorAll("[data-bulk-confidence-preview-form] button[type='submit']").forEach((button) => {
+        button.textContent = button.dataset.defaultLabel || "先预览";
+    });
+}
+
+function markBulkConfidencePreviewVisible(root) {
+    root.querySelectorAll("[data-bulk-confidence-preview-form] button[type='submit']").forEach((button) => {
+        button.textContent = "收起预览";
+    });
+}
+
+function syncBulkConfidenceThresholds(root, value) {
+    root.querySelectorAll("[data-bulk-confidence-apply-form] input[name='threshold']").forEach((input) => {
+        input.value = value;
+    });
+}
+
+function initBulkConfidenceControls(root) {
+    const previewPanel = root.querySelector("[data-bulk-confidence-preview]");
+    root.querySelectorAll("[data-bulk-threshold-input]").forEach((input) => {
+        syncBulkConfidenceThresholds(root, input.value || "90");
+        input.addEventListener("input", () => {
+            syncBulkConfidenceThresholds(root, input.value || "90");
+            hideBulkConfidencePreview(root);
+        });
+    });
+    root.querySelectorAll("[data-bulk-confidence-preview-form]").forEach((form) => {
+        const button = form.querySelector("button[type='submit']");
+        if (button && !button.dataset.defaultLabel) {
+            button.dataset.defaultLabel = button.textContent.trim() || "先预览";
+        }
+        form.addEventListener("submit", async (event) => {
+            event.preventDefault();
+            if (!previewPanel) {
+                return;
+            }
+            if (!previewPanel.hidden && previewPanel.dataset.previewState === "ready") {
+                hideBulkConfidencePreview(root);
+                return;
+            }
+            if (button) {
+                button.disabled = true;
+            }
+            renderBulkConfidenceError(previewPanel, "正在生成预览...");
+            previewPanel.dataset.previewState = "loading";
+            try {
+                const url = new URL(form.action, window.location.href);
+                const params = new URLSearchParams(new FormData(form));
+                params.forEach((value, key) => url.searchParams.set(key, value));
+                const response = await fetch(url.toString(), {
+                    method: "GET",
+                    headers: { "Accept": "application/json" },
+                    credentials: "same-origin",
+                });
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}`);
+                }
+                renderBulkConfidencePreview(previewPanel, await response.json());
+                markBulkConfidencePreviewVisible(root);
+            } catch (error) {
+                renderBulkConfidenceError(previewPanel, "预览生成失败，请稍后重试。");
+                markBulkConfidencePreviewVisible(root);
+            } finally {
+                if (button) {
+                    button.disabled = false;
+                }
+            }
+        });
+    });
+}
+
 function initMappingReviewSheet() {
     const root = document.querySelector("[data-mapping-review-workbench]");
     if (!root) {
@@ -384,6 +560,9 @@ function initMappingReviewSheet() {
         if (input) {
             initStandardTermAutocomplete(input, row, root);
         }
+        row.querySelectorAll("[data-mapping-decision-form], [data-mapping-action-form]").forEach((form) => {
+            form.addEventListener("submit", () => syncMappingDecisionForm(form));
+        });
     });
     const initiallySelected = root.querySelector(".mapping-row--selected") || rows[0];
     const image = root.querySelector("[data-source-page-image]");
@@ -397,6 +576,7 @@ function initMappingReviewSheet() {
     if (initiallySelected) {
         updateMappingRowSelection(initiallySelected, root);
     }
+    initBulkConfidenceControls(root);
     document.addEventListener("click", (event) => {
         if (!event.target.closest(".standard-term-picker")) {
             closeAutocompleteResults(root);
@@ -852,6 +1032,9 @@ function initUnifiedProofreadWorkbench() {
         if (standardInput) {
             initStandardTermAutocomplete(standardInput, row, root);
         }
+        row.querySelectorAll("[data-mapping-decision-form]").forEach((form) => {
+            form.addEventListener("submit", () => syncMappingDecisionForm(form));
+        });
         const mappingReset = row.querySelector("[data-reset-mapping]");
         if (mappingReset) {
             mappingReset.addEventListener("mousedown", (event) => {
@@ -889,6 +1072,7 @@ function initUnifiedProofreadWorkbench() {
     if (saveButton) {
         saveButton.addEventListener("click", () => saveUnifiedEdits(root));
     }
+    initBulkConfidenceControls(root);
     const initiallySelected = root.querySelector(".unified-row--selected") || rows[0];
     if (initiallySelected) {
         selectUnifiedRow(initiallySelected, initiallySelected);

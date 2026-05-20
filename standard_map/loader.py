@@ -47,6 +47,10 @@ def load_raw_metrics(input_path: Path, *, company_name_override: str = "") -> li
             "provider": detailed.get("provider", ""),
             "doc_id": detailed.get("doc_id", ""),
             "source_cell_ref": detailed.get("source_cell_ref", ""),
+            "statement_type": detailed.get("statement_type", ""),
+            "header_path": detailed.get("header_path", ""),
+            "row_context_path": detailed.get("row_context_path", ""),
+            "value_type": detailed.get("value_type", ""),
         }
         results.append(
             RawMetricRow(

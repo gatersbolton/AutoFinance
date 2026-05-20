@@ -1,0 +1,13 @@
+auto_accept_once_confidence_threshold: 0.90
+future_bulk_accept_default_decision: accept_once
+safe_auto_map_relation_types:
+  - same_as
+  - exact_alias
+  - legacy_alias
+unsafe_review_relation_types:
+  - broader_than
+  - narrower_than
+  - aggregate
+  - split
+  - formula
+  - ambiguous

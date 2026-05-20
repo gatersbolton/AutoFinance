@@ -1,12 +1,26 @@
 terms:
+  - code: ST_001
+    name: 总营业额
+    category: 收入类
+    aliases:
+      - 总营业额
+    statement_scope: income_statement
+    metric_type: amount
+    period_type: flow
+    description: 企业一定期间内全部经营收入或营业额口径，需结合报表列示确认是否等同营业收入。
+    enabled: true
   - code: ZT_001
     name: 货币资金
+    category: 资产类
     aliases:
       - 货币资金
       - 现金及现金等价物
     statement_scope: balance_sheet
     metric_type: amount
+    period_type: point
     notes: 资产负债表货币资金项目。
+    description: 企业在资产负债表日持有的现金、银行存款及其他货币资金。
+    enabled: true
   - code: ZT_002
     name: 短期借款
     aliases:
@@ -56,11 +70,16 @@ terms:
     metric_type: amount
   - code: ZT_009
     name: 营业收入
+    category: 收入类
     aliases:
       - 营业收入
+    legacy_aliases:
       - 主营业务收入
     statement_scope: income_statement
     metric_type: amount
+    period_type: flow
+    description: 企业一定期间内经营活动形成的收入；是否等同主营业务收入需结合报表口径确认。
+    enabled: true
   - code: ZT_010
     name: 净利润
     aliases:
@@ -82,3 +101,13 @@ terms:
       - 其他应付款
     statement_scope: balance_sheet
     metric_type: amount
+  - code: ZT_013
+    name: 应付账款
+    category: 负债类
+    aliases:
+      - 应付账款
+    statement_scope: balance_sheet
+    metric_type: amount
+    period_type: point
+    description: 企业因购买材料、商品或接受劳务等经营活动应支付的款项。
+    enabled: true

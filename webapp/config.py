@@ -10,6 +10,7 @@ from project_paths import (
     CORPUS_LIBRARY_ROOT,
     CORPUS_ROOT,
     DEFAULT_SECRET_PATH,
+    DEEPSEEK_ENV_PATH,
     DEFAULT_TEMPLATE_PATH,
     REPO_ROOT,
     WEB_DB_PATH,
@@ -76,6 +77,7 @@ class WebAppSettings:
     library_root: Path = CORPUS_LIBRARY_ROOT
     template_path: Path = DEFAULT_TEMPLATE_PATH
     secret_path: Path = DEFAULT_SECRET_PATH
+    deepseek_env_path: Path = DEEPSEEK_ENV_PATH
     enable_local_worker: bool = True
     worker_poll_seconds: int = 2
     max_upload_bytes: int = 25 * 1024 * 1024
@@ -119,6 +121,14 @@ class WebAppSettings:
         return PACKAGE_ROOT / "static"
 
     @property
+    def mapping_store_root(self) -> Path:
+        return self.runtime_root / "mapping_store"
+
+    @property
+    def mapping_store_path(self) -> Path:
+        return self.mapping_store_root / "local_mappings.sqlite"
+
+    @property
     def allowed_upload_extensions(self) -> tuple[str, ...]:
         return (".pdf",)
 
@@ -151,6 +161,7 @@ class WebAppSettings:
             self.results_root,
             self.logs_root,
             self.deletions_root,
+            self.mapping_store_root,
             self.library_root,
         ):
             path.mkdir(parents=True, exist_ok=True)
@@ -280,6 +291,7 @@ def load_settings() -> WebAppSettings:
         library_root=_resolve_env_path("WEBAPP_LIBRARY_ROOT", corpus_root / "library"),
         template_path=_resolve_env_path("WEBAPP_TEMPLATE_PATH", DEFAULT_TEMPLATE_PATH),
         secret_path=_resolve_env_path("WEBAPP_SECRET_PATH", DEFAULT_SECRET_PATH),
+        deepseek_env_path=_resolve_env_path("WEBAPP_DEEPSEEK_ENV_PATH", DEEPSEEK_ENV_PATH),
         enable_local_worker=_env_bool("WEBAPP_ENABLE_LOCAL_WORKER", True),
         worker_poll_seconds=_env_int("WEBAPP_WORKER_POLL_SECONDS", 2),
         max_upload_bytes=_env_int("WEBAPP_MAX_UPLOAD_BYTES", 25 * 1024 * 1024),

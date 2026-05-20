@@ -37,10 +37,21 @@
             </form>
             {% if simple_flow.raw_ready %}
             <div class="actions">
-                <a class="button button--secondary" href="{{ url_prefix }}/jobs/{{ job.job_id }}/download/raw_metrics_xlsx">下载原始数据表 Excel</a>
-                <a class="button button--secondary" href="{{ url_prefix }}/jobs/{{ job.job_id }}/download/raw_metrics_csv">下载原始数据表 CSV</a>
+                {% if simple_flow.combined_ready %}
+                <a class="button button--primary" href="{{ url_prefix }}/jobs/{{ job.job_id }}/download/combined_metrics_xlsx">下载数据表</a>
+                {% endif %}
                 <a class="button button--secondary" href="{{ url_prefix }}/jobs/{{ job.job_id }}/proofread">进入统一校对</a>
             </div>
+            <details class="advanced-downloads">
+                <summary>高级下载</summary>
+                <div class="actions">
+                    <a class="button button--secondary" href="{{ url_prefix }}/jobs/{{ job.job_id }}/download/raw_metrics_csv">原始数据 CSV</a>
+                    <a class="button button--secondary" href="{{ url_prefix }}/jobs/{{ job.job_id }}/download/raw_metrics_xlsx">原始数据 Excel</a>
+                    {% if simple_flow.combined_ready %}
+                    <a class="button button--secondary" href="{{ url_prefix }}/jobs/{{ job.job_id }}/download/combined_download_summary">JSON 摘要</a>
+                    {% endif %}
+                </div>
+            </details>
             {% endif %}
         </article>
         <article class="stage-card {% if simple_flow.standard_ready %}stage-card--done{% elif simple_flow.raw_ready %}stage-card--current{% else %}stage-card--pending{% endif %}">
@@ -48,14 +59,28 @@
             <h3>标准化数据表</h3>
             <p>{% if simple_flow.standard_ready %}已生成{% elif simple_flow.raw_ready %}可生成{% else %}请先生成原始数据表{% endif %}</p>
             <form action="{{ url_prefix }}/jobs/{{ job.job_id }}/standard-metrics/run" method="post">
-                <button class="button button--primary" type="submit" {% if not simple_flow.raw_ready %}disabled{% endif %}>一键生成标准化数据表</button>
+                <button class="button button--primary" type="submit" {% if not simple_flow.raw_ready %}disabled{% endif %}>
+                    {% if simple_flow.standard_ready %}重新生成标准指标 / 标准映射{% else %}一键生成标准指标 / 标准映射{% endif %}
+                </button>
             </form>
             {% if simple_flow.standard_ready %}
             <div class="actions">
-                <a class="button button--secondary" href="{{ url_prefix }}/jobs/{{ job.job_id }}/download/standardized_metrics_xlsx">下载标准化数据表 Excel</a>
-                <a class="button button--secondary" href="{{ url_prefix }}/jobs/{{ job.job_id }}/download/standardized_metrics_csv">下载标准化数据表 CSV</a>
+                {% if simple_flow.combined_ready %}
+                <a class="button button--primary" href="{{ url_prefix }}/jobs/{{ job.job_id }}/download/combined_metrics_xlsx">下载数据表</a>
+                {% endif %}
                 <a class="button button--secondary" href="{{ url_prefix }}/jobs/{{ job.job_id }}/proofread">进入统一校对</a>
             </div>
+            <details class="advanced-downloads">
+                <summary>高级下载</summary>
+                <div class="actions">
+                    <a class="button button--secondary" href="{{ url_prefix }}/jobs/{{ job.job_id }}/download/raw_metrics_csv">原始数据 CSV</a>
+                    <a class="button button--secondary" href="{{ url_prefix }}/jobs/{{ job.job_id }}/download/standardized_metrics_csv">标准化数据 CSV</a>
+                    <a class="button button--secondary" href="{{ url_prefix }}/jobs/{{ job.job_id }}/download/standardized_metrics_xlsx">标准化数据 Excel</a>
+                    {% if simple_flow.combined_ready %}
+                    <a class="button button--secondary" href="{{ url_prefix }}/jobs/{{ job.job_id }}/download/combined_download_summary">JSON 摘要</a>
+                    {% endif %}
+                </div>
+            </details>
             {% endif %}
         </article>
     </div>
@@ -104,10 +129,8 @@
             {% set logs_artifact.item = artifact %}
         {% endif %}
     {% endfor %}
-    {% if simple_flow.standard_ready %}
-    <a class="button button--primary" href="{{ url_prefix }}/jobs/{{ job.job_id }}/download/standardized_metrics_xlsx">下载最终标准化结果</a>
-    {% elif simple_flow.raw_ready %}
-    <a class="button button--primary" href="{{ url_prefix }}/jobs/{{ job.job_id }}/download/raw_metrics_xlsx">下载原始数据表</a>
+    {% if simple_flow.combined_ready %}
+    <a class="button button--primary" href="{{ url_prefix }}/jobs/{{ job.job_id }}/download/combined_metrics_xlsx">下载数据表</a>
     {% elif workbook_artifact.item and workbook_artifact.item.exists %}
     <a class="button button--primary" href="{{ url_prefix }}/jobs/{{ job.job_id }}/download/filled_workbook">下载会计报表</a>
     {% endif %}
@@ -160,7 +183,7 @@
     <article class="card">
         <h2>快速下载</h2>
         <div class="download-grid">
-            {% for slug, label in [("filled_workbook", "下载会计报表"), ("review_workbook", "下载人工复核表"), ("logs", "下载日志"), ("quality_summary", "下载质量摘要")] %}
+            {% for slug, label in [("combined_metrics_xlsx", "下载数据表"), ("filled_workbook", "下载会计报表"), ("review_workbook", "下载人工复核表"), ("logs", "下载日志"), ("quality_summary", "下载质量摘要")] %}
                 {% set found = namespace(item=None) %}
                 {% for artifact in payload.output_files %}
                     {% if artifact.slug == slug %}

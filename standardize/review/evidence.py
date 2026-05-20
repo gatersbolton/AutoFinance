@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import io
 import json
 from pathlib import Path
@@ -50,6 +51,7 @@ def attach_review_evidence(
 
     by_ref, by_table, by_row = build_cell_index(cells)
     rendered_cache: Dict[str, Dict[int, Image.Image]] = {}
+    table_evidence_cache: Dict[str, str] = {}
 
     if materialize_files:
         pack_dir.mkdir(parents=True, exist_ok=True)
@@ -82,7 +84,13 @@ def attach_review_evidence(
             continue
         item.evidence_cell_path = save_crop(page_image, cell_bbox, pack_dir / f"{item.review_id}_cell.png", review_config)
         item.evidence_row_path = save_crop(page_image, row_bbox, pack_dir / f"{item.review_id}_row.png", review_config)
-        item.evidence_table_path = save_crop(page_image, table_bbox, pack_dir / f"{item.review_id}_table.png", review_config)
+        table_cache_key = build_table_evidence_cache_key(table_key, table_bbox)
+        if table_cache_key in table_evidence_cache:
+            item.evidence_table_path = table_evidence_cache[table_cache_key]
+        else:
+            table_path = pack_dir / f"TABLE_{table_cache_key[:16]}_table.png"
+            item.evidence_table_path = save_crop(page_image, table_bbox, table_path, review_config)
+            table_evidence_cache[table_cache_key] = item.evidence_table_path
         append_index(index_rows, item.review_id, item.evidence_cell_path, item.evidence_row_path, item.evidence_table_path, "ok")
 
     if materialize_files:
@@ -136,6 +144,18 @@ def save_crop(image: Image.Image, bbox: List[int], path: Path, review_config: Di
         return ""
     image.crop(crop_box).save(path)
     return str(path)
+
+
+def build_table_evidence_cache_key(table_key: Tuple[str, int, str, str], table_bbox: List[int]) -> str:
+    payload = {
+        "doc_id": table_key[0],
+        "page_no": table_key[1],
+        "provider": table_key[2],
+        "table_id": table_key[3],
+        "table_bbox": table_bbox,
+    }
+    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()
 
 
 def append_index(rows: List[Dict[str, str]], review_id: str, cell_path: str, row_path: str, table_path: str, status: str) -> None:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from collections import defaultdict
 from pathlib import Path
 from typing import Any
@@ -59,6 +60,19 @@ def load_standard_registry(
     )
 
 
+def extend_registry_aliases(registry: StandardRegistry, aliases: list[AliasEntry]) -> StandardRegistry:
+    if not aliases:
+        return registry
+    registry.aliases.extend(aliases)
+    for alias in aliases:
+        if not alias.alias:
+            continue
+        target = registry.normalized_legacy_alias_lookup if alias.alias_type == "legacy_alias" else registry.normalized_alias_lookup
+        normalized = normalize_metric_name(alias.alias)
+        target.setdefault(normalized, []).append(alias)
+    return registry
+
+
 def _load_yaml(path: Path) -> dict[str, Any]:
     if not path.exists():
         return {}
@@ -91,10 +105,14 @@ def _load_terms(path: Path) -> list[StandardTerm]:
             StandardTerm(
                 code=code,
                 name=name,
+                category=str(item.get("category", "") or "").strip(),
                 aliases=_string_list(item.get("aliases", ())),
                 statement_scope=str(item.get("statement_scope", "") or "").strip(),
                 metric_type=str(item.get("metric_type", "") or "").strip(),
+                period_type=str(item.get("period_type", "") or "").strip(),
                 legacy_aliases=_string_list(item.get("legacy_aliases", ())),
+                description=str(item.get("description", "") or "").strip(),
+                enabled=bool(item.get("enabled", True)),
                 notes=str(item.get("notes", "") or "").strip(),
             )
         )
@@ -107,9 +125,9 @@ def _aliases_from_terms(terms: list[StandardTerm]) -> list[AliasEntry]:
         for alias in term.aliases:
             if normalize_metric_name(alias) == normalize_metric_name(term.name):
                 continue
-            entries.append(AliasEntry(term=term, alias=alias, alias_type="exact_alias", safe_auto_map=True, note=term.notes))
+            entries.append(AliasEntry(term=term, alias=alias, alias_type="exact_alias", safe_auto_map=True, source="base", note=term.notes))
         for alias in term.legacy_aliases:
-            entries.append(AliasEntry(term=term, alias=alias, alias_type="legacy_alias", safe_auto_map=True, note=term.notes))
+            entries.append(AliasEntry(term=term, alias=alias, alias_type="legacy_alias", safe_auto_map=True, source="base", note=term.notes))
     return entries
 
 
@@ -138,6 +156,7 @@ def _load_alias_entries(path: Path, term_by_code: dict[str, StandardTerm]) -> li
                 alias=alias,
                 alias_type=alias_type,
                 safe_auto_map=bool(item.get("safe_auto_map", True)),
+                source="base",
                 note=str(item.get("note", "") or "").strip(),
             )
         )
@@ -162,12 +181,18 @@ def _load_relations(path: Path, term_by_code: dict[str, StandardTerm]) -> list[T
         relations.append(
             TermRelation(
                 relation_type=relation_type,
+                relation_id=str(item.get("relation_id", "") or "").strip(),
                 canonical_code=canonical_code,
                 canonical_name=canonical_name,
                 raw_names=_string_list(item.get("raw_names", ())),
                 related_names=_string_list(item.get("related_names", ())),
                 candidate_codes=_string_list(item.get("candidate_codes", ())),
+                formula_json=json.dumps(item.get("formula", {}) or {}, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+                if item.get("formula") is not None
+                else "",
+                auto_apply=bool(item.get("auto_apply", False)),
                 review_required=bool(item.get("review_required", True)),
+                enabled=bool(item.get("enabled", True)),
                 note=str(item.get("note", item.get("notes", "")) or "").strip(),
             )
         )

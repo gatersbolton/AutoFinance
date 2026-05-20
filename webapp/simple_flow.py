@@ -12,16 +12,26 @@ from fastapi import HTTPException
 from project_paths import RAW_METRICS_GENERATED_ROOT, REPO_ROOT, STANDARD_METRICS_GENERATED_ROOT, STANDARD_TERMS_PATH
 from raw_extract.cli import run_raw_extraction
 from raw_extract.loader import infer_doc_id as infer_raw_doc_id
+from standard_map.decisions import append_mapping_decision_file, apply_mapping_decision_to_output
 from standard_map.loader import infer_doc_id as infer_standard_doc_id
 from standard_map.loader import validate_input_path as validate_raw_metrics_input_path
 from standard_map.mapper import mapping_run_to_web_summary, run_standard_mapping
+from standard_map.store import LocalMappingStore
 
+from .combined_downloads import COMBINED_WORKBOOK_DOWNLOAD_NAME, build_combined_metrics_workbook
 from .config import WebAppSettings
 from .models import JOB_MODE_UPLOAD, JobRecord
 
 
 RAW_REVIEW_ACTIONS = {"approve", "skip", "edit", "next_table"}
-MAPPING_REVIEW_ACTIONS = {"approve_mapping", "skip_mapping", "change_mapping"}
+MAPPING_REVIEW_ACTIONS = {
+    "reject",
+    "accept_once",
+    "accept_and_remember",
+    "approve_mapping",
+    "skip_mapping",
+    "change_mapping",
+}
 _SOURCE_BLOCK_CACHE: dict[Path, list[dict[str, Any]]] = {}
 _SOURCE_TABLE_CELL_CACHE: dict[Path, list[dict[str, Any]]] = {}
 _SOURCE_PAGE_METADATA_CACHE: dict[Path, dict[str, Any]] = {}
@@ -51,6 +61,18 @@ def standard_step_summary_path(job: JobRecord) -> Path:
     return simple_flow_dir(job) / "standard_metrics_step_summary.json"
 
 
+def combined_downloads_dir(job: JobRecord) -> Path:
+    return Path(job.result_dir).resolve() / "downloads"
+
+
+def combined_workbook_path(job: JobRecord) -> Path:
+    return combined_downloads_dir(job) / COMBINED_WORKBOOK_DOWNLOAD_NAME
+
+
+def combined_download_summary_path(job: JobRecord) -> Path:
+    return job_root(job) / "combined_download_summary.json"
+
+
 def load_json(path: Path) -> dict[str, Any]:
     if not path.exists():
         return {}
@@ -69,6 +91,7 @@ def write_json(path: Path, payload: Any) -> None:
 def load_simple_flow_state(job: JobRecord) -> dict[str, Any]:
     raw_summary = load_json(raw_step_summary_path(job))
     standard_summary = load_json(standard_step_summary_path(job))
+    combined_summary = load_json(combined_download_summary_path(job))
     raw_metrics_csv = _portable_summary_file(raw_summary.get("raw_metrics_csv", ""), RAW_METRICS_GENERATED_ROOT / job.job_id, "raw_metrics.csv")
     if raw_metrics_csv is None and standard_summary.get("input_path"):
         raw_metrics_csv = _portable_summary_file(standard_summary.get("input_path", ""), RAW_METRICS_GENERATED_ROOT / job.job_id, "raw_metrics.csv")
@@ -83,15 +106,24 @@ def load_simple_flow_state(job: JobRecord) -> dict[str, Any]:
         STANDARD_METRICS_GENERATED_ROOT / job.job_id,
         "standardized_metrics.xlsx",
     )
+    combined_workbook = _portable_summary_file(
+        combined_summary.get("workbook_path", ""),
+        combined_downloads_dir(job),
+        COMBINED_WORKBOOK_DOWNLOAD_NAME,
+    )
     return {
         "raw_summary": raw_summary,
         "standard_summary": standard_summary,
+        "combined_summary": combined_summary,
         "raw_metrics_csv": str(raw_metrics_csv) if raw_metrics_csv else str(raw_summary.get("raw_metrics_csv", "") or ""),
         "raw_metrics_xlsx": str(raw_metrics_xlsx) if raw_metrics_xlsx else str(raw_summary.get("raw_metrics_xlsx", "") or ""),
         "standardized_metrics_csv": str(standardized_metrics_csv) if standardized_metrics_csv else str(standard_summary.get("standardized_metrics_csv", "") or ""),
         "standardized_metrics_xlsx": str(standardized_metrics_xlsx) if standardized_metrics_xlsx else str(standard_summary.get("standardized_metrics_xlsx", "") or ""),
+        "combined_metrics_xlsx": str(combined_workbook) if combined_workbook else str(combined_summary.get("workbook_path", "") or ""),
+        "combined_download_summary": str(combined_download_summary_path(job)) if combined_download_summary_path(job).exists() else "",
         "raw_ready": bool(raw_metrics_csv and raw_metrics_csv.exists()),
         "standard_ready": bool(standardized_metrics_csv and standardized_metrics_csv.exists()),
+        "combined_ready": bool(combined_workbook and combined_workbook.exists()),
     }
 
 
@@ -145,6 +177,7 @@ def run_raw_metrics_step(settings: WebAppSettings, job: JobRecord) -> dict[str, 
         "no_ocr_api_called": True,
     }
     write_json(raw_step_summary_path(job), payload)
+    refresh_combined_metrics_workbook(settings, job)
     return payload
 
 
@@ -178,15 +211,58 @@ def run_standard_metrics_step(settings: WebAppSettings, job: JobRecord, *, raw_m
         input=str(input_path),
         output_dir=str(output_base),
         mapping_registry=str(STANDARD_TERMS_PATH),
+        mapping_store_path=str(settings.mapping_store_path),
         doc_id=doc_id,
         company_name="",
+        enable_llm_mapping=True,
+        disable_llm_mapping=False,
+        llm_model="deepseek-v4-flash",
+        llm_env_file=str(settings.deepseek_env_path),
+        llm_mock=None,
+        disable_llm_cache=False,
         debug=False,
     )
     result = run_standard_mapping(args=args, cli_args=["--input", str(input_path), "--output-dir", str(output_base)])
     payload = mapping_run_to_web_summary(result)
     payload["doc_id"] = doc_id
     write_json(standard_step_summary_path(job), payload)
+    refresh_combined_metrics_workbook(settings, job)
     return payload
+
+
+def refresh_combined_metrics_workbook(settings: WebAppSettings, job: JobRecord) -> dict[str, Any]:
+    state = load_simple_flow_state(job)
+    raw_csv = _existing_state_file(state.get("raw_metrics_csv", ""))
+    standard_csv = _existing_state_file(state.get("standardized_metrics_csv", ""))
+    mapping_review_csv = standard_csv.parent / "mapping_review_items.csv" if standard_csv else None
+    raw_summary = state.get("raw_summary", {}) if isinstance(state.get("raw_summary"), dict) else {}
+    standard_summary = state.get("standard_summary", {}) if isinstance(state.get("standard_summary"), dict) else {}
+    doc_id = str(raw_summary.get("doc_id") or standard_summary.get("doc_id") or job.job_id)
+    summary = build_combined_metrics_workbook(
+        raw_csv,
+        standard_csv,
+        mapping_review_csv if mapping_review_csv and mapping_review_csv.exists() else None,
+        combined_workbook_path(job),
+        metadata={
+            "doc_id": doc_id,
+            "job_id": job.job_id,
+            "summary_path": combined_download_summary_path(job),
+            "path_hygiene_roots": [settings.runtime_root, STANDARD_METRICS_GENERATED_ROOT],
+        },
+    )
+    write_json(settings.runtime_root / "combined_download_summary.json", summary)
+    return summary
+
+
+def _existing_state_file(value: object) -> Path | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    path = Path(text)
+    if not path.is_absolute():
+        path = REPO_ROOT / path
+    path = path.resolve()
+    return path if path.exists() and path.is_file() else None
 
 
 def load_raw_review_items(job: JobRecord, *, apply_actions: bool = True) -> list[dict[str, Any]]:
@@ -616,8 +692,16 @@ def _enrich_mapping_review_items(job: JobRecord, rows: list[dict[str, Any]]) -> 
         raw_metric_id = str(item.get("raw_metric_id", "") or "")
         detailed = detailed_lookup.get(raw_metric_id, {})
         original_name = str(item.get("原始指标名") or item.get("original_metric_name") or detailed.get("row_label_clean") or detailed.get("metric_name") or "")
-        current_code = str(item.get("candidate_code") or item.get("标准指标编码") or "")
-        current_name = str(item.get("candidate_name") or item.get("标准指标名称") or "")
+        mapping_method = str(item.get("mapping_method") or item.get("映射方法") or "")
+        mapping_status = str(item.get("mapping_status", "") or "")
+        is_unmapped_without_suggestion = mapping_status == "unmapped" and mapping_method == "none"
+        current_code = "" if is_unmapped_without_suggestion else str(item.get("candidate_code") or item.get("标准指标编码") or "")
+        current_name = "" if is_unmapped_without_suggestion else str(item.get("candidate_name") or item.get("标准指标名称") or "")
+        is_ai_suggestion = mapping_method == "llm_suggested" or bool(item.get("ai_suggestion_code"))
+        mapping_status_code = "llm_suggested" if is_ai_suggestion else mapping_status
+        mapping_confidence = "" if is_unmapped_without_suggestion else str(item.get("mapping_confidence") or item.get("candidate_score") or item.get("映射置信度") or "")
+        system_candidate_label = "" if is_unmapped_without_suggestion else _mapping_label(item.get("system_candidate_code", ""), item.get("system_candidate_name", ""))
+        show_decision_actions, decision_note = _mapping_decision_action_state(item, mapping_status=mapping_status, mapping_method=mapping_method)
         source_page_no = str(item.get("source_page_no") or detailed.get("page_no") or "")
         source_pdf_path = str(item.get("source_pdf_path") or detailed.get("evidence_path") or "")
         value_bbox_json = str(item.get("source_bbox_json") or detailed.get("bbox_json") or "")
@@ -637,7 +721,19 @@ def _enrich_mapping_review_items(job: JobRecord, rows: list[dict[str, Any]]) -> 
                 "current_code": current_code,
                 "current_name": current_name,
                 "current_mapping_label": f"{current_code} {current_name}".strip(),
-                "mapping_status_label": _mapping_status_label(str(item.get("mapping_status", "") or "")),
+                "mapping_status_code": mapping_status_code,
+                "mapping_status_label": _mapping_status_label(mapping_status, mapping_method=mapping_method, has_ai_suggestion=is_ai_suggestion),
+                "mapping_confidence": mapping_confidence,
+                "relation_type": str(item.get("relation_type") or item.get("口径关系") or ""),
+                "relation_note": str(item.get("issue_reason") or item.get("口径说明") or ""),
+                "system_candidate_label": system_candidate_label,
+                "ai_suggestion_label": _mapping_label(item.get("ai_suggestion_code", ""), item.get("ai_suggestion_name", "")),
+                "ai_confidence_display": _format_percent(item.get("ai_confidence", "")),
+                "ai_reason": str(item.get("ai_reason") or ""),
+                "ai_relation_type": str(item.get("ai_relation_type") or ""),
+                "ai_validation_status": str(item.get("ai_validation_status") or ""),
+                "show_mapping_decision_actions": show_decision_actions,
+                "mapping_decision_note": decision_note,
                 "source_page_no": source_page_no,
                 "source_pdf_path": source_pdf_path,
                 "source_file": str(detailed.get("source_file") or item.get("source_file") or ""),
@@ -648,6 +744,37 @@ def _enrich_mapping_review_items(job: JobRecord, rows: list[dict[str, Any]]) -> 
         )
         enriched.append(item)
     return enriched
+
+
+def _mapping_label(code: Any, name: Any) -> str:
+    return f"{str(code or '').strip()} {str(name or '').strip()}".strip()
+
+
+def _format_percent(value: Any) -> str:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return ""
+    if number <= 1:
+        number *= 100
+    return f"{number:.0f}%" if abs(number - round(number)) < 0.01 else f"{number:.1f}%"
+
+
+def _mapping_decision_action_state(item: dict[str, Any], *, mapping_status: str, mapping_method: str) -> tuple[bool, str]:
+    decision = str(item.get("mapping_decision", "") or "").strip()
+    normalized_method = str(mapping_method or "").strip()
+    normalized_status = str(mapping_status or "").strip()
+    if decision == "accept_once" or normalized_method == "manual_once":
+        return False, "已本次采用"
+    if decision == "accept_and_remember" or normalized_method == "manual_saved":
+        return False, "已采用并记住"
+    if normalized_method == "exact":
+        return False, "精确匹配，无需决策"
+    if normalized_method == "legacy_alias":
+        return False, "旧术语匹配，无需决策"
+    if normalized_status == "unmapped" and normalized_method == "none":
+        return False, "未找到可采纳映射"
+    return True, ""
 
 
 def _load_raw_detailed_lookup(job: JobRecord) -> dict[str, dict[str, Any]]:
@@ -675,7 +802,9 @@ def _unique_detailed_rows(rows: Iterable[dict[str, Any]]) -> list[dict[str, Any]
     return unique
 
 
-def _mapping_status_label(status: str) -> str:
+def _mapping_status_label(status: str, *, mapping_method: str = "", has_ai_suggestion: bool = False) -> str:
+    if mapping_method == "llm_suggested" or has_ai_suggestion:
+        return "AI建议"
     return {
         "mapped": "已映射",
         "review_required": "建议校对",
@@ -683,6 +812,7 @@ def _mapping_status_label(status: str) -> str:
         "changed": "已修改",
         "skipped": "已跳过",
         "approved": "已通过",
+        "llm_suggested": "AI建议",
     }.get(status, status or "未记录")
 
 
@@ -1104,28 +1234,88 @@ def save_mapping_review_action(
     selected_code: str = "",
     selected_name: str = "",
     reviewer_note: str = "",
+    mapping_store_path: str | Path | None = None,
+    decided_by: str = "web",
+    persist_decision: bool = True,
 ) -> dict[str, Any]:
     if action not in MAPPING_REVIEW_ACTIONS:
         raise ValueError(f"不支持的术语映射校对动作: {action}")
+    decision = _mapping_action_to_decision(action)
     previous_code = str(item.get("candidate_code") or item.get("current_code") or item.get("标准指标编码") or "")
     previous_name = str(item.get("candidate_name") or item.get("current_name") or item.get("标准指标名称") or "")
-    if action in {"approve_mapping", "skip_mapping"} and not selected_code:
+    if decision in {"accept_once", "accept_and_remember"} and not selected_code:
         selected_code = previous_code
         selected_name = selected_name or previous_name
+    if selected_code and not selected_name:
+        selected_name = previous_name
+    raw_metric_name = str(item.get("原始指标名", "") or item.get("original_metric_name", ""))
+    confidence = _safe_float(item.get("mapping_confidence") or item.get("candidate_score") or item.get("映射置信度"))
+    relation_type = str(item.get("relation_type") or item.get("口径关系") or "")
+    if decision in {"accept_once", "accept_and_remember"} and not relation_type:
+        relation_type = "exact_alias"
     payload = {
         "created_at": datetime.now(timezone.utc).isoformat(),
         "review_item_id": item.get("review_item_id", ""),
         "raw_metric_id": item.get("raw_metric_id", ""),
-        "original_metric_name": item.get("原始指标名", "") or item.get("original_metric_name", ""),
+        "original_metric_name": raw_metric_name,
         "previous_code": previous_code,
         "previous_name": previous_name,
         "action": action,
+        "decision": decision,
         "selected_code": selected_code,
         "selected_name": selected_name,
+        "relation_type": relation_type,
+        "confidence": confidence if confidence is not None else "",
         "reviewer_note": reviewer_note,
     }
     _append_action(mapping_review_dir(job), "mapping_review_actions", payload)
+    if not persist_decision:
+        return payload
+    store = LocalMappingStore(mapping_store_path)
+    decision_payload = store.record_decision(
+        job_id=job.job_id,
+        doc_id=job.job_id,
+        raw_metric_id=str(item.get("raw_metric_id", "") or ""),
+        raw_metric_name=raw_metric_name,
+        suggested_code=previous_code,
+        suggested_name=previous_name,
+        decision=decision,
+        final_code=selected_code if decision != "reject" else "",
+        final_name=selected_name if decision != "reject" else "",
+        relation_type=relation_type,
+        confidence=confidence,
+        decided_by=decided_by,
+        note=reviewer_note,
+    )
+    append_mapping_decision_file(mapping_review_dir(job), decision_payload)
+    state = load_simple_flow_state(job)
+    standard_csv = Path(str(state.get("standardized_metrics_csv", "") or ""))
+    if standard_csv.exists():
+        output_dir = standard_csv.parent
+        apply_mapping_decision_to_output(output_dir, decision_payload)
+        append_mapping_decision_file(output_dir, decision_payload)
+        store.write_snapshot(output_dir / "mapping_store_snapshot.yml")
+    store.export_aliases(Path(mapping_store_path).resolve().parent / "local_aliases_export.yml" if mapping_store_path else None)
+    store.export_decision_audit(Path(mapping_store_path).resolve().parent / "mapping_decisions_audit.csv" if mapping_store_path else None)
     return payload
+
+
+def _mapping_action_to_decision(action: str) -> str:
+    return {
+        "approve_mapping": "accept_once",
+        "change_mapping": "accept_once",
+        "skip_mapping": "reject",
+    }.get(action, action)
+
+
+def _safe_float(value: Any) -> float | None:
+    try:
+        text = str(value).strip()
+        if not text:
+            return None
+        return float(text)
+    except (TypeError, ValueError):
+        return None
 
 
 def _append_action(target_dir: Path, basename: str, payload: dict[str, Any]) -> None:

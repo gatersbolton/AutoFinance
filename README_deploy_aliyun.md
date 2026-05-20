@@ -115,7 +115,32 @@ For Tencent:
 
 Do not bake secrets into images.
 
-## 6. Run the deployment preflight check
+## 6. Configure DeepSeek mapping suggestions
+
+DeepSeek is optional. The Docker image includes the Stage 15.2 LLM mapping code, but live calls stay disabled unless you provide a real key and enable it.
+
+Preferred server-side secret file:
+
+```text
+data/secrets/deepseek.env
+```
+
+Example:
+
+```text
+DEEPSEEK_API_KEY=[请输入你的api]
+DEEPSEEK_MODEL=deepseek-v4-flash
+DEEPSEEK_BASE_URL=https://api.deepseek.com
+DEEPSEEK_TIMEOUT_SECONDS=60
+DEEPSEEK_ENABLED=false
+LLM_MAPPING_MAX_CANDIDATES=20
+LLM_MAPPING_CACHE_ENABLED=true
+LLM_MAPPING_MOCK=false
+```
+
+Set `DEEPSEEK_ENABLED=true` only when the key is real. The local mapping store, LLM cache, and human decisions live under `data/generated/web/mapping_store/`, which is mounted into the containers through `./data:/app/data`.
+
+## 7. Run the deployment preflight check
 
 Before starting containers:
 
@@ -129,7 +154,7 @@ Check:
 
 If `pass=false`, fix the reported issue before continuing.
 
-## 7. Start services
+## 8. Start services
 
 ```bash
 docker compose --env-file .env.aliyun -f docker-compose.yml -f docker-compose.aliyun.yml up --build -d
@@ -142,7 +167,7 @@ Services started:
 - `redis`
 - `nginx`
 
-## 8. Open the browser
+## 9. Open the browser
 
 Visit:
 
@@ -152,7 +177,7 @@ http://<your-server-ip>/
 
 If `WEBAPP_AUTH_REQUIRED=1`, the browser will ask for the admin password.
 
-## 9. Verify the app after startup
+## 10. Verify the app after startup
 
 Check health:
 
@@ -168,7 +193,7 @@ Open the web UI and confirm:
 - upload PDF page is available
 - recent tasks can be viewed
 
-## 10. View logs
+## 11. View logs
 
 Container logs:
 
@@ -185,7 +210,7 @@ Per-job logs in the mounted data directory:
 - `data/generated/web/logs/<job_id>/standardize_stdout.txt`
 - `data/generated/web/logs/<job_id>/standardize_stderr.txt`
 
-## 11. Backup data
+## 12. Backup data
 
 Backup the demo runtime:
 
@@ -204,7 +229,7 @@ Generated files:
 - archive under `data/generated/audits/backups/`
 - `data/generated/web/backup_summary.json`
 
-## 12. Clean up old jobs
+## 13. Clean up old jobs
 
 Preview first:
 
@@ -222,7 +247,7 @@ Generated file:
 
 - `data/generated/web/cleanup_summary.json`
 
-## 13. Known limitations
+## 14. Known limitations
 
 - SQLite is still used for the demo deployment.
 - This deployment targets a small Alibaba Cloud CPU server and is optimized for usability, not for enterprise-grade HA.
@@ -231,7 +256,7 @@ Generated file:
 - OCR smoke/mock mode exists only for testing and smoke runs.
 - PaddleOCR remains pilot-only and is not part of the deployment default.
 
-## 14. Build troubleshooting
+## 15. Build troubleshooting
 
 If Docker build fails at `pip install` with `Could not find a version that satisfies the requirement ...`, first verify the active pip index can see the package:
 
@@ -246,7 +271,7 @@ docker compose --env-file .env.aliyun -f docker-compose.yml -f docker-compose.al
 docker compose --env-file .env.aliyun -f docker-compose.yml -f docker-compose.aliyun.yml up -d
 ```
 
-## 15. Recommended next step after MVP
+## 16. Recommended next step after MVP
 
 After the demo deployment is stable, the next practical step is:
 

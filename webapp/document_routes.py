@@ -7,7 +7,9 @@ from urllib.parse import urlencode
 from fastapi import APIRouter, Depends, File, HTTPException, Request, Response, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 
+from standard_map.confidence import apply_confidence_bulk_accept, build_confidence_bulk_accept_preview
 from standard_map.registry import load_standard_registry
+from standard_map.store import LocalMappingStore
 
 from .base_path import app_path
 from .document_library import (
@@ -31,7 +33,9 @@ from .simple_flow import (
     load_mapping_review_items,
     load_raw_review_items,
     load_simple_flow_state,
+    mapping_review_dir,
     resolve_safe_source_file,
+    refresh_combined_metrics_workbook,
     run_raw_metrics_step,
     run_standard_metrics_step,
     save_mapping_review_action,
@@ -492,8 +496,151 @@ async def document_mapping_review_action_route(request: Request, doc_id: str) ->
         selected_code=selected_code,
         selected_name=selected_name,
         reviewer_note=str(form.get("reviewer_note", "") or ""),
+        mapping_store_path=settings.mapping_store_path,
     )
+    refresh_combined_metrics_workbook(settings, job)
     return RedirectResponse(url=f"/documents/{doc_id}/mapping-review/items/{review_item_id}", status_code=303)
+
+
+@document_router.post("/documents/{doc_id}/mapping/decision", dependencies=[Depends(password_gate)])
+async def document_mapping_decision_route(request: Request, doc_id: str) -> Response:
+    settings = get_settings(request)
+    job = document_to_job(settings, load_document(settings, doc_id))
+    payload = await _document_mapping_decision_payload(request)
+    summary = _save_document_mapping_decision(settings, job, payload)
+    return _json_or_html_redirect(request, summary, f"/documents/{doc_id}/proofread")
+
+
+@document_router.post("/documents/{doc_id}/mapping/accept-once", dependencies=[Depends(password_gate)])
+async def document_mapping_accept_once_route(request: Request, doc_id: str) -> Response:
+    settings = get_settings(request)
+    job = document_to_job(settings, load_document(settings, doc_id))
+    payload = await _document_mapping_decision_payload(request)
+    payload["decision"] = "accept_once"
+    summary = _save_document_mapping_decision(settings, job, payload)
+    return _json_or_html_redirect(request, summary, f"/documents/{doc_id}/proofread")
+
+
+@document_router.post("/documents/{doc_id}/mapping/accept-and-remember", dependencies=[Depends(password_gate)])
+async def document_mapping_accept_and_remember_route(request: Request, doc_id: str) -> Response:
+    settings = get_settings(request)
+    job = document_to_job(settings, load_document(settings, doc_id))
+    payload = await _document_mapping_decision_payload(request)
+    payload["decision"] = "accept_and_remember"
+    summary = _save_document_mapping_decision(settings, job, payload)
+    return _json_or_html_redirect(request, summary, f"/documents/{doc_id}/proofread")
+
+
+@document_router.post("/documents/{doc_id}/mapping/reject", dependencies=[Depends(password_gate)])
+async def document_mapping_reject_route(request: Request, doc_id: str) -> Response:
+    settings = get_settings(request)
+    job = document_to_job(settings, load_document(settings, doc_id))
+    payload = await _document_mapping_decision_payload(request)
+    payload["decision"] = "reject"
+    summary = _save_document_mapping_decision(settings, job, payload)
+    return _json_or_html_redirect(request, summary, f"/documents/{doc_id}/proofread")
+
+
+@document_router.get("/documents/{doc_id}/mapping/bulk-confidence-preview", response_class=JSONResponse, dependencies=[Depends(password_gate)])
+def document_mapping_bulk_confidence_preview_route(request: Request, doc_id: str, threshold: float = 0.9) -> JSONResponse:
+    settings = get_settings(request)
+    job = document_to_job(settings, load_document(settings, doc_id))
+    state = load_simple_flow_state(job)
+    standard_csv = Path(str(state.get("standardized_metrics_csv", "") or ""))
+    if not standard_csv.exists():
+        raise HTTPException(status_code=404, detail="请先生成标准化数据。")
+    store = LocalMappingStore(settings.mapping_store_path)
+    before = store.count("term_aliases", where="enabled = 1 AND COALESCE(source, '') != 'base'")
+    return JSONResponse(
+        build_confidence_bulk_accept_preview(
+            standard_csv.parent,
+            threshold=threshold,
+            before_alias_count=before,
+            after_alias_count=before,
+        )
+    )
+
+
+@document_router.post("/documents/{doc_id}/mapping/bulk-accept-confidence", response_class=JSONResponse, dependencies=[Depends(password_gate)])
+async def document_mapping_bulk_accept_confidence_route(request: Request, doc_id: str, threshold: float = 0.9) -> Response:
+    settings = get_settings(request)
+    job = document_to_job(settings, load_document(settings, doc_id))
+    payload = await _document_mapping_decision_payload(request)
+    threshold_value = float(payload.get("threshold") or payload.get("threshold_pct") or threshold or 0.9)
+    state = load_simple_flow_state(job)
+    standard_csv = Path(str(state.get("standardized_metrics_csv", "") or ""))
+    if not standard_csv.exists():
+        raise HTTPException(status_code=404, detail="请先生成标准化数据。")
+    store = LocalMappingStore(settings.mapping_store_path)
+    summary = apply_confidence_bulk_accept(
+        standard_csv.parent,
+        store=store,
+        job_id=job.job_id,
+        doc_id=job.job_id,
+        threshold=threshold_value,
+        decisions_dir=mapping_review_dir(job),
+    )
+    store.export_aliases(settings.mapping_store_root / "local_aliases_export.yml")
+    store.export_decision_audit(settings.mapping_store_root / "mapping_decisions_audit.csv")
+    refresh_combined_metrics_workbook(settings, job)
+    return _json_or_html_redirect(request, summary, f"/documents/{doc_id}/proofread")
+
+
+async def _document_mapping_decision_payload(request: Request) -> dict[str, str]:
+    content_type = request.headers.get("content-type", "")
+    if "application/json" in content_type:
+        payload = await request.json()
+        return {str(key): str(value or "") for key, value in payload.items()} if isinstance(payload, dict) else {}
+    form = await request.form()
+    return {str(key): str(value or "") for key, value in form.items()}
+
+
+def _json_or_html_redirect(request: Request, payload: dict[str, object], redirect_url: str) -> Response:
+    if _request_prefers_html(request):
+        return RedirectResponse(url=redirect_url, status_code=303)
+    return JSONResponse(payload)
+
+
+def _request_prefers_html(request: Request) -> bool:
+    accept = request.headers.get("accept", "")
+    content_type = request.headers.get("content-type", "")
+    if "application/json" in accept or "application/json" in content_type:
+        return False
+    return "text/html" in accept
+
+
+def _save_document_mapping_decision(settings, job, payload: dict[str, str]) -> dict[str, object]:
+    review_item_id = str(payload.get("review_item_id", "") or "")
+    raw_metric_id = str(payload.get("raw_metric_id", "") or "")
+    items = load_mapping_review_items(job)
+    item = find_review_item(items, review_item_id) if review_item_id else None
+    if item is None and raw_metric_id:
+        item = next((candidate for candidate in items if str(candidate.get("raw_metric_id", "")) == raw_metric_id), None)
+    if item is None:
+        raise HTTPException(status_code=404, detail="术语映射校对项不存在。")
+    selected_code = str(payload.get("selected_code") or payload.get("final_code") or item.get("current_code") or item.get("candidate_code") or "")
+    selected_name = str(payload.get("selected_name") or payload.get("final_name") or item.get("current_name") or item.get("candidate_name") or "")
+    saved = save_mapping_review_action(
+        job,
+        item=item,
+        action=str(payload.get("decision") or payload.get("action") or ""),
+        selected_code=selected_code,
+        selected_name=selected_name,
+        reviewer_note=str(payload.get("note") or payload.get("reviewer_note") or ""),
+        mapping_store_path=settings.mapping_store_path,
+        decided_by=str(payload.get("decided_by") or "web"),
+    )
+    refresh_combined_metrics_workbook(settings, job)
+    return {
+        "pass": True,
+        "doc_id": job.job_id,
+        "review_item_id": review_item_id or saved.get("review_item_id", ""),
+        "raw_metric_id": raw_metric_id or saved.get("raw_metric_id", ""),
+        "decision": saved.get("decision", ""),
+        "selected_code": saved.get("selected_code", ""),
+        "selected_name": saved.get("selected_name", ""),
+        "mapping_store_path": str(settings.mapping_store_path),
+    }
 
 
 @document_router.get("/documents/{doc_id}/delete-confirm", response_class=HTMLResponse, dependencies=[Depends(password_gate)])

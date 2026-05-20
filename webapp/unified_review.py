@@ -44,6 +44,7 @@ STATUS_LABELS_ZH = {
     "legacy_alias": "旧术语匹配",
     "mapped": "已映射",
     "manual": "已映射",
+    "llm_suggested": "AI建议",
     "candidate": "建议校对",
     "relation_review": "建议校对",
     "review_required": "建议校对",
@@ -146,10 +147,13 @@ def load_unified_review_items(job: JobRecord) -> list[dict[str, Any]]:
     raw_items = load_raw_review_items(job, apply_actions=False)
     if not raw_items:
         return []
+    state = load_simple_flow_state(job)
+    standard_csv = Path(str(state.get("standardized_metrics_csv", "") or ""))
+    mapping_override_not_before = standard_csv.stat().st_mtime if standard_csv.exists() else None
     mapping_lookup = _mapping_lookup(job)
     standardized_lookup = _standardized_lookup(job)
     saved_actions = _load_unified_review_actions(job)
-    value_overrides, mapping_overrides = _latest_unified_overrides(saved_actions)
+    value_overrides, mapping_overrides = _latest_unified_overrides(saved_actions, mapping_not_before_timestamp=mapping_override_not_before)
 
     items: list[dict[str, Any]] = []
     last_section_key = ""
@@ -163,16 +167,19 @@ def load_unified_review_items(job: JobRecord) -> list[dict[str, Any]]:
         parsed_current = parse_metric_number_input(current_value, value_type=value_type)
         current_value_normalized = str(parsed_current.get("value") if parsed_current.get("valid") else current_value)
 
-        original_code = str(mapping.get("current_code") or mapping.get("标准指标编码") or mapping.get("candidate_code") or "")
-        original_name = str(mapping.get("current_name") or mapping.get("标准指标名称") or mapping.get("candidate_name") or "")
+        mapping_method = str(mapping.get("mapping_method") or mapping.get("映射方法") or "")
+        candidate_original_code = str(mapping.get("current_code") or mapping.get("标准指标编码") or mapping.get("candidate_code") or "")
+        candidate_original_name = str(mapping.get("current_name") or mapping.get("标准指标名称") or mapping.get("candidate_name") or "")
+        mapping_status = str(mapping.get("mapping_status") or mapping.get("映射状态") or ("mapped" if candidate_original_code else "unmapped"))
+        is_unmapped_without_suggestion = mapping_status == "unmapped" and mapping_method == "none"
+        original_code = "" if is_unmapped_without_suggestion else candidate_original_code
+        original_name = "" if is_unmapped_without_suggestion else candidate_original_name
         mapping_override = mapping_overrides.get(raw_metric_id, {})
         current_code = str(mapping_override.get("new_code", original_code) or "")
         current_name = str(mapping_override.get("new_name", original_name) or "")
         mapping_changed = bool(mapping_override) and (current_code != original_code or current_name != original_name)
         value_changed = bool(value_override) and str(current_value_normalized) != str(parse_metric_number_input(original_value, value_type=value_type).get("value", original_value))
 
-        mapping_status = str(mapping.get("mapping_status") or mapping.get("映射状态") or ("mapped" if current_code else "unmapped"))
-        mapping_method = str(mapping.get("mapping_method") or mapping.get("映射方法") or "")
         base_status_code, base_status_label = _status_label(mapping_status, mapping_method)
         status_badges = _status_badges(
             base_status_code=base_status_code,
@@ -235,6 +242,14 @@ def load_unified_review_items(job: JobRecord) -> list[dict[str, Any]]:
             "confidence": confidence_raw,
             "confidence_display": confidence_display or "未记录",
             "confidence_available": bool(confidence_display),
+            "mapping_confidence_display": "" if is_unmapped_without_suggestion else _format_mapping_confidence(mapping.get("mapping_confidence") or mapping.get("candidate_score") or mapping.get("映射置信度")),
+            "ai_suggestion_label": str(mapping.get("ai_suggestion_label") or ""),
+            "ai_confidence_display": str(mapping.get("ai_confidence_display") or ""),
+            "ai_reason": str(mapping.get("ai_reason") or ""),
+            "ai_relation_type": str(mapping.get("ai_relation_type") or ""),
+            "ai_validation_status": str(mapping.get("ai_validation_status") or ""),
+            "show_mapping_decision_actions": bool(mapping.get("show_mapping_decision_actions", True)),
+            "mapping_decision_note": str(mapping.get("mapping_decision_note") or ""),
             "section_key": section_key,
             "section_label": section_label,
             "starts_section": starts_section,
@@ -364,7 +379,9 @@ def _standardized_lookup(job: JobRecord) -> dict[str, dict[str, Any]]:
     return lookup
 
 
-def _latest_unified_overrides(actions: list[dict[str, Any]]) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
+def _latest_unified_overrides(
+    actions: list[dict[str, Any]], *, mapping_not_before_timestamp: float | None = None
+) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
     value_overrides: dict[str, dict[str, Any]] = {}
     mapping_overrides: dict[str, dict[str, Any]] = {}
     for action in actions:
@@ -375,8 +392,22 @@ def _latest_unified_overrides(actions: list[dict[str, Any]]) -> tuple[dict[str, 
         if edit_type in {"value_change", "reset_value"}:
             value_overrides[raw_metric_id] = action
         elif edit_type in {"mapping_change", "reset_mapping"}:
+            if mapping_not_before_timestamp is not None:
+                action_timestamp = _action_created_timestamp(action)
+                if action_timestamp is not None and action_timestamp < mapping_not_before_timestamp:
+                    continue
             mapping_overrides[raw_metric_id] = action
     return value_overrides, mapping_overrides
+
+
+def _action_created_timestamp(action: dict[str, Any]) -> float | None:
+    created_at = str(action.get("created_at", "") or "").strip()
+    if not created_at:
+        return None
+    try:
+        return datetime.fromisoformat(created_at.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
 
 
 def _load_unified_review_actions(job: JobRecord) -> list[dict[str, Any]]:
@@ -440,12 +471,15 @@ def _write_compatibility_actions(job: JobRecord, actions: list[dict[str, Any]]) 
                 selected_code=str(action.get("new_code", "") or ""),
                 selected_name=str(action.get("new_name", "") or ""),
                 reviewer_note="unified_review",
+                persist_decision=False,
             )
 
 
 def _status_label(status: str, method: str) -> tuple[str, str]:
     normalized_method = str(method or "").strip()
     normalized_status = str(status or "").strip()
+    if normalized_method == "llm_suggested":
+        return "llm_suggested", STATUS_LABELS_ZH["llm_suggested"]
     if normalized_status == "mapped" and normalized_method in STATUS_LABELS_ZH:
         return normalized_method, STATUS_LABELS_ZH[normalized_method]
     return normalized_status or "unmapped", STATUS_LABELS_ZH.get(normalized_status, normalized_status or "未映射")
@@ -492,6 +526,20 @@ def _format_confidence(provider: str, raw_value: str) -> str:
     label = PROVIDER_LABELS_ZH.get(str(provider or "").strip(), str(provider or "").strip())
     value_text = f"{value:.0f}%" if abs(value - round(value)) < 0.01 else f"{value:.1f}%"
     return f"{label} {value_text}".strip()
+
+
+def _format_mapping_confidence(raw_value: object) -> str:
+    text = str(raw_value or "").strip()
+    if not text:
+        return ""
+    try:
+        value = float(text)
+    except ValueError:
+        return ""
+    if value <= 1:
+        value *= 100
+    value_text = f"{value:.0f}%" if abs(value - round(value)) < 0.01 else f"{value:.1f}%"
+    return f"映射 {value_text}"
 
 
 def _serialize(value: Any) -> str:

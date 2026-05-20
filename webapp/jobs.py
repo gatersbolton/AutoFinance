@@ -392,6 +392,24 @@ def discover_output_files(job: JobRecord) -> list[OutputArtifact]:
         artifacts.append(_artifact_from_path(slug, label, path, download_name=filename))
 
     simple_state = load_simple_flow_state(job)
+    combined_path = str(simple_state.get("combined_metrics_xlsx", "") or "")
+    artifacts.append(
+        _artifact_from_path(
+            "combined_metrics_xlsx",
+            "数据表",
+            Path(combined_path) if combined_path else Path(job.result_dir) / "downloads" / "数据表.xlsx",
+            download_name="数据表.xlsx",
+        )
+    )
+    combined_summary_path = str(simple_state.get("combined_download_summary", "") or "")
+    artifacts.append(
+        _artifact_from_path(
+            "combined_download_summary",
+            "数据表生成摘要",
+            Path(combined_summary_path) if combined_summary_path else _job_root(job) / "combined_download_summary.json",
+            download_name="combined_download_summary.json",
+        )
+    )
     for slug, label, key, download_name in (
         ("raw_metrics_csv", "原始数据表 CSV", "raw_metrics_csv", "raw_metrics.csv"),
         ("raw_metrics_xlsx", "原始数据表 Excel", "raw_metrics_xlsx", "raw_metrics.xlsx"),

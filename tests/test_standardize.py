@@ -49,6 +49,7 @@ from standardize.overrides.suppression import apply_suppression_overrides
 from standardize.promotion import apply_promotions, build_promotion_delta, export_promotion_actions_template, parse_promotion_actions_file
 from standardize.providers.aliyun import extract_aliyun_data
 from standardize.review import build_review_queue
+from standardize.review.evidence import attach_review_evidence
 from standardize.routing.page_selector import build_page_selection
 from standardize.routing.secondary_ocr import materialize_reocr_inputs
 from standardize.statement import build_required_summary_files, resolve_single_period_annual_roles, run_full_run_contract, specialize_statement_types
@@ -1179,6 +1180,113 @@ class StandardizeTests(unittest.TestCase):
             self.assertTrue(review_items)
             self.assertTrue((base / "normalized" / "review_pack" / "index.csv").exists())
             self.assertTrue(any(item.evidence_cell_path for item in review_items))
+
+    def test_review_pack_reuses_table_evidence_for_same_table(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            source_dir = base / "data"
+            output_dir = base / "normalized"
+            source_dir.mkdir(parents=True, exist_ok=True)
+            image = Image.new("RGB", (300, 300), "white")
+            draw = ImageDraw.Draw(image)
+            draw.rectangle((50, 50, 230, 150), outline="black", width=3)
+            pdf_path = source_dir / "demo.pdf"
+            image.save(pdf_path, "PDF")
+
+            def make_bbox(x1: int, y1: int, x2: int, y2: int) -> str:
+                return json.dumps([{"x": x1, "y": y1}, {"x": x2, "y": y1}, {"x": x2, "y": y2}, {"x": x1, "y": y2}], ensure_ascii=False)
+
+            def make_cell(row: int, col: int, bbox: str) -> CellRecord:
+                return CellRecord(
+                    doc_id="demo",
+                    page_no=1,
+                    provider="aliyun_table",
+                    source_file="page_0001.json",
+                    table_id="1",
+                    logical_subtable_id="1_sub1",
+                    row_start=row,
+                    row_end=row,
+                    col_start=col,
+                    col_end=col,
+                    bbox_json=bbox,
+                    text_raw=f"cell {row}-{col}",
+                    text_clean=f"cell {row}-{col}",
+                    ocr_conf=None,
+                    is_empty=False,
+                    is_header=False,
+                    is_suspicious=False,
+                    suspicious_reason="",
+                    repair_status="raw",
+                    meta_json="",
+                )
+
+            cells = [
+                make_cell(1, 1, make_bbox(50, 50, 140, 90)),
+                make_cell(2, 1, make_bbox(50, 95, 140, 150)),
+            ]
+            review_items = [
+                ReviewQueueRecord(
+                    review_id="REV_A",
+                    priority_score=1.0,
+                    reason_codes=["validation"],
+                    doc_id="demo",
+                    page_no=1,
+                    statement_type="",
+                    row_label_raw="",
+                    row_label_std="",
+                    period_key="",
+                    value_raw="",
+                    value_num=None,
+                    provider="aliyun_table",
+                    source_file="page_0001.json",
+                    bbox="",
+                    related_fact_ids=[],
+                    related_conflict_ids=[],
+                    related_validation_ids=[],
+                    mapping_candidates="",
+                    evidence_cell_path="",
+                    evidence_row_path="",
+                    evidence_table_path="",
+                    meta_json=json.dumps({"source_cell_ref": "demo:1:aliyun_table:1:1-1:1-1"}, ensure_ascii=False),
+                ),
+                ReviewQueueRecord(
+                    review_id="REV_B",
+                    priority_score=1.0,
+                    reason_codes=["validation"],
+                    doc_id="demo",
+                    page_no=1,
+                    statement_type="",
+                    row_label_raw="",
+                    row_label_std="",
+                    period_key="",
+                    value_raw="",
+                    value_num=None,
+                    provider="aliyun_table",
+                    source_file="page_0001.json",
+                    bbox="",
+                    related_fact_ids=[],
+                    related_conflict_ids=[],
+                    related_validation_ids=[],
+                    mapping_candidates="",
+                    evidence_cell_path="",
+                    evidence_row_path="",
+                    evidence_table_path="",
+                    meta_json=json.dumps({"source_cell_ref": "demo:1:aliyun_table:1:2-2:1-1"}, ensure_ascii=False),
+                ),
+            ]
+
+            attach_review_evidence(
+                review_items,
+                cells,
+                source_dir,
+                output_dir,
+                {"crop_padding": 8},
+            )
+
+            self.assertEqual(review_items[0].evidence_table_path, review_items[1].evidence_table_path)
+            self.assertTrue(Path(review_items[0].evidence_table_path).exists())
+            self.assertEqual(len(list((output_dir / "review_pack").glob("*_table.png"))), 1)
+            self.assertEqual(len(list((output_dir / "review_pack").glob("REV_*_table.png"))), 0)
 
     def test_page_selector(self):
         with tempfile.TemporaryDirectory() as tmpdir:

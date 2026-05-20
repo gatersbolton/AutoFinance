@@ -18,6 +18,7 @@ tmp/
 .env
 .env.local
 .env.*.local
+run.cmd
 .venv*/
 __pycache__/
 .pytest_cache/

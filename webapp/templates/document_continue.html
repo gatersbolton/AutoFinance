@@ -42,6 +42,20 @@
     .document-action-actions form {
         margin: 0;
     }
+
+    .advanced-downloads {
+        margin-top: 18px;
+    }
+
+    .advanced-downloads summary {
+        cursor: pointer;
+        color: var(--muted);
+        font-weight: 700;
+    }
+
+    .advanced-downloads .actions {
+        margin-top: 12px;
+    }
 </style>
 {% endblock %}
 {% block content %}
@@ -64,26 +78,42 @@
         {% endif %}
     </p>
     <div class="document-action-actions">
-        {% if simple_flow.raw_ready %}
-        <a class="button button--download" href="{{ url_prefix }}/documents/{{ document.doc_id }}/download/raw_metrics_csv">下载原始数据</a>
-        {% else %}
+        {% if simple_flow.combined_ready %}
+        <a class="button button--download" href="{{ url_prefix }}/documents/{{ document.doc_id }}/download/combined_metrics_xlsx">下载数据表</a>
+        {% elif not simple_flow.raw_ready %}
         <form action="{{ url_prefix }}/documents/{{ document.doc_id }}/raw-metrics/run" method="post">
             <button class="button button--primary" type="submit">提取原始数据</button>
         </form>
         {% endif %}
 
-        {% if simple_flow.standard_ready %}
-        <a class="button button--download" href="{{ url_prefix }}/documents/{{ document.doc_id }}/download/standardized_metrics_csv">下载标准化数据</a>
-        {% elif simple_flow.raw_ready %}
-        <form action="{{ url_prefix }}/documents/{{ document.doc_id }}/standard-metrics/run" method="post">
-            <button class="button button--primary" type="submit">生成标准化数据</button>
-        </form>
-        {% endif %}
-
         {% if simple_flow.raw_ready %}
         <a class="button button--review" href="{{ url_prefix }}/documents/{{ document.doc_id }}/proofread">校对数据和映射</a>
+        <form action="{{ url_prefix }}/documents/{{ document.doc_id }}/standard-metrics/run" method="post">
+            {% if simple_flow.standard_ready %}
+            <button class="button button--secondary" type="submit">重新生成标准指标 / 标准映射</button>
+            {% else %}
+            <button class="button button--primary" type="submit">生成标准指标 / 标准映射</button>
+            {% endif %}
+        </form>
         {% endif %}
     </div>
+
+    {% if simple_flow.raw_ready or simple_flow.standard_ready %}
+    <details class="advanced-downloads">
+        <summary>高级下载</summary>
+        <div class="actions">
+            {% if simple_flow.raw_ready %}
+            <a class="button button--secondary" href="{{ url_prefix }}/documents/{{ document.doc_id }}/download/raw_metrics_csv">原始数据 CSV</a>
+            {% endif %}
+            {% if simple_flow.standard_ready %}
+            <a class="button button--secondary" href="{{ url_prefix }}/documents/{{ document.doc_id }}/download/standardized_metrics_csv">标准化数据 CSV</a>
+            {% endif %}
+            {% if simple_flow.combined_ready %}
+            <a class="button button--secondary" href="{{ url_prefix }}/documents/{{ document.doc_id }}/download/combined_download_summary">JSON 摘要</a>
+            {% endif %}
+        </div>
+    </details>
+    {% endif %}
 </section>
 
 {% endblock %}

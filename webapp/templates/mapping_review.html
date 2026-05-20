@@ -59,6 +59,22 @@
                 <p class="todo-note">点击原始术语查看出处，在标准术语框中搜索并保存。</p>
             </div>
         </div>
+        <div class="mapping-bulk-toolbar">
+            <p>本操作只对当前文件生效，不会写入本地映射库。</p>
+            <form action="{{ base_url }}/mapping/bulk-confidence-preview" method="get" data-bulk-confidence-preview-form>
+                <label>
+                    采纳所有置信度大于
+                    <input type="number" name="threshold" min="0" max="100" step="1" value="90" data-bulk-threshold-input>
+                    % 的术语
+                </label>
+                <button class="button button--secondary" type="submit">先预览</button>
+            </form>
+            <form action="{{ base_url }}/mapping/bulk-accept-confidence" method="post" data-bulk-confidence-apply-form>
+                <input type="hidden" name="threshold" value="90">
+                <button class="button button--secondary" type="submit">确认本次采纳</button>
+            </form>
+        </div>
+        <div class="bulk-confidence-preview" data-bulk-confidence-preview hidden></div>
 
         <div class="spreadsheet-wrap">
             <table class="spreadsheet-table mapping-table" data-mapping-table>
@@ -67,6 +83,8 @@
                         <th class="row-heading">原始术语</th>
                         <th>标准术语</th>
                         <th>状态</th>
+                        <th>置信度</th>
+                        <th>口径说明</th>
                         <th>操作</th>
                     </tr>
                 </thead>
@@ -102,25 +120,48 @@
                                 >
                                 <div class="autocomplete-results" data-autocomplete-results hidden></div>
                             </div>
+                            <div class="mapping-suggestion-stack">
+                                {% if row.system_candidate_label %}
+                                <span>系统建议：{{ row.system_candidate_label }}</span>
+                                {% endif %}
+                                {% if row.ai_suggestion_label %}
+                                <span><strong>AI建议</strong>：{{ row.ai_suggestion_label }}{% if row.ai_confidence_display %} · {{ row.ai_confidence_display }}{% endif %}</span>
+                                {% endif %}
+                            </div>
                         </td>
                         <td>
-                            <span class="status status--mapping status--mapping-{{ row.get('mapping_status', '') }}" data-mapping-status-label>{{ row.mapping_status_label }}</span>
+                            <span class="status status--mapping status--mapping-{{ row.get('mapping_status_code', row.get('mapping_status', '')) }}" data-mapping-status-label>{{ row.mapping_status_label }}</span>
+                        </td>
+                        <td>{{ row.mapping_confidence or "未记录" }}</td>
+                        <td>
                             {% if row.issue_reason %}
                             <span class="mapping-issue-note">{{ row.issue_reason }}</span>
+                            {% elif row.relation_note %}
+                            <span class="mapping-issue-note">{{ row.relation_note }}</span>
+                            {% endif %}
+                            {% if row.ai_reason %}
+                            <details class="mapping-ai-reason">
+                                <summary>AI说明</summary>
+                                <span>{{ row.ai_reason }}</span>
+                            </details>
                             {% endif %}
                         </td>
                         <td>
+                            {% if row.show_mapping_decision_actions %}
                             <form id="{{ form_id }}" class="mapping-row-form" action="{{ base_url }}/mapping-review/actions" method="post" data-mapping-action-form>
                                 <input type="hidden" name="review_item_id" value="{{ row.review_item_id }}">
                                 <input type="hidden" name="selected_code" value="{{ row.current_code }}" data-selected-code>
                                 <input type="hidden" name="selected_name" value="{{ row.current_name }}" data-selected-name>
                                 <input type="hidden" name="reviewer_note" value="">
                                 <div class="mapping-actions">
-                                    <button class="button button--primary" type="submit" name="action" value="approve_mapping">通过</button>
-                                    <button class="button button--secondary" type="submit" name="action" value="skip_mapping">跳过</button>
-                                    <button class="button button--secondary" type="submit" name="action" value="change_mapping">保存修改</button>
+                                    <button class="button button--secondary" type="submit" name="action" value="reject">不采纳</button>
+                                    <button class="button button--primary" type="submit" name="action" value="accept_once">仅本次采用</button>
+                                    <button class="button button--secondary" type="submit" name="action" value="accept_and_remember" title="以后遇到相同术语将自动映射。">采用并记住</button>
                                 </div>
                             </form>
+                            {% else %}
+                            <span class="mapping-decision-note">{{ row.mapping_decision_note or "无需决策" }}</span>
+                            {% endif %}
                         </td>
                     </tr>
                     {% endfor %}

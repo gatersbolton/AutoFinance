@@ -61,7 +61,9 @@ from .simple_flow import (
     load_mapping_review_items,
     load_raw_review_items,
     load_simple_flow_state,
+    mapping_review_dir,
     resolve_safe_source_file,
+    refresh_combined_metrics_workbook,
     run_raw_metrics_step,
     run_standard_metrics_step,
     save_mapping_review_action,
@@ -69,8 +71,13 @@ from .simple_flow import (
     source_preview_rotation_degrees,
 )
 from .unified_review import build_unified_review_sheet, load_unified_review_items, save_unified_review_actions
+from standard_map.confidence import apply_confidence_bulk_accept, build_confidence_bulk_accept_preview
+from standard_map.mapper import map_raw_metric
+from standard_map.models import RawMetricRow
+from standard_map.registry import extend_registry_aliases
 from standard_map.registry import load_standard_registry
 from standard_map.search import search_standard_terms
+from standard_map.store import LocalMappingStore
 
 
 router = APIRouter()
@@ -599,10 +606,84 @@ def mapping_review_action_route(
             selected_code=selected_code,
             selected_name=selected_name,
             reviewer_note=reviewer_note,
+            mapping_store_path=settings.mapping_store_path,
         )
+        refresh_combined_metrics_workbook(settings, job)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return RedirectResponse(url=f"/jobs/{job_id}/mapping-review/items/{review_item_id}", status_code=303)
+
+
+@router.post("/jobs/{job_id}/mapping/decision", dependencies=[Depends(password_gate)])
+async def mapping_decision_route(request: Request, job_id: str) -> Response:
+    settings = get_settings(request)
+    job = require_job(settings, job_id)
+    payload = await _mapping_decision_payload(request)
+    summary = _save_mapping_decision(settings, job, payload)
+    return _json_or_html_redirect(request, summary, f"/jobs/{job_id}/proofread")
+
+
+@router.post("/jobs/{job_id}/mapping/accept-once", dependencies=[Depends(password_gate)])
+async def mapping_accept_once_route(request: Request, job_id: str) -> Response:
+    settings = get_settings(request)
+    job = require_job(settings, job_id)
+    payload = await _mapping_decision_payload(request)
+    payload["decision"] = "accept_once"
+    summary = _save_mapping_decision(settings, job, payload)
+    return _json_or_html_redirect(request, summary, f"/jobs/{job_id}/proofread")
+
+
+@router.post("/jobs/{job_id}/mapping/accept-and-remember", dependencies=[Depends(password_gate)])
+async def mapping_accept_and_remember_route(request: Request, job_id: str) -> Response:
+    settings = get_settings(request)
+    job = require_job(settings, job_id)
+    payload = await _mapping_decision_payload(request)
+    payload["decision"] = "accept_and_remember"
+    summary = _save_mapping_decision(settings, job, payload)
+    return _json_or_html_redirect(request, summary, f"/jobs/{job_id}/proofread")
+
+
+@router.post("/jobs/{job_id}/mapping/reject", dependencies=[Depends(password_gate)])
+async def mapping_reject_route(request: Request, job_id: str) -> Response:
+    settings = get_settings(request)
+    job = require_job(settings, job_id)
+    payload = await _mapping_decision_payload(request)
+    payload["decision"] = "reject"
+    summary = _save_mapping_decision(settings, job, payload)
+    return _json_or_html_redirect(request, summary, f"/jobs/{job_id}/proofread")
+
+
+@router.get("/jobs/{job_id}/mapping/bulk-confidence-preview", response_class=JSONResponse, dependencies=[Depends(password_gate)])
+def mapping_bulk_confidence_preview_route(request: Request, job_id: str, threshold: float = 0.9) -> JSONResponse:
+    settings = get_settings(request)
+    job = require_job(settings, job_id)
+    output_dir = _standard_output_dir_for_job(job)
+    store = LocalMappingStore(settings.mapping_store_path)
+    before = store.count("term_aliases", where="enabled = 1 AND COALESCE(source, '') != 'base'")
+    preview = build_confidence_bulk_accept_preview(output_dir, threshold=threshold, before_alias_count=before, after_alias_count=before)
+    return JSONResponse(preview)
+
+
+@router.post("/jobs/{job_id}/mapping/bulk-accept-confidence", response_class=JSONResponse, dependencies=[Depends(password_gate)])
+async def mapping_bulk_accept_confidence_route(request: Request, job_id: str, threshold: float = 0.9) -> Response:
+    settings = get_settings(request)
+    job = require_job(settings, job_id)
+    payload = await _mapping_decision_payload(request)
+    threshold_value = float(payload.get("threshold") or payload.get("threshold_pct") or threshold or 0.9)
+    output_dir = _standard_output_dir_for_job(job)
+    store = LocalMappingStore(settings.mapping_store_path)
+    summary = apply_confidence_bulk_accept(
+        output_dir,
+        store=store,
+        job_id=job.job_id,
+        doc_id=job.job_id,
+        threshold=threshold_value,
+        decisions_dir=mapping_review_dir(job),
+    )
+    store.export_aliases(settings.mapping_store_root / "local_aliases_export.yml")
+    store.export_decision_audit(settings.mapping_store_root / "mapping_decisions_audit.csv")
+    refresh_combined_metrics_workbook(settings, job)
+    return _json_or_html_redirect(request, summary, f"/jobs/{job_id}/proofread")
 
 
 @router.get("/jobs/{job_id}/status", response_class=JSONResponse, dependencies=[Depends(password_gate)])
@@ -993,6 +1074,109 @@ def system_status_api(request: Request) -> JSONResponse:
 def standard_terms_search_api(request: Request, q: str = "", limit: int = 10) -> JSONResponse:
     capped_limit = max(1, min(int(limit or 10), 20))
     return JSONResponse({"query": q, "results": search_standard_terms(q, limit=capped_limit)})
+
+
+@router.get("/api/mapping/candidates", response_class=JSONResponse, dependencies=[Depends(password_gate)])
+def mapping_candidates_api(request: Request, raw_metric_name: str = "", limit: int = 5) -> JSONResponse:
+    settings = get_settings(request)
+    registry = load_standard_registry()
+    store = LocalMappingStore(settings.mapping_store_path)
+    store.sync_registry(registry)
+    extend_registry_aliases(registry, store.load_local_alias_entries(registry))
+    raw = RawMetricRow(
+        row_number=1,
+        review_item_id="api_candidate",
+        raw_metric_id="api_candidate",
+        fill_date="",
+        item_date="",
+        company_name="",
+        metric_name=raw_metric_name,
+        metric_value="",
+    )
+    result = map_raw_metric(raw, registry)
+    candidates = [candidate.as_output_row() for candidate in result.candidates[: max(1, min(int(limit or 5), 20))]]
+    return JSONResponse(
+        {
+            "raw_metric_name": raw_metric_name,
+            "mapping_status": result.mapping_status,
+            "mapping_method": result.mapping_method,
+            "standard_code": result.standard_code,
+            "standard_name": result.standard_name,
+            "confidence": result.confidence,
+            "relation_type": result.relation_type,
+            "review_required": result.review_required,
+            "candidates": candidates,
+        }
+    )
+
+
+async def _mapping_decision_payload(request: Request) -> dict[str, str]:
+    content_type = request.headers.get("content-type", "")
+    if "application/json" in content_type:
+        payload = await request.json()
+        return {str(key): str(value or "") for key, value in payload.items()} if isinstance(payload, dict) else {}
+    form = await request.form()
+    return {str(key): str(value or "") for key, value in form.items()}
+
+
+def _json_or_html_redirect(request: Request, payload: dict[str, object], redirect_url: str) -> Response:
+    if _request_prefers_html(request):
+        return RedirectResponse(url=redirect_url, status_code=303)
+    return JSONResponse(payload)
+
+
+def _request_prefers_html(request: Request) -> bool:
+    accept = request.headers.get("accept", "")
+    content_type = request.headers.get("content-type", "")
+    if "application/json" in accept or "application/json" in content_type:
+        return False
+    return "text/html" in accept
+
+
+def _save_mapping_decision(settings: WebAppSettings, job, payload: dict[str, str]) -> dict[str, object]:
+    review_item_id = str(payload.get("review_item_id", "") or "")
+    raw_metric_id = str(payload.get("raw_metric_id", "") or "")
+    items = load_mapping_review_items(job)
+    item = find_review_item(items, review_item_id) if review_item_id else None
+    if item is None and raw_metric_id:
+        item = next((candidate for candidate in items if str(candidate.get("raw_metric_id", "")) == raw_metric_id), None)
+    if item is None:
+        raise HTTPException(status_code=404, detail="术语映射校对项不存在。")
+    selected_code = str(payload.get("selected_code") or payload.get("final_code") or item.get("current_code") or item.get("candidate_code") or "")
+    selected_name = str(payload.get("selected_name") or payload.get("final_name") or item.get("current_name") or item.get("candidate_name") or "")
+    action = str(payload.get("decision") or payload.get("action") or "").strip()
+    try:
+        saved = save_mapping_review_action(
+            job,
+            item=item,
+            action=action,
+            selected_code=selected_code,
+            selected_name=selected_name,
+            reviewer_note=str(payload.get("note") or payload.get("reviewer_note") or ""),
+            mapping_store_path=settings.mapping_store_path,
+            decided_by=str(payload.get("decided_by") or "web"),
+        )
+        refresh_combined_metrics_workbook(settings, job)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        "pass": True,
+        "job_id": job.job_id,
+        "review_item_id": review_item_id or saved.get("review_item_id", ""),
+        "raw_metric_id": raw_metric_id or saved.get("raw_metric_id", ""),
+        "decision": saved.get("decision", ""),
+        "selected_code": saved.get("selected_code", ""),
+        "selected_name": saved.get("selected_name", ""),
+        "mapping_store_path": str(settings.mapping_store_path),
+    }
+
+
+def _standard_output_dir_for_job(job) -> Path:
+    state = load_simple_flow_state(job)
+    standard_csv = Path(str(state.get("standardized_metrics_csv", "") or ""))
+    if not standard_csv.exists():
+        raise HTTPException(status_code=404, detail="请先生成标准化数据。")
+    return standard_csv.parent
 
 
 @router.get("/healthz", response_class=JSONResponse)

@@ -12,10 +12,11 @@ from pathlib import Path
 from unittest import mock
 
 from fastapi.testclient import TestClient
-from openpyxl import Workbook
+from openpyxl import Workbook, load_workbook
 
 from project_paths import RAW_METRICS_GENERATED_ROOT, STANDARD_METRICS_GENERATED_ROOT, REPO_ROOT
 from scripts.deployment_check import main as deployment_check_main
+from standard_map.store import LocalMappingStore
 from standard_map.search import search_standard_terms
 from webapp.config import WebAppSettings
 from webapp.deployment import run_deployment_preflight
@@ -46,6 +47,7 @@ from webapp.simple_flow import (
     _normalize_ocr_label,
     _resolve_mapping_term_bbox_json,
     _resolve_source_table_cell_bbox_json,
+    combined_download_summary_path,
     load_simple_flow_state,
     mapping_review_dir,
     raw_review_dir,
@@ -92,6 +94,7 @@ class WebAppTests(unittest.TestCase):
             library_root=self.corpus_root / "library",
             template_path=self.template_path,
             secret_path=self.secret_path,
+            deepseek_env_path=self.temp_path / "deepseek.env",
             enable_local_worker=False,
             auto_run_upload_ocr=False,
             worker_poll_seconds=1,
@@ -180,6 +183,12 @@ class WebAppTests(unittest.TestCase):
             writer.writeheader()
             for row in rows:
                 writer.writerow(row)
+
+    def _column_index(self, worksheet, header: str) -> int:
+        for cell in worksheet[1]:
+            if cell.value == header:
+                return cell.column
+        raise AssertionError(f"missing header: {header}")
 
     def _create_raw_metrics_fixture(
         self,
@@ -859,6 +868,12 @@ class WebAppTests(unittest.TestCase):
         self.assertTrue(state["raw_ready"])
         self.assertTrue(Path(state["raw_metrics_csv"]).exists())
         self.assertTrue(str(Path(state["raw_metrics_csv"]).resolve()).startswith(str((RAW_METRICS_GENERATED_ROOT / doc_id).resolve())))
+        self.assertTrue(state["combined_ready"])
+        workbook = load_workbook(Path(state["combined_metrics_xlsx"]))
+        self.assertIn("数据总表", workbook.sheetnames)
+        self.assertIn("原始数据", workbook.sheetnames)
+        self.assertIn("说明", workbook.sheetnames)
+        self.assertNotIn("标准化数据", workbook.sheetnames)
 
     def test_document_metadata_copied_from_windows_uses_current_library_paths(self):
         doc_id = self._upload_library_pdf()
@@ -895,9 +910,30 @@ class WebAppTests(unittest.TestCase):
         self.assertIn("document-action-panel", continue_response.text)
         self.assertNotIn("stage-flow", continue_response.text)
         self.assertNotIn("stage-card", continue_response.text)
+        self.assertIn(f'href="/documents/{doc_id}/download/combined_metrics_xlsx"', continue_response.text)
+        self.assertIn(">下载数据表</a>", continue_response.text)
+        self.assertIn("高级下载", continue_response.text)
         self.assertIn(f'href="/documents/{doc_id}/download/raw_metrics_csv"', continue_response.text)
         self.assertIn(f'href="/documents/{doc_id}/download/standardized_metrics_csv"', continue_response.text)
+        self.assertNotIn(">下载原始数据</a>", continue_response.text)
+        self.assertNotIn(">下载标准化数据</a>", continue_response.text)
         self.assertIn(f'href="/documents/{doc_id}/proofread"', continue_response.text)
+        self.assertIn(f'action="/documents/{doc_id}/standard-metrics/run"', continue_response.text)
+        self.assertIn("重新生成标准指标 / 标准映射", continue_response.text)
+
+        browser_submit = self.client.post(
+            f"/documents/{doc_id}/mapping/decision",
+            data={
+                "review_item_id": "maprev_000001",
+                "selected_code": "ZT_001",
+                "selected_name": "货币资金",
+                "decision": "accept_once",
+            },
+            headers={"accept": "text/html,application/xhtml+xml"},
+            follow_redirects=False,
+        )
+        self.assertEqual(browser_submit.status_code, 303)
+        self.assertEqual(browser_submit.headers["location"], f"/documents/{doc_id}/proofread")
 
     def test_document_delete_confirmation_lists_associated_files(self):
         doc_id = self._upload_library_pdf()
@@ -962,6 +998,63 @@ class WebAppTests(unittest.TestCase):
         self.assertTrue(state["standard_ready"])
         self.assertTrue(Path(state["standardized_metrics_csv"]).exists())
         self.assertTrue(str(Path(state["standardized_metrics_csv"]).resolve()).startswith(str(STANDARD_METRICS_GENERATED_ROOT.resolve())))
+        self.assertTrue(state["combined_ready"])
+        self.assertTrue(Path(state["combined_metrics_xlsx"]).exists())
+        self.assertTrue(str(Path(state["combined_metrics_xlsx"]).resolve()).startswith(str(self.settings.results_root.resolve())))
+        self.assertTrue(combined_download_summary_path(job).exists())
+        self.assertTrue((self.settings.runtime_root / "combined_download_summary.json").exists())
+
+    def test_combined_download_workbook_formatting_and_route(self):
+        job_id = self._create_job("combined download")
+        raw_path = self._create_raw_metrics_fixture(metric_name="货币资金", metric_value="12345.67")
+        self.client.post(
+            f"/jobs/{job_id}/standard-metrics/run",
+            data={"raw_metrics_path": str(raw_path)},
+            follow_redirects=False,
+        )
+        job = get_job(self.settings, job_id)
+        state = load_simple_flow_state(job)
+        workbook_path = Path(state["combined_metrics_xlsx"])
+        self.assertTrue(workbook_path.exists())
+
+        workbook = load_workbook(workbook_path)
+        self.assertEqual(workbook.sheetnames[:3], ["数据总表", "标准化数据", "原始数据"])
+        for sheet_name in ("数据总表", "标准化数据", "原始数据", "术语映射校对", "说明"):
+            self.assertIn(sheet_name, workbook.sheetnames)
+
+        total_sheet = workbook["数据总表"]
+        self.assertEqual(total_sheet.freeze_panes, "A2")
+        self.assertTrue(total_sheet.auto_filter.ref)
+        self.assertGreater(total_sheet.column_dimensions["D"].width, 20)
+        value_col = self._column_index(total_sheet, "指标数值")
+        fill_date_col = self._column_index(total_sheet, "填表日期")
+        value_cell = total_sheet.cell(row=2, column=value_col)
+        fill_date_cell = total_sheet.cell(row=2, column=fill_date_col)
+        self.assertIsInstance(value_cell.value, (int, float))
+        self.assertEqual(value_cell.value, 12345.67)
+        self.assertEqual(value_cell.number_format, "#,##0.00")
+        self.assertEqual(fill_date_cell.number_format, "yyyy-mm-dd")
+
+        summary = json.loads(combined_download_summary_path(job).read_text(encoding="utf-8"))
+        self.assertTrue(summary["pass"])
+        self.assertEqual(summary["primary_download_label"], "下载数据表")
+        self.assertTrue(summary["advanced_downloads_available"])
+        self.assertTrue(summary["path_hygiene_pass"])
+        self.assertGreater(summary["numeric_cells_formatted_total"], 0)
+        self.assertGreater(summary["date_cells_formatted_total"], 0)
+
+        download = self.client.get(f"/jobs/{job_id}/download/combined_metrics_xlsx")
+        self.assertEqual(download.status_code, 200)
+        self.assertTrue(download.content.startswith(b"PK"))
+
+        detail = self.client.get(f"/jobs/{job_id}")
+        self.assertEqual(detail.status_code, 200)
+        self.assertIn("下载数据表", detail.text)
+        self.assertIn("高级下载", detail.text)
+        self.assertIn("原始数据 CSV", detail.text)
+        self.assertIn("标准化数据 CSV", detail.text)
+        self.assertNotIn("下载原始数据表 Excel", detail.text)
+        self.assertNotIn("下载标准化数据表 Excel", detail.text)
 
     def test_raw_review_page_loads_and_raw_actions_are_saved(self):
         job_id = self._create_job("raw review")
@@ -1057,6 +1150,10 @@ class WebAppTests(unittest.TestCase):
         self.assertIn("data-mapping-cell", response.text)
         self.assertIn("data-bbox=", response.text)
         self.assertIn("data-page-no=", response.text)
+        self.assertIn("精确匹配，无需决策", response.text)
+        self.assertNotIn("不采纳", response.text)
+        self.assertNotIn("仅本次采用", response.text)
+        self.assertNotIn("采用并记住", response.text)
         self.assertNotIn("<th>指标数值</th>", response.text)
         approve = self.client.post(
             f"/jobs/{job_id}/mapping-review/actions",
@@ -1095,6 +1192,164 @@ class WebAppTests(unittest.TestCase):
         self.assertEqual(actions[-1]["selected_name"], "短期借款")
         self.assertTrue(str(actions_path.resolve()).startswith(str(self.runtime_root.resolve())))
 
+    def test_stage15_mapping_decision_routes_store_preview_and_config_hygiene(self):
+        job_id = self._create_job("stage15 decisions")
+        raw_path = self._create_raw_metrics_fixture(metric_name="阶段十五待映射")
+        config_path = REPO_ROOT / "config" / "standard_term_aliases.yml"
+        config_before = config_path.read_text(encoding="utf-8")
+        self.client.post(
+            f"/jobs/{job_id}/standard-metrics/run",
+            data={"raw_metrics_path": str(raw_path)},
+            follow_redirects=False,
+        )
+        job = get_job(self.settings, job_id)
+        state = load_simple_flow_state(job)
+        output_dir = Path(state["standardized_metrics_csv"]).parent
+
+        accept_once = self.client.post(
+            f"/jobs/{job_id}/mapping/accept-once",
+            data={
+                "review_item_id": "maprev_000001",
+                "selected_code": "ZT_001",
+                "selected_name": "货币资金",
+                "note": "once",
+            },
+        )
+        self.assertEqual(accept_once.status_code, 200)
+        self.assertEqual(accept_once.json()["decision"], "accept_once")
+        with (output_dir / "standardized_metrics_detailed.csv").open("r", encoding="utf-8-sig", newline="") as handle:
+            row = next(csv.DictReader(handle))
+        self.assertEqual(row["标准指标编码"], "ZT_001")
+        self.assertEqual(row["映射方法"], "manual_once")
+        store = LocalMappingStore(self.settings.mapping_store_path)
+        self.assertEqual(store.count("term_aliases", where="enabled = 1 AND COALESCE(source, '') != 'base'"), 0)
+
+        remember = self.client.post(
+            f"/jobs/{job_id}/mapping/accept-and-remember",
+            data={
+                "review_item_id": "maprev_000001",
+                "selected_code": "ZT_002",
+                "selected_name": "短期借款",
+                "note": "remember",
+            },
+        )
+        self.assertEqual(remember.status_code, 200)
+        self.assertEqual(remember.json()["decision"], "accept_and_remember")
+        aliases = store.alias_rows(include_base=False)
+        self.assertTrue(any(row["alias"] == "阶段十五待映射" and row["standard_code"] == "ZT_002" for row in aliases))
+        self.assertTrue((self.settings.mapping_store_root / "local_aliases_export.yml").exists())
+        self.assertTrue((self.settings.mapping_store_root / "mapping_decisions_audit.csv").exists())
+
+        reject = self.client.post(
+            f"/jobs/{job_id}/mapping/reject",
+            data={"review_item_id": "maprev_000001", "note": "reject"},
+        )
+        self.assertEqual(reject.status_code, 200)
+        self.assertEqual(reject.json()["decision"], "reject")
+
+        decisions_csv = mapping_review_dir(job) / "mapping_decisions.csv"
+        decisions_json = mapping_review_dir(job) / "mapping_decisions.json"
+        decisions_summary = mapping_review_dir(job) / "mapping_decision_summary.json"
+        self.assertTrue(decisions_csv.exists())
+        self.assertTrue(decisions_json.exists())
+        self.assertTrue(decisions_summary.exists())
+        with decisions_csv.open("r", encoding="utf-8-sig", newline="") as handle:
+            decisions = list(csv.DictReader(handle))
+        self.assertEqual([row["decision"] for row in decisions], ["accept_once", "accept_and_remember", "reject"])
+
+        candidates = self.client.get("/api/mapping/candidates?raw_metric_name=阶段十五待映射")
+        self.assertEqual(candidates.status_code, 200)
+        self.assertEqual(candidates.json()["mapping_method"], "local_alias")
+        self.assertEqual(candidates.json()["standard_code"], "ZT_002")
+
+        before_aliases = store.count("term_aliases", where="enabled = 1 AND COALESCE(source, '') != 'base'")
+        preview = self.client.get(f"/jobs/{job_id}/mapping/bulk-confidence-preview?threshold=0.9")
+        self.assertEqual(preview.status_code, 200)
+        self.assertEqual(preview.json()["future_decision"], "accept_once")
+        self.assertFalse(preview.json()["mutated_mappings"])
+        self.assertEqual(before_aliases, store.count("term_aliases", where="enabled = 1 AND COALESCE(source, '') != 'base'"))
+        self.assertTrue((output_dir / "confidence_bulk_accept_preview.json").exists())
+        self.assertEqual(config_path.read_text(encoding="utf-8"), config_before)
+
+    def test_stage15_2_llm_ai_suggestions_and_bulk_apply_routes(self):
+        job_id = self._create_job("stage15.2 llm")
+        raw_path = self._create_raw_metrics_fixture(metric_name="总收入")
+        with mock.patch.dict(os.environ, {"LLM_MAPPING_MOCK": "true", "DEEPSEEK_API_KEY": ""}, clear=False):
+            run_response = self.client.post(
+                f"/jobs/{job_id}/standard-metrics/run",
+                data={"raw_metrics_path": str(raw_path)},
+                follow_redirects=False,
+            )
+        self.assertEqual(run_response.status_code, 303)
+        job = get_job(self.settings, job_id)
+        state = load_simple_flow_state(job)
+        output_dir = Path(state["standardized_metrics_csv"]).parent
+
+        response = self.client.get(f"/jobs/{job_id}/mapping-review")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("AI建议", response.text)
+        self.assertIn("status--mapping-llm_suggested", response.text)
+        self.assertIn("93%", response.text)
+        self.assertIn("本操作只对当前文件生效，不会写入本地映射库。", response.text)
+        self.assertIn("data-bulk-confidence-preview-form", response.text)
+        self.assertIn('method="get" data-bulk-confidence-preview-form', response.text)
+        self.assertIn('value="90"', response.text)
+        self.assertIn("确认本次采纳", response.text)
+        self.assertIn("以后遇到相同术语将自动映射。", response.text)
+
+        preview = self.client.get(f"/jobs/{job_id}/mapping/bulk-confidence-preview?threshold=90")
+        self.assertEqual(preview.status_code, 200)
+        self.assertEqual(preview.json()["threshold"], 0.9)
+        self.assertEqual(preview.json()["eligible_total"], 1)
+        self.assertEqual(preview.json()["would_apply_decision"], "accept_once")
+
+        with mock.patch.dict(os.environ, {"LLM_MAPPING_MOCK": "true", "DEEPSEEK_API_KEY": ""}, clear=False):
+            rerun_response = self.client.post(
+                f"/jobs/{job_id}/standard-metrics/run",
+                data={"raw_metrics_path": str(raw_path)},
+                follow_redirects=False,
+            )
+        self.assertEqual(rerun_response.status_code, 303)
+        rerun_state = load_simple_flow_state(job)
+        rerun_output_dir = Path(rerun_state["standardized_metrics_csv"]).parent
+        rerun_llm_summary = json.loads((rerun_output_dir / "llm_mapping_summary.json").read_text(encoding="utf-8"))
+        self.assertEqual(rerun_llm_summary["cached_suggestions_total"], 1)
+        output_dir = rerun_output_dir
+
+        store = LocalMappingStore(self.settings.mapping_store_path)
+        before_aliases = store.count("term_aliases", where="enabled = 1 AND COALESCE(source, '') != 'base'")
+        apply_response = self.client.post(f"/jobs/{job_id}/mapping/bulk-accept-confidence", data={"threshold": "90"})
+        self.assertEqual(apply_response.status_code, 200)
+        self.assertEqual(apply_response.json()["applied_total"], 1)
+        self.assertFalse(apply_response.json()["mutated_local_alias_store"])
+        self.assertEqual(before_aliases, store.count("term_aliases", where="enabled = 1 AND COALESCE(source, '') != 'base'"))
+        self.assertTrue((output_dir / "confidence_bulk_accept_apply_summary.json").exists())
+        with (output_dir / "mapping_decisions.csv").open("r", encoding="utf-8-sig", newline="") as handle:
+            decisions = list(csv.DictReader(handle))
+        self.assertEqual(decisions[-1]["decision"], "accept_once")
+
+        browser_submit = self.client.post(
+            f"/jobs/{job_id}/mapping/decision",
+            data={
+                "review_item_id": "maprev_000001",
+                "selected_code": "ST_001",
+                "selected_name": "总营业额",
+                "decision": "accept_once",
+            },
+            headers={"accept": "text/html,application/xhtml+xml"},
+            follow_redirects=False,
+        )
+        self.assertEqual(browser_submit.status_code, 303)
+        self.assertEqual(browser_submit.headers["location"], f"/jobs/{job_id}/proofread")
+
+        proofread = self.client.get(f"/jobs/{job_id}/proofread")
+        self.assertEqual(proofread.status_code, 200)
+        self.assertIn("AI建议", proofread.text)
+        self.assertIn("本操作只对当前文件生效，不会写入本地映射库。", proofread.text)
+        self.assertIn("已本次采用", proofread.text)
+        self.assertNotIn("不采纳", proofread.text)
+        self.assertNotIn("采用并记住", proofread.text)
+
     def test_unified_proofread_page_loads_combined_table_and_saves_edits(self):
         job_id = self._create_job("unified review")
         raw_path = self._create_raw_metrics_fixture(metric_name="货币资金", metric_value="12345.67", confidence="0.92")
@@ -1106,15 +1361,24 @@ class WebAppTests(unittest.TestCase):
         response = self.client.get(f"/jobs/{job_id}/proofread")
         self.assertEqual(response.status_code, 200)
         self.assertIn("data-unified-proofread-workbench", response.text)
-        self.assertIn("/static/app.js?v=proofread-highlight-20260512-1", response.text)
+        self.assertIn("/static/app.js?v=proofread-bulk-preview-20260520-2", response.text)
         self.assertIn("source-panel", response.text)
         self.assertIn("sheet-panel", response.text)
-        for text in ("原始术语", "指标数值", "标准术语", "状态"):
+        for text in ("原始术语", "指标数值", "标准术语", "状态", "映射决策"):
             self.assertIn(text, response.text)
+        self.assertIn("精确匹配，无需决策", response.text)
+        self.assertNotIn("不采纳", response.text)
+        self.assertNotIn("仅本次采用", response.text)
+        self.assertNotIn("采用并记住", response.text)
         self.assertIn("12,345.67", response.text)
         self.assertIn('class="confidence-switch"', response.text)
         self.assertIn("data-confidence-text hidden", response.text)
+        self.assertIn('class="todo-note unified-confidence-summary" data-confidence-text hidden', response.text)
+        self.assertIn("data-bulk-confidence-preview-form", response.text)
         self.assertIn("阿里云 92%", response.text)
+        self.assertIn("映射 100%", response.text)
+        self.assertNotIn("来源页码", response.text)
+        self.assertNotIn("unified-col-source-page", response.text)
         self.assertNotIn(">通过</button>", response.text)
         self.assertNotIn(">跳过</button>", response.text)
         self.assertNotIn(">修改映射</button>", response.text)

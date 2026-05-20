@@ -15,6 +15,8 @@ STANDARD_OUTPUT_COLUMNS = [
     "指标数值",
     "映射方法",
     "映射状态",
+    "映射置信度",
+    "口径关系",
     "口径说明",
     "是否需要人工校对",
 ]
@@ -30,6 +32,7 @@ DETAILED_OUTPUT_COLUMNS = [
     "doc_id",
     "source_cell_ref",
     "mapping_candidates_json",
+    "llm_suggestion_json",
     "issue_reason",
 ]
 
@@ -71,17 +74,76 @@ REVIEW_ITEM_COLUMNS = [
     "candidate_name",
     "candidate_score",
     "mapping_status",
+    "mapping_method",
+    "mapping_confidence",
+    "relation_type",
     "issue_reason",
     "source_page_no",
     "source_bbox_json",
     "source_pdf_path",
+    "system_candidate_code",
+    "system_candidate_name",
+    "system_candidate_score",
+    "ai_suggestion_code",
+    "ai_suggestion_name",
+    "ai_confidence",
+    "ai_reason",
+    "ai_relation_type",
+    "ai_review_required",
+    "ai_validation_status",
+    "suggestion_id",
+    "suggestion_source",
+    "mapping_decision",
     "action_default",
     "action_options",
 ]
 
+LLM_SUGGESTION_COLUMNS = [
+    "suggestion_id",
+    "cache_key",
+    "raw_metric_name",
+    "context_json",
+    "candidate_codes_json",
+    "candidate_code",
+    "candidate_name",
+    "relation_type",
+    "confidence",
+    "review_required",
+    "reason",
+    "model_name",
+    "prompt_hash",
+    "response_json",
+    "validation_status",
+    "created_at",
+    "from_cache",
+]
+
+LLM_SUGGESTION_AUDIT_COLUMNS = [
+    *LLM_SUGGESTION_COLUMNS,
+    "decision",
+    "standard_code_valid",
+    "candidate_rank",
+    "issue_reason",
+]
+
 MAPPING_STATUSES = {"mapped", "review_required", "unmapped", "skipped"}
-MAPPING_METHODS = {"exact", "alias", "legacy_alias", "candidate", "relation_review", "manual", "none"}
-REVIEW_ACTION_OPTIONS = ["approve_mapping", "skip_mapping", "change_mapping"]
+MAPPING_METHODS = {
+    "exact",
+    "alias",
+    "local_alias",
+    "legacy_alias",
+    "candidate",
+    "relation_review",
+    "manual",
+    "manual_once",
+    "manual_saved",
+    "llm_suggested",
+    "none",
+}
+REVIEW_ACTION_OPTIONS = ["reject", "accept_once", "accept_and_remember"]
+DECISION_VALUES = {"reject", "accept_once", "accept_and_remember"}
+SAFE_DECISION_RELATION_TYPES = {"same_as", "exact_alias", "legacy_alias"}
+REVIEW_RELATION_TYPES = {"broader_than", "narrower_than", "aggregate", "split", "formula", "ambiguous"}
 
 
 def compact_json(value: Any) -> str:
@@ -110,10 +172,14 @@ def dataclass_row(instance: Any) -> dict[str, Any]:
 class StandardTerm:
     code: str
     name: str
+    category: str = ""
     aliases: tuple[str, ...] = ()
     statement_scope: str = ""
     metric_type: str = ""
+    period_type: str = ""
     legacy_aliases: tuple[str, ...] = ()
+    description: str = ""
+    enabled: bool = True
     notes: str = ""
 
 
@@ -123,18 +189,23 @@ class AliasEntry:
     alias: str
     alias_type: str
     safe_auto_map: bool = True
+    source: str = "base"
     note: str = ""
 
 
 @dataclass(frozen=True)
 class TermRelation:
     relation_type: str
+    relation_id: str = ""
     canonical_code: str = ""
     canonical_name: str = ""
     raw_names: tuple[str, ...] = ()
     related_names: tuple[str, ...] = ()
     candidate_codes: tuple[str, ...] = ()
+    formula_json: str = ""
+    auto_apply: bool = False
     review_required: bool = True
+    enabled: bool = True
     note: str = ""
 
 
@@ -201,10 +272,13 @@ class MappingResult:
     standard_name: str
     mapping_method: str
     mapping_status: str
+    confidence: float | None = None
+    relation_type: str = ""
     notes: str = ""
     review_required: bool = False
     issue_reason: str = ""
     candidates: list[MappingCandidate] = field(default_factory=list)
+    llm_suggestion: dict[str, Any] | None = None
 
     def main_row(self) -> dict[str, Any]:
         return {
@@ -217,6 +291,8 @@ class MappingResult:
             "指标数值": self.raw.metric_value,
             "映射方法": self.mapping_method,
             "映射状态": self.mapping_status,
+            "映射置信度": self.confidence if self.confidence is not None else "",
+            "口径关系": self.relation_type,
             "口径说明": self.notes,
             "是否需要人工校对": self.review_required,
         }
@@ -235,6 +311,7 @@ class MappingResult:
                 "doc_id": self.raw.provenance.get("doc_id", ""),
                 "source_cell_ref": self.raw.provenance.get("source_cell_ref", ""),
                 "mapping_candidates_json": compact_json(candidate_rows),
+                "llm_suggestion_json": compact_json(self.llm_suggestion or {}),
                 "issue_reason": self.issue_reason,
             }
         )
@@ -261,14 +338,21 @@ class MappingResult:
 
     def review_item_row(self) -> dict[str, Any]:
         top = self.candidates[0] if self.candidates else None
+        system_top = next((candidate for candidate in self.candidates if candidate.candidate_method != "llm_suggested"), None)
+        display_top = top
+        display_system_top = system_top
+        if self.mapping_status == "unmapped" and self.mapping_method == "none":
+            display_top = None
+            display_system_top = None
+        llm = self.llm_suggestion or {}
         if self.mapping_status == "mapped":
-            action_default = "approve_mapping"
-        elif top and top.candidate_code:
-            action_default = "approve_mapping"
+            action_default = "accept_once"
+        elif display_top and display_top.candidate_code:
+            action_default = "accept_once"
         else:
-            action_default = "change_mapping"
+            action_default = "accept_once"
         if self.mapping_status == "skipped":
-            action_default = "skip_mapping"
+            action_default = "reject"
         return {
             "review_item_id": self.raw.review_item_id,
             "raw_metric_id": self.raw.raw_metric_id,
@@ -277,14 +361,30 @@ class MappingResult:
             "公司名": self.raw.company_name,
             "原始指标名": self.raw.metric_name,
             "指标数值": self.raw.metric_value,
-            "candidate_code": top.candidate_code if top else self.standard_code,
-            "candidate_name": top.candidate_name if top else self.standard_name,
-            "candidate_score": top.candidate_score if top else "",
+            "candidate_code": display_top.candidate_code if display_top else self.standard_code,
+            "candidate_name": display_top.candidate_name if display_top else self.standard_name,
+            "candidate_score": display_top.candidate_score if display_top else "",
             "mapping_status": self.mapping_status,
+            "mapping_method": self.mapping_method,
+            "mapping_confidence": self.confidence if self.confidence is not None else (display_top.candidate_score if display_top else ""),
+            "relation_type": self.relation_type or (display_top.relation_type if display_top else ""),
             "issue_reason": self.issue_reason or self.notes,
             "source_page_no": self.raw.provenance.get("source_page_no", ""),
             "source_bbox_json": self.raw.provenance.get("source_bbox_json", ""),
             "source_pdf_path": self.raw.provenance.get("source_pdf_path", ""),
+            "system_candidate_code": display_system_top.candidate_code if display_system_top else "",
+            "system_candidate_name": display_system_top.candidate_name if display_system_top else "",
+            "system_candidate_score": display_system_top.candidate_score if display_system_top else "",
+            "ai_suggestion_code": llm.get("candidate_code", ""),
+            "ai_suggestion_name": llm.get("candidate_name", ""),
+            "ai_confidence": llm.get("confidence", ""),
+            "ai_reason": llm.get("reason", ""),
+            "ai_relation_type": llm.get("relation_type", ""),
+            "ai_review_required": llm.get("review_required", ""),
+            "ai_validation_status": llm.get("validation_status", ""),
+            "suggestion_id": llm.get("suggestion_id", ""),
+            "suggestion_source": "AI建议" if llm else "",
+            "mapping_decision": "",
             "action_default": action_default,
             "action_options": REVIEW_ACTION_OPTIONS,
         }

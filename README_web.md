@@ -9,7 +9,7 @@ The ordinary web flow starts from a local PDF library.
 4. 对已识别文件点击继续处理
 5. 提取原始数据
 6. 生成标准化数据
-7. 下载结果
+7. 下载数据表
 8. 删除文件及相关结果
 ```
 
@@ -46,11 +46,20 @@ data/generated/web/jobs/
 data/generated/web/results/
 data/generated/web/logs/
 data/generated/web/deletions/
+data/generated/web/mapping_store/
 data/generated/raw_metrics/<doc_id>/<run_id>/
 data/generated/standard_metrics/<doc_id>/<run_id>/
 ```
 
 No generated artifacts should be written into the repo root.
+
+Unified download workbooks are written under:
+
+```text
+data/generated/web/results/<job_id>/downloads/数据表.xlsx
+data/generated/web/jobs/<job_id>/combined_download_summary.json
+data/generated/web/combined_download_summary.json
+```
 
 ## OCR
 
@@ -81,10 +90,13 @@ output-dir = data/generated/raw_metrics/<doc_id>/
 After Step 1, the page shows:
 
 ```text
-下载原始数据
+下载数据表
 校对数据和映射
 一键生成标准化数据
 ```
+
+At this point `数据表.xlsx` may contain only `数据总表`, `原始数据`, and `说明`.
+Raw CSV/XLSX files remain available under `高级下载`.
 
 ## Step 2: 标准化数据
 
@@ -94,7 +106,7 @@ The document page button is:
 一键生成标准化数据
 ```
 
-It runs Stage 13 standard mapping with the latest `raw_metrics.csv` and writes:
+It runs deterministic standard mapping with the latest `raw_metrics.csv`, including the Stage 15 local mapping store, and writes:
 
 ```text
 data/generated/standard_metrics/<doc_id>/
@@ -103,10 +115,27 @@ data/generated/standard_metrics/<doc_id>/
 After Step 2, the page shows:
 
 ```text
-下载原始数据
-下载标准化数据
+下载数据表
+高级下载
 校对数据和映射
 ```
+
+The main workbook contains raw and standardized information in one file. Typical
+sheets are:
+
+```text
+数据总表
+标准化数据
+原始数据
+术语映射校对
+说明
+```
+
+The Excel workbook is formatted for ordinary finance users: metric value cells are
+numeric Excel cells with thousands separators, date columns display as
+`yyyy-mm-dd`, the header row is frozen, filters are enabled, and column widths are
+set for direct review. Original CSV files, standardized CSV files, detailed JSON,
+and logs are advanced files rather than the normal primary download.
 
 ## Proofreading Pages
 
@@ -139,6 +168,7 @@ Mapping editing:
 - Empty input does not show `没有找到标准术语`; no-results appears only after a non-empty query returns no matches.
 - Changed mapping cells are highlighted and show `重置`; reset restores the original system mapping.
 - The status column remains visible with Chinese labels such as `精确匹配`, `别名匹配`, `建议校对`, `未映射`, and `已修改`.
+- Each row exposes Stage 15 mapping decisions: `不采纳`, `仅本次采用`, and `采用并记住`.
 
 Unified review actions are written under:
 
@@ -180,7 +210,7 @@ The older job routes remain available for administrators:
 `/documents/{doc_id}/mapping-review` is a table-style mapping workbench. The left side shows the original page image, and the right side focuses only on term mapping:
 
 ```text
-原始术语 | 标准术语 | 状态 | 操作
+原始术语 | 标准术语 | 状态 | 置信度 | 口径说明 | 操作
 ```
 
 Selecting a row highlights the original metric term on the source page when a term bbox is available. The page does not use numeric values as the primary review target.
@@ -192,12 +222,47 @@ The standard term field is an autocomplete search box. It supports:
 - Chinese name or alias substring, for example `短期` or `借款`
 - pinyin initials, for example `dqjk`
 
-After choosing a term, use `通过`, `跳过`, or `保存修改`. Actions are written under the existing web review path, for example:
+After choosing a term, use:
+
+- `不采纳`: reject the suggestion for this job.
+- `仅本次采用`: apply only to the current job output.
+- `采用并记住`: apply now and save the raw term to the local mapping store.
+
+Actions are written under the existing web review path, for example:
 
 ```text
 data/generated/web/jobs/<job_id>/mapping_review/mapping_review_actions.csv
 data/generated/web/jobs/<job_id>/mapping_review/mapping_review_actions.json
+data/generated/web/jobs/<job_id>/mapping_review/mapping_decisions.csv
+data/generated/web/jobs/<job_id>/mapping_review/mapping_decisions.json
+data/generated/web/jobs/<job_id>/mapping_review/mapping_decision_summary.json
 ```
+
+Remembered aliases are stored only in runtime data:
+
+```text
+data/generated/web/mapping_store/local_mappings.sqlite
+data/generated/web/mapping_store/local_aliases_export.yml
+data/generated/web/mapping_store/mapping_decisions_audit.csv
+data/generated/web/mapping_store/llm_suggestions.csv
+data/generated/web/mapping_store/llm_suggestion_audit.csv
+```
+
+If DeepSeek mapping suggestions are enabled, each row can show `AI建议`, confidence as a percentage, and a short reason. The LLM is candidate-constrained: it receives only local standard terms and any returned code outside that candidate list is rejected. It cannot mutate `config/*.yml` or save aliases by itself.
+
+Configure DeepSeek through environment variables or `data/secrets/deepseek.env`:
+
+```text
+DEEPSEEK_API_KEY=[请输入你的api]
+DEEPSEEK_MODEL=deepseek-v4-flash
+DEEPSEEK_BASE_URL=https://api.deepseek.com
+DEEPSEEK_ENABLED=false
+LLM_MAPPING_CACHE_ENABLED=true
+```
+
+The bulk confidence control defaults to `90%`. `先预览` writes `confidence_bulk_accept_preview.json`; `确认本次采纳` writes `accept_once` decisions and `confidence_bulk_accept_apply_summary.json`. The UI text states that this only affects the current file and does not write to the local mapping store.
+
+The web app does not edit tracked base config files. `采用并记住` is the only mapping action that writes a local alias; after that, the same raw term can map automatically in future runs.
 
 Limitations:
 

@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 
 from fastapi.testclient import TestClient
+from openpyxl import load_workbook
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -14,6 +15,7 @@ if str(REPO_ROOT) not in sys.path:
 from project_paths import (
     RAW_METRICS_GENERATED_ROOT,
     STANDARD_METRICS_GENERATED_ROOT,
+    WEB_COMBINED_DOWNLOAD_SUMMARY_PATH,
     WEB_DOCUMENT_LIBRARY_SUMMARY_PATH,
 )
 from webapp.config import load_settings
@@ -86,11 +88,47 @@ def main() -> int:
             job = document_to_job(settings, document)
             state = load_simple_flow_state(job)
             standardized_metrics_output = str(state.get("standardized_metrics_csv", "") or "")
+            combined_workbook_output = str(state.get("combined_metrics_xlsx", "") or "")
             step2_status = "completed" if state.get("standard_ready") else "failed"
 
             downloads_page = client.get(f"/documents/{uploaded_doc_id}/continue")
-            if "下载原始数据" not in downloads_page.text or "下载标准化数据" not in downloads_page.text:
-                raise RuntimeError("Download links missing after Step 2.")
+            primary_download_button_pass = "下载数据表" in downloads_page.text
+            advanced_downloads_available = "高级下载" in downloads_page.text and "原始数据 CSV" in downloads_page.text and "标准化数据 CSV" in downloads_page.text
+            legacy_primary_downloads_hidden = "下载原始数据</a>" not in downloads_page.text and "下载标准化数据</a>" not in downloads_page.text
+            if not primary_download_button_pass:
+                raise RuntimeError("Primary combined download link missing after Step 2.")
+
+            workbook = load_workbook(combined_workbook_output)
+            sheets_created = workbook.sheetnames
+            total_sheet = workbook["数据总表"]
+            headers = [cell.value for cell in total_sheet[1]]
+            value_col = headers.index("指标数值") + 1
+            fill_date_col = headers.index("填表日期") + 1
+            numeric_formatting_pass = total_sheet.cell(row=2, column=value_col).number_format == "#,##0.00"
+            date_formatting_pass = total_sheet.cell(row=2, column=fill_date_col).number_format == "yyyy-mm-dd"
+
+            combined_summary = {}
+            if WEB_COMBINED_DOWNLOAD_SUMMARY_PATH.exists():
+                combined_summary = json.loads(WEB_COMBINED_DOWNLOAD_SUMMARY_PATH.read_text(encoding="utf-8"))
+            combined_summary.update(
+                {
+                    "pass": bool(combined_summary.get("pass") and primary_download_button_pass and advanced_downloads_available and legacy_primary_downloads_hidden and numeric_formatting_pass and date_formatting_pass),
+                    "doc_id": uploaded_doc_id,
+                    "job_id": uploaded_doc_id,
+                    "workbook_path": combined_workbook_output,
+                    "sheets_created": sheets_created,
+                    "raw_rows_total": combined_summary.get("raw_rows_total", 0),
+                    "standardized_rows_total": combined_summary.get("standardized_rows_total", 0),
+                    "numeric_formatting_pass": numeric_formatting_pass,
+                    "date_formatting_pass": date_formatting_pass,
+                    "primary_download_button_pass": primary_download_button_pass,
+                    "advanced_downloads_available": advanced_downloads_available,
+                    "legacy_primary_downloads_hidden": legacy_primary_downloads_hidden,
+                    "path_hygiene_pass": combined_summary.get("path_hygiene_pass", False),
+                }
+            )
+            WEB_COMBINED_DOWNLOAD_SUMMARY_PATH.parent.mkdir(parents=True, exist_ok=True)
+            WEB_COMBINED_DOWNLOAD_SUMMARY_PATH.write_text(json.dumps(combined_summary, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
 
             raw_review = client.get(f"/documents/{uploaded_doc_id}/raw-review")
             mapping_review = client.get(f"/documents/{uploaded_doc_id}/mapping-review")
@@ -107,7 +145,7 @@ def main() -> int:
             delete_summary_path = str(delete_summaries[-1]) if delete_summaries else ""
             path_hygiene_pass = all(
                 is_under_allowed_outputs(Path(path))
-                for path in [uploaded_pdf_path, raw_metrics_output, standardized_metrics_output, delete_summary_path]
+                for path in [uploaded_pdf_path, raw_metrics_output, standardized_metrics_output, combined_workbook_output, delete_summary_path]
                 if path
             )
 
@@ -121,6 +159,11 @@ def main() -> int:
                         and mapping_review_page_pass
                         and delete_confirm_pass
                         and delete_summary_path
+                        and primary_download_button_pass
+                        and advanced_downloads_available
+                        and legacy_primary_downloads_hidden
+                        and numeric_formatting_pass
+                        and date_formatting_pass
                         and path_hygiene_pass
                     ),
                     "uploaded_doc_id": uploaded_doc_id,
@@ -131,6 +174,13 @@ def main() -> int:
                     "step2_status": step2_status,
                     "raw_metrics_output": raw_metrics_output,
                     "standardized_metrics_output": standardized_metrics_output,
+                    "combined_workbook_output": combined_workbook_output,
+                    "sheets_created": sheets_created,
+                    "numeric_formatting_pass": numeric_formatting_pass,
+                    "date_formatting_pass": date_formatting_pass,
+                    "primary_download_button_pass": primary_download_button_pass,
+                    "advanced_downloads_available": advanced_downloads_available,
+                    "legacy_primary_downloads_hidden": legacy_primary_downloads_hidden,
                     "raw_review_page_pass": raw_review_page_pass,
                     "mapping_review_page_pass": mapping_review_page_pass,
                     "delete_confirm_pass": delete_confirm_pass,

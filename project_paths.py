@@ -19,6 +19,7 @@ DEFAULT_TEMPLATE_PATH = TEMPLATE_ROOT / "会计报表.xlsx"
 
 SECRETS_ROOT = DATA_ROOT / "secrets"
 DEFAULT_SECRET_PATH = SECRETS_ROOT / "secret"
+DEEPSEEK_ENV_PATH = SECRETS_ROOT / "deepseek.env"
 
 VENDOR_ROOT = DATA_ROOT / "vendor"
 PADDLEOCR_ROOT = VENDOR_ROOT / "PaddleOCR"
@@ -48,16 +49,22 @@ WEB_JOBS_ROOT = WEB_GENERATED_ROOT / "jobs"
 WEB_RESULTS_ROOT = WEB_GENERATED_ROOT / "results"
 WEB_LOGS_ROOT = WEB_GENERATED_ROOT / "logs"
 WEB_DELETIONS_ROOT = WEB_GENERATED_ROOT / "deletions"
+WEB_MAPPING_STORE_ROOT = WEB_GENERATED_ROOT / "mapping_store"
+WEB_MAPPING_STORE_PATH = WEB_MAPPING_STORE_ROOT / "local_mappings.sqlite"
+WEB_LOCAL_ALIASES_EXPORT_PATH = WEB_MAPPING_STORE_ROOT / "local_aliases_export.yml"
+WEB_MAPPING_DECISIONS_AUDIT_PATH = WEB_MAPPING_STORE_ROOT / "mapping_decisions_audit.csv"
 WEB_DB_PATH = WEB_GENERATED_ROOT / "webapp.sqlite3"
 WEB_MVP_SUMMARY_PATH = WEB_GENERATED_ROOT / "web_mvp_summary.json"
 WEB_MVP_HARDENING_SUMMARY_PATH = WEB_GENERATED_ROOT / "web_mvp_hardening_summary.json"
 WEB_SIMPLE_TWO_STEP_SUMMARY_PATH = WEB_GENERATED_ROOT / "simple_two_step_summary.json"
 WEB_DOCUMENT_LIBRARY_SUMMARY_PATH = WEB_GENERATED_ROOT / "document_library_summary.json"
+WEB_COMBINED_DOWNLOAD_SUMMARY_PATH = WEB_GENERATED_ROOT / "combined_download_summary.json"
 
 CONFIG_ROOT = REPO_ROOT / "config"
 STANDARD_TERMS_PATH = CONFIG_ROOT / "standard_terms.yml"
 STANDARD_TERM_ALIASES_PATH = CONFIG_ROOT / "standard_term_aliases.yml"
 STANDARD_TERM_RELATIONS_PATH = CONFIG_ROOT / "standard_term_relations.yml"
+MAPPING_POLICY_PATH = CONFIG_ROOT / "mapping_policy.yml"
 
 
 def repo_relative(path: Path) -> str:

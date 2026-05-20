@@ -11,11 +11,14 @@ from .models import (
     CANDIDATE_OUTPUT_COLUMNS,
     DETAILED_OUTPUT_COLUMNS,
     ISSUE_OUTPUT_COLUMNS,
+    LLM_SUGGESTION_AUDIT_COLUMNS,
+    LLM_SUGGESTION_COLUMNS,
     REVIEW_ITEM_COLUMNS,
     STANDARD_OUTPUT_COLUMNS,
     MappingResult,
     serialize_value,
 )
+from .store import DECISION_FIELDNAMES
 
 
 OUTPUT_FILENAMES = [
@@ -25,8 +28,15 @@ OUTPUT_FILENAMES = [
     "standardized_metrics_detailed.csv",
     "mapping_candidates.csv",
     "mapping_issues.csv",
+    "llm_suggestions.csv",
+    "llm_suggestion_audit.csv",
+    "llm_mapping_summary.json",
     "standard_mapping_summary.json",
     "mapping_review_items.csv",
+    "mapping_decisions.csv",
+    "mapping_store_snapshot.yml",
+    "confidence_bulk_accept_preview.json",
+    "confidence_bulk_accept_apply_summary.json",
     "standard_mapping_run_manifest.json",
 ]
 
@@ -37,6 +47,8 @@ def export_standard_mapping_run(
     rows: list[MappingResult],
     summary: dict[str, Any],
     manifest: dict[str, Any],
+    llm_suggestion_rows: list[dict[str, Any]] | None = None,
+    llm_mapping_summary: dict[str, Any] | None = None,
 ) -> list[str]:
     output_dir.mkdir(parents=True, exist_ok=True)
     main_rows = [row.main_row() for row in rows]
@@ -54,7 +66,23 @@ def export_standard_mapping_run(
     write_dict_csv(output_dir / "standardized_metrics_detailed.csv", detailed_rows, DETAILED_OUTPUT_COLUMNS)
     write_dict_csv(output_dir / "mapping_candidates.csv", candidate_rows, CANDIDATE_OUTPUT_COLUMNS)
     write_dict_csv(output_dir / "mapping_issues.csv", issue_rows, ISSUE_OUTPUT_COLUMNS)
+    write_dict_csv(output_dir / "llm_suggestions.csv", llm_suggestion_rows or [], LLM_SUGGESTION_COLUMNS)
+    write_dict_csv(output_dir / "llm_suggestion_audit.csv", llm_suggestion_rows or [], LLM_SUGGESTION_AUDIT_COLUMNS)
+    write_json(output_dir / "llm_mapping_summary.json", llm_mapping_summary or {"pass": True, "llm_enabled": False, "suggestions_total": 0})
     write_dict_csv(output_dir / "mapping_review_items.csv", review_rows, REVIEW_ITEM_COLUMNS)
+    write_dict_csv(output_dir / "mapping_decisions.csv", [], DECISION_FIELDNAMES)
+    write_json(
+        output_dir / "confidence_bulk_accept_apply_summary.json",
+        {
+            "pass": True,
+            "threshold": "",
+            "applied_total": 0,
+            "rejected_total": 0,
+            "decision_type": "accept_once",
+            "mutated_local_alias_store": False,
+            "decisions_written": [],
+        },
+    )
     write_xlsx(output_dir / "standardized_metrics.xlsx", main_rows, detailed_rows, candidate_rows, issue_rows, review_rows)
     write_json(output_dir / "standard_mapping_summary.json", summary)
     write_json(output_dir / "standard_mapping_run_manifest.json", manifest)

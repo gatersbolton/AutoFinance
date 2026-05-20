@@ -66,15 +66,37 @@
                 </span>
                 <span class="confidence-switch__label" data-confidence-toggle-label>显示置信度</span>
             </button>
+            <form class="unified-bulk-confidence" action="{{ base_url }}/mapping/bulk-confidence-preview" method="get" data-bulk-confidence-preview-form>
+                <label>
+                    AI置信度
+                    <input type="number" name="threshold" min="0" max="100" step="1" value="90" data-bulk-threshold-input>
+                    %
+                </label>
+                <button class="button button--secondary" type="submit">先预览</button>
+            </form>
+            <form class="unified-bulk-confidence" action="{{ base_url }}/mapping/bulk-accept-confidence" method="post" data-bulk-confidence-apply-form>
+                <input type="hidden" name="threshold" value="90">
+                <button class="button button--secondary" type="submit">确认本次采纳</button>
+            </form>
             <button class="button button--primary" type="button" data-unified-save>保存修改</button>
             <span class="save-status" data-unified-save-status></span>
         </div>
-        <p class="todo-note unified-confidence-summary">
+        <p class="todo-note unified-confidence-summary" data-confidence-text hidden>
             OCR置信度：已记录 {{ sheet.confidence_available_total }} 项，未记录 {{ sheet.confidence_missing_total }} 项
+            本操作只对当前文件生效，不会写入本地映射库。
         </p>
+        <div class="bulk-confidence-preview" data-bulk-confidence-preview hidden></div>
 
         <div class="spreadsheet-wrap unified-spreadsheet-wrap">
             <table class="spreadsheet-table unified-review-table" data-unified-table>
+                <colgroup>
+                    <col class="unified-col-original-term">
+                    <col class="unified-col-item-date">
+                    <col class="unified-col-metric-value">
+                    <col class="unified-col-standard-term">
+                    <col class="unified-col-status">
+                    <col class="unified-col-decision">
+                </colgroup>
                 <thead>
                     <tr>
                         <th class="row-heading">原始术语</th>
@@ -82,7 +104,7 @@
                         <th>指标数值</th>
                         <th>标准术语</th>
                         <th>状态</th>
-                        <th class="optional-column">来源页码</th>
+                        <th>映射决策</th>
                     </tr>
                 </thead>
                 <tbody>
@@ -165,6 +187,17 @@
                                 <input type="hidden" value="{{ row.current_name }}" data-selected-name>
                                 <div class="autocomplete-results" data-autocomplete-results hidden></div>
                             </div>
+                            {% if row.mapping_confidence_display %}
+                            <span class="confidence-inline" data-confidence-text hidden>{{ row.mapping_confidence_display }}</span>
+                            {% endif %}
+                            {% if row.ai_suggestion_label %}
+                            <div class="mapping-suggestion-stack">
+                                <span><strong>AI建议</strong>：{{ row.ai_suggestion_label }}{% if row.ai_confidence_display %} · {{ row.ai_confidence_display }}{% endif %}</span>
+                                {% if row.ai_reason %}
+                                <small>{{ row.ai_reason }}</small>
+                                {% endif %}
+                            </div>
+                            {% endif %}
                         </td>
                         <td data-status-cell>
                             <div class="status-badge-list" data-status-badges>
@@ -173,7 +206,23 @@
                                 {% endfor %}
                             </div>
                         </td>
-                        <td class="optional-column">{{ row.source_page_no or "未记录" }}</td>
+                        <td>
+                            {% if row.show_mapping_decision_actions %}
+                            <form class="mapping-row-form unified-decision-form" action="{{ base_url }}/mapping/decision" method="post" data-mapping-decision-form>
+                                <input type="hidden" name="review_item_id" value="{{ row.mapping_review_item_id }}">
+                                <input type="hidden" name="raw_metric_id" value="{{ row.raw_metric_id }}">
+                                <input type="hidden" name="selected_code" value="{{ row.current_code }}" data-decision-selected-code>
+                                <input type="hidden" name="selected_name" value="{{ row.current_name }}" data-decision-selected-name>
+                                <div class="mapping-actions mapping-actions--compact">
+                                    <button class="button button--secondary" type="submit" name="decision" value="reject">不采纳</button>
+                                    <button class="button button--primary" type="submit" name="decision" value="accept_once">仅本次采用</button>
+                                    <button class="button button--secondary" type="submit" name="decision" value="accept_and_remember" title="以后遇到相同术语将自动映射。">采用并记住</button>
+                                </div>
+                            </form>
+                            {% else %}
+                            <span class="mapping-decision-note">{{ row.mapping_decision_note or "无需决策" }}</span>
+                            {% endif %}
+                        </td>
                     </tr>
                     {% endfor %}
                 </tbody>

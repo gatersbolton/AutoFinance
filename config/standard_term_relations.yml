@@ -1,4 +1,23 @@
 relations:
+  - relation_id: FORMULA_001
+    relation_type: formula
+    canonical_code: ZT_009
+    canonical_name: 营业收入
+    raw_names:
+      - 上半年营收加下半年营收
+    formula:
+      target_code: ZT_009
+      target_name: 营业收入
+      components:
+        - code: ZT_009_H1
+          name: 上半年营收
+          coefficient: 1
+        - code: ZT_009_H2
+          name: 下半年营收
+          coefficient: 1
+    auto_apply: false
+    review_required: true
+    note: 公式关系仅作为候选提示；需要确认期间覆盖完整且口径一致。
   - relation_type: aggregate
     canonical_code: ZT_011
     canonical_name: 应收票据及应收账款
