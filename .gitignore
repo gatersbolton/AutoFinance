@@ -2,7 +2,7 @@ secret
 data/
 tmp/
 .playwright-cli/
-.env
+.env 
 .env.local
 .env.*.local
 run.cmd

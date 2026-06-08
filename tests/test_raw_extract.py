@@ -73,6 +73,9 @@ class RawExtractTests(unittest.TestCase):
         self.assertIn("2022-01-01", {row.item_date for row in accepted})
         self.assertIn("2022-12-31", {row.item_date for row in accepted})
         self.assertFalse(any("ZT_" in row.metric_name for row in accepted))
+        self.assertEqual({row.text_confidence for row in accepted}, {0.91})
+        self.assertEqual({row.value_confidence for row in accepted}, {0.84, 0.88})
+        self.assertEqual({row.confidence for row in accepted}, {0.84, 0.88})
         self.assertIsInstance(issues, list)
 
     def test_provider_priority_candidate_selection(self):
@@ -219,10 +222,10 @@ class RawExtractTests(unittest.TestCase):
             ProviderCell("1", 0, 0, 1, 1, "行次"),
             ProviderCell("1", 0, 0, 2, 2, "期初数"),
             ProviderCell("1", 0, 0, 3, 3, "期末数"),
-            ProviderCell("1", 1, 1, 0, 0, "货币资金"),
-            ProviderCell("1", 1, 1, 1, 1, "1"),
-            ProviderCell("1", 1, 1, 2, 2, "100"),
-            ProviderCell("1", 1, 1, 3, 3, "200"),
+            ProviderCell("1", 1, 1, 0, 0, "货币资金", confidence=0.91),
+            ProviderCell("1", 1, 1, 1, 1, "1", confidence=0.99),
+            ProviderCell("1", 1, 1, 2, 2, "100", confidence=0.84),
+            ProviderCell("1", 1, 1, 3, 3, "200", confidence=0.88),
         ]
         return ProviderPage(
             doc_id="DTEST",
@@ -266,6 +269,8 @@ class RawExtractTests(unittest.TestCase):
             company_resolution_method="test",
             source_cell_ref=f"DTEST:1:{provider}:1:1-1:2-2",
             bbox_json="",
+            text_confidence=None,
+            value_confidence=None,
             confidence=None,
             issue_flags=[],
             provider_rank=rank,

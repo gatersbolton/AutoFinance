@@ -12,6 +12,7 @@ from standard_map.registry import load_standard_registry
 from standard_map.store import LocalMappingStore
 
 from .base_path import app_path
+from .combined_downloads import build_workbook_preview
 from .document_library import (
     MISSING_OCR_CREDENTIALS_MESSAGE,
     build_delete_plan,
@@ -30,6 +31,7 @@ from .simple_flow import (
     build_mapping_review_sheet,
     build_raw_review_sheet,
     find_review_item,
+    job_root,
     load_mapping_review_items,
     load_raw_review_items,
     load_simple_flow_state,
@@ -180,13 +182,56 @@ def download_document_artifact(request: Request, doc_id: str, slug: str) -> File
         document = load_document(settings, doc_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="文件不存在。") from exc
-    artifact = resolve_download_artifact(document_to_job(settings, document), slug)
+    job = document_to_job(settings, document)
+    if slug == "combined_metrics_xlsx":
+        state = load_simple_flow_state(job)
+        path_text = str(state.get("combined_metrics_xlsx", "") or "")
+        path = Path(path_text) if path_text else Path()
+        action_path = job_root(job) / "unified_review" / "unified_review_actions.json"
+        needs_refresh = not path_text or not path.exists() or (action_path.exists() and path.exists() and action_path.stat().st_mtime > path.stat().st_mtime)
+        if needs_refresh and (state.get("raw_ready") or state.get("standard_ready")):
+            refresh_combined_metrics_workbook(settings, job)
+    artifact = resolve_download_artifact(job, slug)
     if artifact is None:
         raise HTTPException(status_code=404, detail="文件不存在。")
     path = Path(artifact.path)
     if not artifact.exists or not path.exists():
         raise HTTPException(status_code=404, detail="文件未生成。")
     return FileResponse(path=str(path), filename=artifact.download_name)
+
+
+@document_router.get("/documents/{doc_id}/download-preview/combined_metrics_xlsx", response_class=HTMLResponse, dependencies=[Depends(password_gate)])
+def document_combined_metrics_download_preview(request: Request, doc_id: str) -> HTMLResponse:
+    settings = get_settings(request)
+    try:
+        document = load_document(settings, doc_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="文件不存在。") from exc
+    job = document_to_job(settings, document)
+    state = load_simple_flow_state(job)
+    path_text = str(state.get("combined_metrics_xlsx", "") or "")
+    path = Path(path_text) if path_text else Path()
+    action_path = job_root(job) / "unified_review" / "unified_review_actions.json"
+    needs_refresh = not path_text or not path.exists() or (action_path.exists() and path.exists() and action_path.stat().st_mtime > path.stat().st_mtime)
+    if needs_refresh and (state.get("raw_ready") or state.get("standard_ready")):
+        refresh_combined_metrics_workbook(settings, job)
+        state = load_simple_flow_state(job)
+        path_text = str(state.get("combined_metrics_xlsx", "") or "")
+        path = Path(path_text) if path_text else Path()
+    if not path_text or not path.exists():
+        raise HTTPException(status_code=404, detail="数据表尚未生成。")
+    return _render(
+        request,
+        "download_preview.html",
+        {
+            "document": document,
+            "job": job,
+            "title": "数据表预览",
+            "preview": build_workbook_preview(path),
+            "download_url": _app_url(request, f"/documents/{doc_id}/download/combined_metrics_xlsx"),
+            "return_url": _app_url(request, f"/documents/{doc_id}/continue"),
+        },
+    )
 
 
 @document_router.get("/documents/{doc_id}/proofread", response_class=HTMLResponse, dependencies=[Depends(password_gate)])
@@ -281,8 +326,12 @@ async def document_unified_proofread_save(request: Request, doc_id: str) -> JSON
     reviewer_name = str(payload.get("reviewer_name", "") or "") if isinstance(payload, dict) else ""
     try:
         summary = save_unified_review_actions(job, edits, reviewer_name=reviewer_name)
+        combined_summary = refresh_combined_metrics_workbook(settings, job)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    summary["combined_workbook_refreshed"] = bool(combined_summary.get("pass"))
+    summary["combined_metrics_xlsx"] = str(combined_summary.get("workbook_path", "") or combined_summary.get("output_path", "") or "")
+    summary["precision_warnings_total"] = int(summary.get("precision_warnings_total", 0) or 0)
     return JSONResponse(summary)
 
 

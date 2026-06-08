@@ -57,6 +57,7 @@ def extract_raw_metric_candidates(
             row_cells = subtable.grid[row_idx]
             row_label_raw = extract_row_label(row_cells, subtable.row_label_col, subtable.value_cols, subtable.line_no_col)
             metric_name = clean_metric_name(row_label_raw)
+            text_confidence = extract_row_label_confidence(row_cells, subtable.row_label_col, subtable.value_cols, subtable.line_no_col)
             has_values = any(not row_cells[col_idx].is_empty for col_idx in subtable.value_cols if col_idx < len(row_cells))
             if not metric_name and not has_values:
                 continue
@@ -135,6 +136,8 @@ def extract_raw_metric_candidates(
                     company_resolution_method=company.method,
                     source_cell_ref=build_source_cell_ref(cell),
                     bbox_json=cell.bbox_json,
+                    text_confidence=text_confidence,
+                    value_confidence=cell.ocr_conf,
                     confidence=cell.ocr_conf,
                     evidence_path=evidence_path,
                     issue_flags=issue_flags,
@@ -243,6 +246,25 @@ def build_row_contexts(subtable: LogicalSubtable) -> Dict[int, str]:
             continue
         context_by_row[row_idx] = " / ".join(active_context)
     return context_by_row
+
+
+def extract_row_label_confidence(
+    row_cells: Sequence[CellRecord],
+    row_label_col: int,
+    value_cols: Sequence[int],
+    line_no_col: Optional[int],
+) -> Optional[float]:
+    if row_label_col < len(row_cells) and row_cells[row_label_col].text_clean:
+        return row_cells[row_label_col].ocr_conf
+    values = [
+        cell.ocr_conf
+        for col_idx, cell in enumerate(row_cells)
+        if col_idx not in value_cols
+        and col_idx != line_no_col
+        and cell.text_clean
+        and cell.ocr_conf is not None
+    ]
+    return min(values) if values else None
 
 
 def collect_candidate_issue_flags(

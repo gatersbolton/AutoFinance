@@ -94,13 +94,17 @@ def main() -> int:
                     or any("," in value and value.replace(",", "").replace(".", "").isdigit() for value in formatted_values)
                 ) and visible_cell_errors == 0
 
-                confidence_cells = page.locator("[data-confidence-text]")
+                confidence_cells = page.locator("[data-ocr-confidence-text]")
                 hidden_before = confidence_cells.nth(0).evaluate("node => node.hidden")
                 page.locator("[data-confidence-toggle]").click()
                 page.wait_for_timeout(200)
                 visible_after = not confidence_cells.nth(0).evaluate("node => node.hidden")
                 switch_on = page.locator("[data-confidence-toggle]").get_attribute("aria-checked") == "true"
-                has_confidence_text = page.get_by_text("阿里云", exact=False).count() >= 1 or page.get_by_text("未记录", exact=True).count() >= 1
+                has_confidence_text = (
+                    page.get_by_text("文字", exact=False).count() >= 1
+                    or page.get_by_text("数字", exact=False).count() >= 1
+                    or page.get_by_text("未记录", exact=True).count() >= 1
+                )
                 page.locator("[data-confidence-toggle]").click()
                 summary["confidence_toggle_pass"] = bool(hidden_before and visible_after and switch_on and has_confidence_text)
 
@@ -325,7 +329,16 @@ def main() -> int:
                     delayed_row.scroll_into_view_if_needed()
                     delayed_row.locator("[data-unified-term-cell]").click()
                     expected_bbox = delayed_row.get_attribute("data-bbox")
-                    slow_page.wait_for_timeout(1800)
+                    try:
+                        slow_page.wait_for_function(
+                            """() => {
+                                const node = document.querySelector("[data-source-highlight]");
+                                return node && node.style.display === "block";
+                            }""",
+                            timeout=5000,
+                        )
+                    except Exception:
+                        pass
                     selected = slow_page.locator(".unified-row--selected").first
                     summary["delayed_initial_image_highlight_pass"] = bool(
                         selected.get_attribute("data-review-item-id") == delayed_target_id

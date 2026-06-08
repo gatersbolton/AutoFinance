@@ -633,23 +633,60 @@ function formatMetricNumber(value, valueType = "") {
     if (!text) {
         return "";
     }
-    const normalizedType = String(valueType || "").toLowerCase();
-    if (text.includes("%") || ["ratio", "percentage", "percent"].includes(normalizedType)) {
+    const parsed = parseMetricNumberInput(text, valueType);
+    if (!parsed.valid) {
         return text;
     }
-    const normalized = text.replace(/[,，]/g, "");
-    const match = normalized.match(/^([+-]?)(?:(\d+)(?:\.(\d*))?|\.(\d+))$/);
+    return formatCanonicalMetricNumber(parsed.value);
+}
+
+function formatCanonicalMetricNumber(value) {
+    const match = String(value || "").match(/^([+-]?)(\d+)\.(\d{2})$/);
     if (!match) {
-        return text;
+        return String(value || "");
     }
     const sign = match[1] || "";
-    const intPart = (match[2] || "0").replace(/^0+(?=\d)/, "") || "0";
-    const fracPart = match[3] !== undefined ? match[3] : match[4];
-    const grouped = intPart.replace(/\B(?=(\d{3})+(?!\d))/g, ",");
-    if (fracPart === undefined) {
-        return `${sign}${grouped}`;
+    const integer = match[2].replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+    return `${sign}${integer}.${match[3]}`;
+}
+
+function incrementIntegerString(value) {
+    const digits = String(value || "0").split("");
+    let carry = 1;
+    for (let index = digits.length - 1; index >= 0; index -= 1) {
+        const next = Number(digits[index]) + carry;
+        if (next >= 10) {
+            digits[index] = "0";
+            carry = 1;
+        } else {
+            digits[index] = String(next);
+            carry = 0;
+            break;
+        }
     }
-    return `${sign}${grouped}.${fracPart}`;
+    if (carry) {
+        digits.unshift("1");
+    }
+    return digits.join("");
+}
+
+function canonicalizeMetricNumber(sign, intPart, fracPart) {
+    let integer = (intPart || "0").replace(/^0+(?=\d)/, "") || "0";
+    const rawFraction = String(fracPart || "");
+    const padded = rawFraction.padEnd(3, "0");
+    let cents = Number(padded.slice(0, 2));
+    if (Number(padded[2]) >= 5) {
+        cents += 1;
+    }
+    if (cents >= 100) {
+        integer = incrementIntegerString(integer);
+        cents -= 100;
+    }
+    const fraction = String(cents).padStart(2, "0");
+    return {
+        value: `${sign || ""}${integer}.${fraction}`,
+        precisionAdjusted: rawFraction.length > 2 && /[1-9]/.test(rawFraction.slice(2)),
+    };
 }
 
 function parseMetricNumberInput(value, valueType = "") {
@@ -668,13 +705,12 @@ function parseMetricNumberInput(value, valueType = "") {
     }
     const sign = match[1] || "";
     if (match[4] !== undefined) {
-        return { valid: true, value: `${sign}0.${match[4]}`, reason: "" };
+        const result = canonicalizeMetricNumber(sign, "0", match[4]);
+        return { valid: true, value: result.value, reason: "", precisionAdjusted: result.precisionAdjusted };
     }
     const intPart = (match[2] || "0").replace(/^0+(?=\d)/, "") || "0";
-    if (match[3] === undefined) {
-        return { valid: true, value: `${sign}${intPart}`, reason: "" };
-    }
-    return { valid: true, value: `${sign}${intPart}.${match[3]}`, reason: "" };
+    const result = canonicalizeMetricNumber(sign, intPart, match[3] || "");
+    return { valid: true, value: result.value, reason: "", precisionAdjusted: result.precisionAdjusted };
 }
 
 function statusBadge(code, label) {
@@ -716,6 +752,14 @@ function updateValueResetVisibility(input) {
     const reset = cell ? cell.querySelector("[data-reset-value]") : null;
     if (reset) {
         reset.hidden = !(document.activeElement === input && isValueChangedFromOriginal(input));
+    }
+}
+
+function updateValuePrecisionNote(input, parsed = null) {
+    const cell = input.closest("[data-value-cell]");
+    const note = cell ? cell.querySelector("[data-value-precision-note]") : null;
+    if (note) {
+        note.hidden = !(parsed && parsed.precisionAdjusted);
     }
 }
 
@@ -774,6 +818,7 @@ function markUnifiedValueChanged(row, input) {
         if (error) {
             error.hidden = false;
         }
+        updateValuePrecisionNote(input, null);
         input.dataset.dirty = "false";
         return;
     }
@@ -792,6 +837,7 @@ function markUnifiedValueChanged(row, input) {
         cell.classList.toggle("metric-cell--dirty", changedFromOriginal);
     }
     row.dataset.valueChanged = changedFromOriginal ? "true" : "false";
+    updateValuePrecisionNote(input, parsed);
     updateValueResetVisibility(input);
     updateUnifiedStatus(row);
 }
@@ -811,6 +857,7 @@ function resetUnifiedValue(row, input) {
         if (error) {
             error.hidden = true;
         }
+        updateValuePrecisionNote(input, null);
     }
     row.dataset.valueChanged = "false";
     updateValueResetVisibility(input);
@@ -930,16 +977,140 @@ function collectUnifiedEdits(root) {
     return edits;
 }
 
-function filterUnifiedRows(root) {
-    const queryInput = root.querySelector("[data-unified-table-search]");
-    if (!queryInput) {
+function numericDatasetValue(row, key) {
+    const rawValue = row.getAttribute(key) || "";
+    if (!rawValue) {
+        return null;
+    }
+    const value = Number(rawValue);
+    return Number.isFinite(value) ? value : null;
+}
+
+function unifiedStatusMatches(row, filterValue) {
+    if (!filterValue || filterValue === "all") {
+        return true;
+    }
+    const baseStatus = row.getAttribute("data-base-status-code") || "";
+    const decisionNote = row.getAttribute("data-mapping-decision-note") || "";
+    if (filterValue === "changed") {
+        return row.dataset.valueChanged === "true" || row.dataset.mappingChanged === "true";
+    }
+    if (filterValue === "accept_once") {
+        return decisionNote.includes("已本次采用");
+    }
+    if (filterValue === "review_required") {
+        return ["review_required", "candidate", "relation_review"].includes(baseStatus);
+    }
+    return baseStatus === filterValue;
+}
+
+function unifiedConfidenceMatches(row, filterValue, threshold) {
+    if (!filterValue || filterValue === "all") {
+        return true;
+    }
+    const textConfidence = numericDatasetValue(row, "data-text-confidence");
+    const valueConfidence = numericDatasetValue(row, "data-value-confidence");
+    const textLow = textConfidence !== null && textConfidence < threshold;
+    const valueLow = valueConfidence !== null && valueConfidence < threshold;
+    if (filterValue === "text_low") {
+        return textLow;
+    }
+    if (filterValue === "value_low") {
+        return valueLow;
+    }
+    if (filterValue === "any_low") {
+        return textLow || valueLow;
+    }
+    return true;
+}
+
+function unifiedStatusPriority(row) {
+    const baseStatus = row.getAttribute("data-base-status-code") || "";
+    const decisionNote = row.getAttribute("data-mapping-decision-note") || "";
+    if (baseStatus === "unmapped") {
+        return 0;
+    }
+    if (baseStatus === "llm_suggested") {
+        return 1;
+    }
+    if (["review_required", "candidate", "relation_review"].includes(baseStatus)) {
+        return 2;
+    }
+    if (row.dataset.valueChanged === "true" || row.dataset.mappingChanged === "true") {
+        return 3;
+    }
+    if (decisionNote.includes("已本次采用")) {
+        return 4;
+    }
+    return 5;
+}
+
+function sortUnifiedRows(root) {
+    const tbody = root.querySelector("[data-unified-table] tbody");
+    if (!tbody) {
         return;
     }
-    const query = queryInput.value.trim().toLowerCase();
+    const sortValue = root.querySelector("[data-unified-sort]")?.value || "page";
+    const rows = Array.from(root.querySelectorAll("[data-unified-row]"));
+    const headers = Array.from(root.querySelectorAll("[data-section-header]"));
+    if (sortValue === "page") {
+        Array.from(tbody.children)
+            .sort((left, right) => Number(left.dataset.originalDomOrder || "0") - Number(right.dataset.originalDomOrder || "0"))
+            .forEach((child) => tbody.appendChild(child));
+        headers.forEach((header) => {
+            const sectionKey = header.getAttribute("data-section-key") || "";
+            const hasVisibleRows = rows.some((row) => !row.hidden && (row.getAttribute("data-section-key") || "") === sectionKey);
+            header.hidden = !hasVisibleRows;
+        });
+        root.querySelectorAll("[data-row-page-chip]").forEach((chip) => {
+            chip.hidden = true;
+        });
+        return;
+    }
+
+    const sortedRows = rows.sort((left, right) => {
+        if (sortValue === "value_confidence_asc" || sortValue === "text_confidence_asc") {
+            const key = sortValue === "value_confidence_asc" ? "data-value-confidence" : "data-text-confidence";
+            const leftValue = numericDatasetValue(left, key);
+            const rightValue = numericDatasetValue(right, key);
+            const leftSort = leftValue === null ? Number.POSITIVE_INFINITY : leftValue;
+            const rightSort = rightValue === null ? Number.POSITIVE_INFINITY : rightValue;
+            if (leftSort !== rightSort) {
+                return leftSort - rightSort;
+            }
+        }
+        if (sortValue === "status_priority") {
+            const priorityDelta = unifiedStatusPriority(left) - unifiedStatusPriority(right);
+            if (priorityDelta !== 0) {
+                return priorityDelta;
+            }
+        }
+        return Number(left.dataset.originalOrder || "0") - Number(right.dataset.originalOrder || "0");
+    });
+    headers.forEach((header) => {
+        header.hidden = true;
+        tbody.appendChild(header);
+    });
+    sortedRows.forEach((row) => tbody.appendChild(row));
+    root.querySelectorAll("[data-row-page-chip]").forEach((chip) => {
+        chip.hidden = false;
+    });
+}
+
+function filterUnifiedRows(root) {
+    const queryInput = root.querySelector("[data-unified-table-search]");
+    const query = queryInput ? queryInput.value.trim().toLowerCase() : "";
+    const statusFilter = root.querySelector("[data-unified-status-filter]")?.value || "all";
+    const confidenceFilter = root.querySelector("[data-unified-confidence-filter]")?.value || "all";
+    const thresholdRaw = Number(root.querySelector("[data-unified-confidence-threshold]")?.value || "90");
+    const threshold = Number.isFinite(thresholdRaw) ? Math.max(0, Math.min(100, thresholdRaw)) / 100 : 0.9;
     const visibleSections = new Set();
-    root.querySelectorAll("[data-unified-row]").forEach((row) => {
+    const rows = Array.from(root.querySelectorAll("[data-unified-row]"));
+    rows.forEach((row) => {
         const text = row.textContent.toLowerCase();
-        const visible = !query || text.includes(query);
+        const visible = (!query || text.includes(query))
+            && unifiedStatusMatches(row, statusFilter)
+            && unifiedConfidenceMatches(row, confidenceFilter, threshold);
         row.hidden = !visible;
         if (visible) {
             visibleSections.add(row.getAttribute("data-section-key") || "");
@@ -948,17 +1119,22 @@ function filterUnifiedRows(root) {
     root.querySelectorAll("[data-section-header]").forEach((header) => {
         header.hidden = !visibleSections.has(header.getAttribute("data-section-key") || "");
     });
+    sortUnifiedRows(root);
+    const firstVisible = Array.from(root.querySelectorAll("[data-unified-row]")).find((row) => !row.hidden);
+    if (firstVisible) {
+        selectUnifiedRow(firstVisible, firstVisible);
+    }
 }
 
-async function saveUnifiedEdits(root) {
+async function saveUnifiedEdits(root, options = {}) {
     const status = root.querySelector("[data-unified-save-status]");
     const button = root.querySelector("[data-unified-save]");
-    const edits = collectUnifiedEdits(root);
+    const edits = options.edits || collectUnifiedEdits(root);
     if (!edits.length) {
         if (status) {
             status.textContent = "没有需要保存的修改";
         }
-        return;
+        return { pass: true, skipped: true };
     }
     if (button) {
         button.disabled = true;
@@ -976,6 +1152,7 @@ async function saveUnifiedEdits(root) {
             const payload = await response.json().catch(() => ({}));
             throw new Error(payload.detail || "保存失败");
         }
+        const payload = await response.json();
         root.querySelectorAll("[data-unified-row]").forEach((row) => {
             const valueInput = row.querySelector("[data-metric-value-input]");
             const valueCell = row.querySelector("[data-value-cell]");
@@ -984,8 +1161,10 @@ async function saveUnifiedEdits(root) {
                 const currentValue = valueInput.dataset.currentValue || originalValue;
                 if (valueCell && valueCell.dataset.resetPending === "true") {
                     valueInput.dataset.savedValue = originalValue;
+                    valueInput.value = formatMetricNumber(originalValue, valueInput.getAttribute("data-value-type") || "");
                 } else if (valueInput.dataset.dirty === "true") {
                     valueInput.dataset.savedValue = currentValue;
+                    valueInput.value = formatMetricNumber(currentValue, valueInput.getAttribute("data-value-type") || "");
                 }
                 valueInput.dataset.dirty = "false";
                 const changedFromOriginal = isValueChangedFromOriginal(valueInput);
@@ -1020,16 +1199,50 @@ async function saveUnifiedEdits(root) {
             updateUnifiedStatus(row);
         });
         if (status) {
-            status.textContent = "已保存";
+            const precisionWarnings = Number(payload.precision_warnings_total || 0);
+            if (precisionWarnings > 0) {
+                status.textContent = "已保存，数值已按金额保留两位";
+            } else if (payload.combined_workbook_refreshed) {
+                status.textContent = "已保存，下载版已刷新";
+            } else {
+                status.textContent = "已保存";
+            }
         }
+        return payload;
     } catch (error) {
         if (status) {
             status.textContent = error.message || "保存失败";
         }
+        return null;
     } finally {
         if (button) {
             button.disabled = false;
         }
+    }
+}
+
+async function openUnifiedDownloadPreview(root, link) {
+    const href = link.getAttribute("href") || root.getAttribute("data-download-preview-url") || "";
+    if (!href) {
+        return;
+    }
+    const edits = collectUnifiedEdits(root);
+    if (!edits.length) {
+        window.open(href, "_blank", "noopener");
+        return;
+    }
+    const previewWindow = window.open("", "_blank", "noopener");
+    const payload = await saveUnifiedEdits(root, { edits });
+    if (payload && payload.pass) {
+        if (previewWindow) {
+            previewWindow.location.href = href;
+        } else {
+            window.location.href = href;
+        }
+        return;
+    }
+    if (previewWindow) {
+        previewWindow.close();
     }
 }
 
@@ -1039,6 +1252,12 @@ function initUnifiedProofreadWorkbench() {
         return;
     }
     const rows = Array.from(root.querySelectorAll("[data-unified-row]"));
+    const tableBody = root.querySelector("[data-unified-table] tbody");
+    if (tableBody) {
+        Array.from(tableBody.children).forEach((child, index) => {
+            child.dataset.originalDomOrder = String(index);
+        });
+    }
     rows.forEach((row) => {
         row.addEventListener("click", (event) => selectUnifiedRow(row, event.target));
         const valueInput = row.querySelector("[data-metric-value-input]");
@@ -1052,8 +1271,10 @@ function initUnifiedProofreadWorkbench() {
             valueInput.addEventListener("blur", () => {
                 const parsed = parseMetricNumberInput(valueInput.value, valueInput.getAttribute("data-value-type") || "");
                 if (parsed.valid) {
+                    valueInput.dataset.currentValue = parsed.value;
                     valueInput.value = formatMetricNumber(parsed.value, valueInput.getAttribute("data-value-type") || "");
                 }
+                updateValuePrecisionNote(valueInput, parsed.valid ? parsed : null);
                 window.setTimeout(() => updateValueResetVisibility(valueInput), 80);
             });
             const reset = row.querySelector("[data-reset-value]");
@@ -1090,17 +1311,17 @@ function initUnifiedProofreadWorkbench() {
     const confidenceToggle = root.querySelector("[data-confidence-toggle]");
     if (confidenceToggle) {
         confidenceToggle.addEventListener("click", () => {
-            const texts = root.querySelectorAll("[data-confidence-text]");
+            const texts = root.querySelectorAll("[data-ocr-confidence-text]");
             const shouldShow = Array.from(texts).some((text) => text.hidden);
             texts.forEach((text) => {
                 text.hidden = !shouldShow;
             });
             confidenceToggle.classList.toggle("confidence-switch--on", shouldShow);
             confidenceToggle.setAttribute("aria-checked", shouldShow ? "true" : "false");
-            confidenceToggle.setAttribute("aria-label", shouldShow ? "隐藏置信度" : "显示置信度");
+            confidenceToggle.setAttribute("aria-label", shouldShow ? "隐藏OCR置信度" : "显示OCR置信度");
             const label = confidenceToggle.querySelector("[data-confidence-toggle-label]");
             if (label) {
-                label.textContent = shouldShow ? "隐藏置信度" : "显示置信度";
+                label.textContent = shouldShow ? "隐藏OCR置信度" : "显示OCR置信度";
             }
         });
     }
@@ -1108,9 +1329,20 @@ function initUnifiedProofreadWorkbench() {
     if (searchInput) {
         searchInput.addEventListener("input", () => filterUnifiedRows(root));
     }
+    root.querySelectorAll("[data-unified-status-filter], [data-unified-confidence-filter], [data-unified-confidence-threshold], [data-unified-sort]").forEach((control) => {
+        control.addEventListener("change", () => filterUnifiedRows(root));
+        control.addEventListener("input", () => filterUnifiedRows(root));
+    });
     const saveButton = root.querySelector("[data-unified-save]");
     if (saveButton) {
         saveButton.addEventListener("click", () => saveUnifiedEdits(root));
+    }
+    const previewLink = root.querySelector("[data-unified-download-preview]");
+    if (previewLink) {
+        previewLink.addEventListener("click", (event) => {
+            event.preventDefault();
+            openUnifiedDownloadPreview(root, previewLink);
+        });
     }
     initBulkConfidenceControls(root);
     const initiallySelected = root.querySelector(".unified-row--selected") || rows[0];
@@ -1121,6 +1353,27 @@ function initUnifiedProofreadWorkbench() {
         if (!event.target.closest(".standard-term-picker")) {
             closeAutocompleteResults(root);
         }
+    });
+}
+
+function initWorkbookPreview() {
+    const tabs = Array.from(document.querySelectorAll("[data-workbook-preview-tab]"));
+    const sheets = Array.from(document.querySelectorAll("[data-workbook-preview-sheet]"));
+    if (!tabs.length || !sheets.length) {
+        return;
+    }
+    tabs.forEach((tab) => {
+        tab.addEventListener("click", () => {
+            const selected = tab.getAttribute("data-workbook-preview-tab") || "0";
+            tabs.forEach((candidate) => {
+                const active = candidate.getAttribute("data-workbook-preview-tab") === selected;
+                candidate.classList.toggle("button--active", active);
+                candidate.classList.toggle("button--secondary", !active);
+            });
+            sheets.forEach((sheet) => {
+                sheet.hidden = sheet.getAttribute("data-workbook-preview-sheet") !== selected;
+            });
+        });
     });
 }
 
@@ -1135,4 +1388,5 @@ document.addEventListener("DOMContentLoaded", () => {
     initRawReviewSheet();
     initMappingReviewSheet();
     initUnifiedProofreadWorkbench();
+    initWorkbookPreview();
 });

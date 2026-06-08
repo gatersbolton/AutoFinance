@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+{% block title %}{{ title }} | {{ settings.app_name }}{% endblock %}
+{% block content %}
+<section class="page-heading">
+    <div>
+        <p class="eyebrow">实际下载版</p>
+        <h1>{{ title }}</h1>
+    </div>
+    <div class="actions">
+        <a class="button button--primary" href="{{ download_url }}">下载此版本</a>
+        <a class="button button--secondary" href="{{ return_url }}">返回</a>
+    </div>
+</section>
+
+<section class="card workbook-preview">
+    <div class="sheet-tabs" data-workbook-preview-tabs>
+        {% for sheet in preview.sheets %}
+        <button class="button {% if loop.first %}button--active{% else %}button--secondary{% endif %}" type="button" data-workbook-preview-tab="{{ loop.index0 }}">
+            {{ sheet.name }}
+        </button>
+        {% endfor %}
+    </div>
+
+    {% for sheet in preview.sheets %}
+    <article class="workbook-preview__sheet" data-workbook-preview-sheet="{{ loop.index0 }}" {% if not loop.first %}hidden{% endif %}>
+        <div class="panel-heading">
+            <h2>{{ sheet.name }}</h2>
+            {% if sheet.truncated %}
+            <p class="todo-note">预览只展示前 {{ sheet.rows_rendered }} 行、前 {{ sheet.rows[0]|length if sheet.rows else 0 }} 列。</p>
+            {% endif %}
+        </div>
+        <div class="spreadsheet-wrap workbook-preview__wrap">
+            <table class="spreadsheet-table workbook-preview__table">
+                <tbody>
+                    {% for row in sheet.rows %}
+                    {% set is_header_row = loop.index0 == 0 %}
+                    <tr>
+                        {% for value in row %}
+                            {% if is_header_row %}
+                            <th>{{ value }}</th>
+                            {% else %}
+                            <td>{{ value }}</td>
+                            {% endif %}
+                        {% endfor %}
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </article>
+    {% endfor %}
+</section>
+{% endblock %}

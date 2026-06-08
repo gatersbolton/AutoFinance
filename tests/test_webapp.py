@@ -203,6 +203,8 @@ class WebAppTests(unittest.TestCase):
         source_file: Path | str | None = None,
         bbox_json: str = '[{"x":1,"y":2},{"x":3,"y":4}]',
         confidence: str = "",
+        text_confidence: str = "",
+        value_confidence: str = "",
     ) -> Path:
         RAW_METRICS_GENERATED_ROOT.mkdir(parents=True, exist_ok=True)
         tempdir = tempfile.TemporaryDirectory(dir=RAW_METRICS_GENERATED_ROOT)
@@ -232,6 +234,8 @@ class WebAppTests(unittest.TestCase):
                     "source_cell_ref": "CASE1:1:aliyun_table:0:1-1:2-2",
                     "page_no": "1",
                     "bbox_json": bbox_json,
+                    "text_confidence": text_confidence,
+                    "value_confidence": value_confidence or confidence,
                     "evidence_path": str(source_pdf),
                     "source_file": str(detailed_source_file),
                     "provider": "aliyun_table",
@@ -240,7 +244,19 @@ class WebAppTests(unittest.TestCase):
                     "confidence": confidence,
                 }
             ],
-            ["source_cell_ref", "page_no", "bbox_json", "evidence_path", "source_file", "provider", "doc_id", "value_type", "confidence"],
+            [
+                "source_cell_ref",
+                "page_no",
+                "bbox_json",
+                "text_confidence",
+                "value_confidence",
+                "evidence_path",
+                "source_file",
+                "provider",
+                "doc_id",
+                "value_type",
+                "confidence",
+            ],
         )
         self.addCleanup(lambda: shutil.rmtree(STANDARD_METRICS_GENERATED_ROOT / Path(tempdir.name).name, ignore_errors=True))
         return raw_path
@@ -917,7 +933,9 @@ class WebAppTests(unittest.TestCase):
         self.assertNotIn("stage-flow", continue_response.text)
         self.assertNotIn("stage-card", continue_response.text)
         self.assertIn(f'href="/documents/{doc_id}/download/combined_metrics_xlsx"', continue_response.text)
+        self.assertIn(f'href="/documents/{doc_id}/download-preview/combined_metrics_xlsx"', continue_response.text)
         self.assertIn(">下载数据表</a>", continue_response.text)
+        self.assertIn(">预览下载版</a>", continue_response.text)
         self.assertIn("高级下载", continue_response.text)
         self.assertIn(f'href="/documents/{doc_id}/download/raw_metrics_csv"', continue_response.text)
         self.assertIn(f'href="/documents/{doc_id}/download/standardized_metrics_csv"', continue_response.text)
@@ -926,6 +944,13 @@ class WebAppTests(unittest.TestCase):
         self.assertIn(f'href="/documents/{doc_id}/proofread"', continue_response.text)
         self.assertIn(f'action="/documents/{doc_id}/standard-metrics/run"', continue_response.text)
         self.assertIn("重新生成标准指标 / 标准映射", continue_response.text)
+
+        preview_response = self.client.get(f"/documents/{doc_id}/download-preview/combined_metrics_xlsx")
+        self.assertEqual(preview_response.status_code, 200)
+        self.assertIn("实际下载版", preview_response.text)
+        self.assertIn("数据总表", preview_response.text)
+        self.assertIn("标准化数据", preview_response.text)
+        self.assertIn(f'href="/documents/{doc_id}/download/combined_metrics_xlsx"', preview_response.text)
 
         browser_submit = self.client.post(
             f"/documents/{doc_id}/mapping/decision",
@@ -1053,9 +1078,18 @@ class WebAppTests(unittest.TestCase):
         self.assertEqual(download.status_code, 200)
         self.assertTrue(download.content.startswith(b"PK"))
 
+        preview = self.client.get(f"/jobs/{job_id}/download-preview/combined_metrics_xlsx")
+        self.assertEqual(preview.status_code, 200)
+        self.assertIn("实际下载版", preview.text)
+        self.assertIn("数据总表", preview.text)
+        self.assertIn("标准化数据", preview.text)
+        self.assertIn("12,345.67", preview.text)
+        self.assertIn(f'href="/jobs/{job_id}/download/combined_metrics_xlsx"', preview.text)
+
         detail = self.client.get(f"/jobs/{job_id}")
         self.assertEqual(detail.status_code, 200)
         self.assertIn("下载数据表", detail.text)
+        self.assertIn("预览下载版", detail.text)
         self.assertIn("高级下载", detail.text)
         self.assertIn("原始数据 CSV", detail.text)
         self.assertIn("标准化数据 CSV", detail.text)
@@ -1359,7 +1393,7 @@ class WebAppTests(unittest.TestCase):
 
     def test_unified_proofread_page_loads_combined_table_and_saves_edits(self):
         job_id = self._create_job("unified review")
-        raw_path = self._create_raw_metrics_fixture(metric_name="货币资金", metric_value="12345.67", confidence="0.92")
+        raw_path = self._create_raw_metrics_fixture(metric_name="货币资金", metric_value="12345.67", confidence="0.92", text_confidence="0.91")
         self.client.post(
             f"/jobs/{job_id}/standard-metrics/run",
             data={"raw_metrics_path": str(raw_path)},
@@ -1368,7 +1402,7 @@ class WebAppTests(unittest.TestCase):
         response = self.client.get(f"/jobs/{job_id}/proofread")
         self.assertEqual(response.status_code, 200)
         self.assertIn("data-unified-proofread-workbench", response.text)
-        self.assertIn("/static/app.js?v=proofread-source-cache-20260520-1", response.text)
+        self.assertIn("/static/app.js?v=proofread-confidence-preview-20260601-1", response.text)
         self.assertIn("source-panel", response.text)
         self.assertIn("sheet-panel", response.text)
         self.assertIn("data-page-image-key=", response.text)
@@ -1380,11 +1414,21 @@ class WebAppTests(unittest.TestCase):
         self.assertNotIn("采用并记住", response.text)
         self.assertIn("12,345.67", response.text)
         self.assertIn('class="confidence-switch"', response.text)
-        self.assertIn("data-confidence-text hidden", response.text)
-        self.assertIn('class="todo-note unified-confidence-summary" data-confidence-text hidden', response.text)
+        self.assertIn("显示OCR置信度", response.text)
+        self.assertIn("data-ocr-confidence-text hidden", response.text)
+        self.assertIn('class="todo-note unified-confidence-summary" data-ocr-confidence-text hidden', response.text)
+        self.assertIn("data-unified-status-filter", response.text)
+        self.assertIn("data-unified-confidence-filter", response.text)
+        self.assertIn("data-unified-confidence-threshold", response.text)
+        self.assertIn('value="90"', response.text)
+        self.assertIn("data-unified-sort", response.text)
         self.assertIn("data-bulk-confidence-preview-form", response.text)
-        self.assertIn("阿里云 92%", response.text)
+        self.assertIn("文字 91%", response.text)
+        self.assertIn("数字 92%", response.text)
         self.assertIn("映射 100%", response.text)
+        self.assertIn("data-mapping-confidence-text", response.text)
+        self.assertIn("预览下载版", response.text)
+        self.assertIn("data-unified-download-preview", response.text)
         self.assertNotIn("来源页码", response.text)
         self.assertNotIn("unified-col-source-page", response.text)
         self.assertNotIn(">通过</button>", response.text)
@@ -1393,8 +1437,14 @@ class WebAppTests(unittest.TestCase):
         self.assertNotIn("data-sheet-tabs", response.text)
         self.assertNotIn("没有找到标准术语", response.text)
 
+        self.assertEqual(format_metric_number("396149420.6"), "396,149,420.60")
         self.assertEqual(format_metric_number("396149420.62"), "396,149,420.62")
+        self.assertEqual(format_metric_number("396149420.625"), "396,149,420.63")
+        self.assertEqual(parse_metric_number_input("396,149,420.6")["value"], "396149420.60")
         self.assertEqual(parse_metric_number_input("396,149,420.62")["value"], "396149420.62")
+        self.assertEqual(parse_metric_number_input("396,149,420.625")["value"], "396149420.63")
+        self.assertTrue(parse_metric_number_input("396,149,420.625")["precision_adjusted"])
+        self.assertFalse(parse_metric_number_input("12.34%")["valid"])
 
         save_response = self.client.post(
             f"/jobs/{job_id}/proofread/save",
@@ -1405,7 +1455,7 @@ class WebAppTests(unittest.TestCase):
                         "item_id": "unirev_000001",
                         "edit_type": "value_change",
                         "previous_value": "12345.67",
-                        "new_value": "12,346.67",
+                        "new_value": "12,346.675",
                     },
                     {
                         "item_id": "unirev_000001",
@@ -1419,6 +1469,9 @@ class WebAppTests(unittest.TestCase):
             },
         )
         self.assertEqual(save_response.status_code, 200)
+        self.assertTrue(save_response.json()["combined_workbook_refreshed"])
+        self.assertTrue(Path(save_response.json()["combined_metrics_xlsx"]).exists())
+        self.assertEqual(save_response.json()["precision_warnings_total"], 1)
         job = get_job(self.settings, job_id)
         action_dir = unified_review_dir(job)
         actions_path = action_dir / "unified_review_actions.json"
@@ -1429,9 +1482,23 @@ class WebAppTests(unittest.TestCase):
         self.assertTrue(summary_path.exists())
         actions = json.loads(actions_path.read_text(encoding="utf-8"))
         self.assertEqual([item["edit_type"] for item in actions[-2:]], ["value_change", "mapping_change"])
-        self.assertEqual(actions[-2]["new_value"], "12346.67")
+        self.assertEqual(actions[-2]["new_value"], "12346.68")
         self.assertEqual(actions[-1]["new_code"], "ZT_002")
         self.assertEqual(actions[-1]["new_name"], "短期借款")
+        state = load_simple_flow_state(job)
+        workbook = load_workbook(Path(state["combined_metrics_xlsx"]), data_only=True)
+        total_sheet = workbook["数据总表"]
+        value_col = self._column_index(total_sheet, "指标数值")
+        code_col = self._column_index(total_sheet, "标准指标编码")
+        name_col = self._column_index(total_sheet, "标准指标名称")
+        self.assertEqual(total_sheet.cell(row=2, column=value_col).value, 12346.68)
+        self.assertEqual(total_sheet.cell(row=2, column=code_col).value, "ZT_002")
+        self.assertEqual(total_sheet.cell(row=2, column=name_col).value, "短期借款")
+        workbook.close()
+        preview_response = self.client.get(f"/jobs/{job_id}/download-preview/combined_metrics_xlsx")
+        self.assertEqual(preview_response.status_code, 200)
+        self.assertIn("12,346.68", preview_response.text)
+        self.assertIn("短期借款", preview_response.text)
         saved_page = self.client.get(f"/jobs/{job_id}/proofread")
         self.assertEqual(saved_page.status_code, 200)
         self.assertIn("数值已修改", saved_page.text)
@@ -1440,7 +1507,7 @@ class WebAppTests(unittest.TestCase):
         self.assertIn('data-value-changed="true"', saved_page.text)
         self.assertIn('data-mapping-changed="true"', saved_page.text)
         self.assertIn('data-original-value="12345.67"', saved_page.text)
-        self.assertIn('data-saved-value="12346.67"', saved_page.text)
+        self.assertIn('data-saved-value="12346.68"', saved_page.text)
         self.assertIn('data-original-code="ZT_001"', saved_page.text)
         self.assertIn('data-saved-code="ZT_002"', saved_page.text)
         self.assertTrue((raw_review_dir(job) / "raw_review_actions.json").exists())
@@ -1495,6 +1562,9 @@ class WebAppTests(unittest.TestCase):
         self.assertIn('statusBadge("value_changed", "数值已修改")', script)
         self.assertIn('statusBadge("term_changed", "术语已修改")', script)
         self.assertIn("valueInput.dataset.savedValue", script)
+        self.assertIn("data-ocr-confidence-text", script)
+        self.assertIn("openUnifiedDownloadPreview", script)
+        self.assertIn("data-row-page-chip", script)
         self.assertNotIn('setAttribute("data-original-value"', script)
         self.assertNotIn("search();\n    });\n    input.addEventListener(\"click\"", script)
 

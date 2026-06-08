@@ -39,6 +39,7 @@
             <div class="actions">
                 {% if simple_flow.combined_ready %}
                 <a class="button button--primary" href="{{ url_prefix }}/jobs/{{ job.job_id }}/download/combined_metrics_xlsx">下载数据表</a>
+                <a class="button button--secondary" href="{{ url_prefix }}/jobs/{{ job.job_id }}/download-preview/combined_metrics_xlsx" target="_blank" rel="noopener">预览下载版</a>
                 {% endif %}
                 <a class="button button--secondary" href="{{ url_prefix }}/jobs/{{ job.job_id }}/proofread">进入统一校对</a>
             </div>
@@ -67,6 +68,7 @@
             <div class="actions">
                 {% if simple_flow.combined_ready %}
                 <a class="button button--primary" href="{{ url_prefix }}/jobs/{{ job.job_id }}/download/combined_metrics_xlsx">下载数据表</a>
+                <a class="button button--secondary" href="{{ url_prefix }}/jobs/{{ job.job_id }}/download-preview/combined_metrics_xlsx" target="_blank" rel="noopener">预览下载版</a>
                 {% endif %}
                 <a class="button button--secondary" href="{{ url_prefix }}/jobs/{{ job.job_id }}/proofread">进入统一校对</a>
             </div>
@@ -131,6 +133,7 @@
     {% endfor %}
     {% if simple_flow.combined_ready %}
     <a class="button button--primary" href="{{ url_prefix }}/jobs/{{ job.job_id }}/download/combined_metrics_xlsx">下载数据表</a>
+    <a class="button button--secondary" href="{{ url_prefix }}/jobs/{{ job.job_id }}/download-preview/combined_metrics_xlsx" target="_blank" rel="noopener">预览下载版</a>
     {% elif workbook_artifact.item and workbook_artifact.item.exists %}
     <a class="button button--primary" href="{{ url_prefix }}/jobs/{{ job.job_id }}/download/filled_workbook">下载会计报表</a>
     {% endif %}

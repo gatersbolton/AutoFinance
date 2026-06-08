@@ -43,6 +43,8 @@ DETAILED_OUTPUT_FIELDS = [
     "company_resolution_method",
     "source_cell_ref",
     "bbox_json",
+    "text_confidence",
+    "value_confidence",
     "confidence",
     "evidence_path",
     "issue_flags",
@@ -144,6 +146,8 @@ class RawMetricCandidate:
     company_resolution_method: str
     source_cell_ref: str
     bbox_json: str
+    text_confidence: Optional[float]
+    value_confidence: Optional[float]
     confidence: Optional[float]
     evidence_path: str = ""
     issue_flags: List[str] = field(default_factory=list)

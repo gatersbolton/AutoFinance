@@ -10,6 +10,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Redirect
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 
 from .base_path import app_path
+from .combined_downloads import build_workbook_preview
 from .config import WebAppSettings
 from .db import cancel_job, list_jobs, requeue_job
 from .jobs import (
@@ -58,6 +59,7 @@ from .simple_flow import (
     build_mapping_review_sheet,
     build_raw_review_sheet,
     find_review_item,
+    job_root,
     load_mapping_review_items,
     load_raw_review_items,
     load_simple_flow_state,
@@ -402,8 +404,12 @@ async def unified_proofread_save(request: Request, job_id: str) -> JSONResponse:
     reviewer_name = str(payload.get("reviewer_name", "") or "") if isinstance(payload, dict) else ""
     try:
         summary = save_unified_review_actions(job, edits, reviewer_name=reviewer_name)
+        combined_summary = refresh_combined_metrics_workbook(settings, job)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    summary["combined_workbook_refreshed"] = bool(combined_summary.get("pass"))
+    summary["combined_metrics_xlsx"] = str(combined_summary.get("workbook_path", "") or combined_summary.get("output_path", "") or "")
+    summary["precision_warnings_total"] = int(summary.get("precision_warnings_total", 0) or 0)
     return JSONResponse(summary)
 
 
@@ -710,7 +716,16 @@ def queue_job_route(request: Request, job_id: str) -> RedirectResponse:
 
 @router.get("/jobs/{job_id}/download/{slug}", dependencies=[Depends(password_gate)])
 def download_artifact(request: Request, job_id: str, slug: str) -> FileResponse:
-    job = require_job(get_settings(request), job_id)
+    settings = get_settings(request)
+    job = require_job(settings, job_id)
+    if slug == "combined_metrics_xlsx":
+        state = load_simple_flow_state(job)
+        path_text = str(state.get("combined_metrics_xlsx", "") or "")
+        path = Path(path_text) if path_text else Path()
+        action_path = job_root(job) / "unified_review" / "unified_review_actions.json"
+        needs_refresh = not path_text or not path.exists() or (action_path.exists() and path.exists() and action_path.stat().st_mtime > path.stat().st_mtime)
+        if needs_refresh and (state.get("raw_ready") or state.get("standard_ready")):
+            refresh_combined_metrics_workbook(settings, job)
     artifact = resolve_download_artifact(job, slug)
     if artifact is None:
         raise HTTPException(status_code=404, detail="文件不存在。")
@@ -718,6 +733,35 @@ def download_artifact(request: Request, job_id: str, slug: str) -> FileResponse:
     if not artifact.exists or not path.exists():
         raise HTTPException(status_code=404, detail="文件未生成。")
     return FileResponse(path=str(path), filename=artifact.download_name)
+
+
+@router.get("/jobs/{job_id}/download-preview/combined_metrics_xlsx", response_class=HTMLResponse, dependencies=[Depends(password_gate)])
+def combined_metrics_download_preview(request: Request, job_id: str) -> HTMLResponse:
+    settings = get_settings(request)
+    job = require_job(settings, job_id)
+    state = load_simple_flow_state(job)
+    path_text = str(state.get("combined_metrics_xlsx", "") or "")
+    path = Path(path_text) if path_text else Path()
+    action_path = job_root(job) / "unified_review" / "unified_review_actions.json"
+    needs_refresh = not path_text or not path.exists() or (action_path.exists() and path.exists() and action_path.stat().st_mtime > path.stat().st_mtime)
+    if needs_refresh and (state.get("raw_ready") or state.get("standard_ready")):
+        refresh_combined_metrics_workbook(settings, job)
+        state = load_simple_flow_state(job)
+        path_text = str(state.get("combined_metrics_xlsx", "") or "")
+        path = Path(path_text) if path_text else Path()
+    if not path_text or not path.exists():
+        raise HTTPException(status_code=404, detail="数据表尚未生成。")
+    return _render(
+        request,
+        "download_preview.html",
+        {
+            "job": job,
+            "title": "数据表预览",
+            "preview": build_workbook_preview(path),
+            "download_url": _app_url(request, f"/jobs/{job_id}/download/combined_metrics_xlsx"),
+            "return_url": _app_url(request, f"/jobs/{job_id}"),
+        },
+    )
 
 
 @router.get("/jobs/{job_id}/review", response_class=HTMLResponse, dependencies=[Depends(password_gate)])

@@ -78,6 +78,7 @@ def build_combined_metrics_workbook(
     mapping_review_items_path: str | Path | None,
     output_path: str | Path,
     metadata: dict[str, Any] | None = None,
+    unified_review_actions_path: str | Path | None = None,
 ) -> dict[str, Any]:
     metadata = metadata or {}
     output = _resolve_path(output_path)
@@ -89,18 +90,37 @@ def build_combined_metrics_workbook(
     raw_rows = _read_table(raw_path, preferred_sheet="raw_metrics") if raw_path and raw_path.exists() else []
     if not raw_rows:
         warnings.append("未找到可用的原始数据。")
+    raw_detail_path = raw_path.parent / "raw_metrics_detailed.csv" if raw_path else None
+    raw_detail_rows = _read_table(raw_detail_path, preferred_sheet="raw_metrics_detailed") if raw_detail_path and raw_detail_path.exists() else []
+    raw_rows = _with_raw_metric_ids(raw_rows, raw_detail_rows)
 
     standard_rows = (
         _read_table(standard_path, preferred_sheet="standardized_metrics") if standard_path and standard_path.exists() else []
     )
     if not standard_rows:
         warnings.append("未找到可用的标准化数据，工作簿将只包含已生成的数据。")
+    standard_detail_path = standard_path.parent / "standardized_metrics_detailed.csv" if standard_path else None
+    standard_detail_rows = (
+        _read_table(standard_detail_path, preferred_sheet="standardized_metrics_detailed")
+        if standard_detail_path and standard_detail_path.exists()
+        else []
+    )
+    standard_rows = _with_raw_metric_ids(standard_rows, standard_detail_rows)
 
     if (not review_path or not review_path.exists()) and standard_path and standard_path.exists():
         sibling_review = standard_path.parent / "mapping_review_items.csv"
         if sibling_review.exists():
             review_path = sibling_review
     review_rows = _read_table(review_path, preferred_sheet="mapping_review_items") if review_path and review_path.exists() else []
+    action_path = _resolve_optional_path(unified_review_actions_path)
+    action_rows = _load_unified_review_actions(action_path)
+    overlay_summary = _apply_unified_review_overlays(
+        raw_rows,
+        standard_rows,
+        review_rows,
+        action_rows,
+        mapping_not_before_timestamp=standard_path.stat().st_mtime if standard_path and standard_path.exists() else None,
+    )
 
     combined_rows = _build_combined_rows(raw_rows, standard_rows)
     normalized_standard_rows = [_normalize_standard_row(row) for row in standard_rows]
@@ -153,6 +173,8 @@ def build_combined_metrics_workbook(
         "advanced_downloads_available": bool(raw_path or standard_path),
         "warnings": warnings,
         "path_hygiene_pass": _path_hygiene_pass(output, metadata),
+        "unified_review_actions_source": str(action_path) if action_path else "",
+        **overlay_summary,
     }
     for key in ("doc_id", "job_id", "stage"):
         if key in metadata:
@@ -162,6 +184,169 @@ def build_combined_metrics_workbook(
     if summary_path:
         _write_json(summary_path, summary)
     return summary
+
+
+def build_workbook_preview(workbook_path: str | Path, *, max_rows_per_sheet: int = 300, max_cols_per_sheet: int = 40) -> dict[str, Any]:
+    path = _resolve_path(workbook_path)
+    workbook = load_workbook(path, data_only=True, read_only=True)
+    try:
+        sheets: list[dict[str, Any]] = []
+        for worksheet in workbook.worksheets:
+            rows: list[list[str]] = []
+            for row in worksheet.iter_rows(max_row=max_rows_per_sheet, max_col=max_cols_per_sheet):
+                rows.append([_format_preview_cell(cell.value, cell.number_format) for cell in row])
+            while rows and all(value == "" for value in rows[-1]):
+                rows.pop()
+            sheets.append(
+                {
+                    "name": worksheet.title,
+                    "rows": rows,
+                    "rows_rendered": len(rows),
+                    "max_row": worksheet.max_row,
+                    "max_column": worksheet.max_column,
+                    "truncated": worksheet.max_row > max_rows_per_sheet or worksheet.max_column > max_cols_per_sheet,
+                }
+            )
+    finally:
+        workbook.close()
+    return {
+        "workbook_path": str(path),
+        "filename": path.name,
+        "sheets": sheets,
+        "sheets_total": len(sheets),
+    }
+
+
+def _format_preview_cell(value: Any, number_format: str = "") -> str:
+    if value is None:
+        return ""
+    if isinstance(value, datetime):
+        return value.strftime("%Y-%m-%d")
+    if isinstance(value, date):
+        return value.strftime("%Y-%m-%d")
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        format_text = str(number_format or "")
+        if ".00" in format_text or "0.00" in format_text:
+            return f"{float(value):,.2f}"
+        return f"{value:,}" if isinstance(value, int) else str(value)
+    return str(value)
+
+
+def _with_raw_metric_ids(rows: list[dict[str, Any]], detail_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    for index, row in enumerate(rows):
+        item = dict(row)
+        detail = detail_rows[index] if index < len(detail_rows) else {}
+        raw_metric_id = _first(item, "raw_metric_id") or _first(detail, "raw_metric_id", "source_cell_ref")
+        if raw_metric_id:
+            item["_raw_metric_id"] = str(raw_metric_id)
+        result.append(item)
+    return result
+
+
+def _load_unified_review_actions(path: Path | None) -> list[dict[str, Any]]:
+    if path is None or not path.exists():
+        return []
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return []
+    return [item for item in payload if isinstance(item, dict)] if isinstance(payload, list) else []
+
+
+def _apply_unified_review_overlays(
+    raw_rows: list[dict[str, Any]],
+    standard_rows: list[dict[str, Any]],
+    review_rows: list[dict[str, Any]],
+    action_rows: list[dict[str, Any]],
+    *,
+    mapping_not_before_timestamp: float | None = None,
+) -> dict[str, Any]:
+    value_overrides, mapping_overrides = _latest_unified_review_overrides(
+        action_rows,
+        mapping_not_before_timestamp=mapping_not_before_timestamp,
+    )
+    for rows in (raw_rows, standard_rows, review_rows):
+        for row in rows:
+            raw_metric_id = _row_raw_metric_id(row)
+            if not raw_metric_id:
+                continue
+            value_action = value_overrides.get(raw_metric_id)
+            if value_action:
+                _apply_value_override(row, value_action)
+            mapping_action = mapping_overrides.get(raw_metric_id)
+            if mapping_action:
+                _apply_mapping_override(row, mapping_action)
+    return {
+        "unified_review_actions_total": len(action_rows),
+        "unified_review_value_overrides_total": len(value_overrides),
+        "unified_review_mapping_overrides_total": len(mapping_overrides),
+    }
+
+
+def _latest_unified_review_overrides(
+    action_rows: list[dict[str, Any]], *, mapping_not_before_timestamp: float | None = None
+) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
+    value_overrides: dict[str, dict[str, Any]] = {}
+    mapping_overrides: dict[str, dict[str, Any]] = {}
+    for action in action_rows:
+        raw_metric_id = str(action.get("raw_metric_id", "") or "")
+        if not raw_metric_id:
+            continue
+        edit_type = str(action.get("edit_type", "") or "")
+        if edit_type in {"value_change", "reset_value"}:
+            value_overrides[raw_metric_id] = action
+        elif edit_type in {"mapping_change", "reset_mapping"}:
+            if mapping_not_before_timestamp is not None:
+                action_timestamp = _action_created_timestamp(action)
+                if action_timestamp is not None and action_timestamp < mapping_not_before_timestamp:
+                    continue
+            mapping_overrides[raw_metric_id] = action
+    return value_overrides, mapping_overrides
+
+
+def _row_raw_metric_id(row: dict[str, Any]) -> str:
+    return str(row.get("_raw_metric_id") or row.get("raw_metric_id") or row.get("source_cell_ref") or "")
+
+
+def _apply_value_override(row: dict[str, Any], action: dict[str, Any]) -> None:
+    value = str(action.get("new_value", "") or "")
+    for key in ("指标数值", "metric_value", "value_raw"):
+        if key in row:
+            row[key] = value
+
+
+def _apply_mapping_override(row: dict[str, Any], action: dict[str, Any]) -> None:
+    code = str(action.get("new_code", "") or "")
+    name = str(action.get("new_name", "") or "")
+    for key in ("标准指标编码", "standard_code", "candidate_code", "current_code", "final_code", "selected_code"):
+        if key in row:
+            row[key] = code
+    for key in ("标准指标名称", "standard_name", "candidate_name", "current_name", "final_name", "selected_name"):
+        if key in row:
+            row[key] = name
+    mapped = bool(code or name)
+    for key in ("映射状态", "mapping_status"):
+        if key in row:
+            row[key] = "mapped" if mapped else "unmapped"
+    for key in ("映射方法", "mapping_method", "candidate_method"):
+        if key in row:
+            row[key] = "manual_once" if mapped else "none"
+    for key in ("是否需要人工校对", "review_required"):
+        if key in row:
+            row[key] = "否" if mapped else "是"
+    if "mapping_decision" in row:
+        row["mapping_decision"] = "accept_once" if mapped else "reject"
+
+
+def _action_created_timestamp(action: dict[str, Any]) -> float | None:
+    created_at = str(action.get("created_at", "") or "").strip()
+    if not created_at:
+        return None
+    try:
+        return datetime.fromisoformat(created_at.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
 
 
 def _build_combined_rows(raw_rows: list[dict[str, Any]], standard_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -488,4 +673,3 @@ def _is_within(path: Path, root: Path) -> bool:
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
-

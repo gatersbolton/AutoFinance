@@ -253,6 +253,7 @@ def refresh_combined_metrics_workbook(settings: WebAppSettings, job: JobRecord) 
             "summary_path": combined_download_summary_path(job),
             "path_hygiene_roots": [settings.runtime_root, STANDARD_METRICS_GENERATED_ROOT],
         },
+        unified_review_actions_path=job_root(job) / "unified_review" / "unified_review_actions.json",
     )
     write_json(settings.runtime_root / "combined_download_summary.json", summary)
     return summary
@@ -543,7 +544,9 @@ def load_raw_review_items(job: JobRecord, *, apply_actions: bool = True) -> list
                 "period_role_raw": detailed.get("period_role_raw", ""),
                 "value_raw": detailed.get("value_raw", ""),
                 "value_type": detailed.get("value_type", ""),
-                "confidence": detailed.get("confidence", ""),
+                "text_confidence": detailed.get("text_confidence", ""),
+                "value_confidence": detailed.get("value_confidence") or detailed.get("confidence", ""),
+                "confidence": detailed.get("confidence") or detailed.get("value_confidence", ""),
             }
         )
     return _apply_raw_review_table_edits(job, items) if apply_actions else items

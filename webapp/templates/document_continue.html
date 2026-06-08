@@ -80,6 +80,7 @@
     <div class="document-action-actions">
         {% if simple_flow.combined_ready %}
         <a class="button button--download" href="{{ url_prefix }}/documents/{{ document.doc_id }}/download/combined_metrics_xlsx">下载数据表</a>
+        <a class="button button--secondary" href="{{ url_prefix }}/documents/{{ document.doc_id }}/download-preview/combined_metrics_xlsx" target="_blank" rel="noopener">预览下载版</a>
         {% elif not simple_flow.raw_ready %}
         <form action="{{ url_prefix }}/documents/{{ document.doc_id }}/raw-metrics/run" method="post">
             <button class="button button--primary" type="submit">提取原始数据</button>

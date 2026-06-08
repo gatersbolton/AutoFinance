@@ -4,6 +4,7 @@ import csv
 import json
 import re
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -88,15 +89,11 @@ def format_metric_number(value: object, *, value_type: str = "") -> str:
     match = _METRIC_NUMBER_RE.match(normalized)
     if not match:
         return text
-    sign, int_part, frac_part, leading_frac = match.groups()
-    if leading_frac is not None:
-        int_part = "0"
-        frac_part = leading_frac
-    int_part = int_part or "0"
-    grouped = f"{int(int_part):,}"
-    if frac_part is None:
-        return f"{sign}{grouped}"
-    return f"{sign}{grouped}.{frac_part}"
+    try:
+        number = _canonical_metric_decimal(normalized)
+    except InvalidOperation:
+        return text
+    return f"{number:,.2f}"
 
 
 def parse_metric_number_input(value: object, *, value_type: str = "") -> dict[str, Any]:
@@ -109,13 +106,22 @@ def parse_metric_number_input(value: object, *, value_type: str = "") -> dict[st
     match = _METRIC_NUMBER_RE.match(normalized)
     if not match:
         return {"valid": False, "value": text, "reason": "invalid_number"}
-    sign, int_part, frac_part, leading_frac = match.groups()
-    if leading_frac is not None:
-        return {"valid": True, "value": f"{sign}0.{leading_frac}", "reason": ""}
-    int_part = str(int(int_part or "0"))
-    if frac_part is None:
-        return {"valid": True, "value": f"{sign}{int_part}", "reason": ""}
-    return {"valid": True, "value": f"{sign}{int_part}.{frac_part}", "reason": ""}
+    try:
+        number = _canonical_metric_decimal(normalized)
+    except InvalidOperation:
+        return {"valid": False, "value": text, "reason": "invalid_number"}
+    frac_text = match.group(3) if match.group(3) is not None else match.group(4)
+    extra_precision = bool(frac_text and len(frac_text) > 2 and any(char != "0" for char in frac_text[2:]))
+    return {
+        "valid": True,
+        "value": f"{number:.2f}",
+        "reason": "",
+        "precision_adjusted": extra_precision,
+    }
+
+
+def _canonical_metric_decimal(normalized: str) -> Decimal:
+    return Decimal(normalized).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
 
 def build_unified_review_sheet(job: JobRecord, selected_item_id: str = "") -> dict[str, Any]:
@@ -126,6 +132,8 @@ def build_unified_review_sheet(job: JobRecord, selected_item_id: str = "") -> di
             "selected_item": None,
             "confidence_available_total": 0,
             "confidence_missing_total": 0,
+            "text_confidence_available_total": 0,
+            "value_confidence_available_total": 0,
             "message": "请先提取原始数据。",
         }
     selected = find_review_item(items, selected_item_id) if selected_item_id else None
@@ -139,6 +147,8 @@ def build_unified_review_sheet(job: JobRecord, selected_item_id: str = "") -> di
         "selected_item": selected,
         "confidence_available_total": sum(1 for item in items if item.get("confidence_available")),
         "confidence_missing_total": sum(1 for item in items if not item.get("confidence_available")),
+        "text_confidence_available_total": sum(1 for item in items if item.get("text_confidence_available")),
+        "value_confidence_available_total": sum(1 for item in items if item.get("value_confidence_available")),
         "message": "",
     }
 
@@ -189,8 +199,14 @@ def load_unified_review_items(job: JobRecord) -> list[dict[str, Any]]:
         )
 
         provider = str(raw.get("provider") or mapping.get("provider") or "")
-        confidence_raw = str(raw.get("confidence", "") or mapping.get("confidence", "") or "").strip()
-        confidence_display = _format_confidence(provider, confidence_raw)
+        text_confidence_raw = str(raw.get("text_confidence", "") or "").strip()
+        value_confidence_raw = str(raw.get("value_confidence", "") or raw.get("confidence", "") or mapping.get("confidence", "") or "").strip()
+        confidence_raw = value_confidence_raw
+        text_confidence_score = _confidence_score(text_confidence_raw)
+        value_confidence_score = _confidence_score(value_confidence_raw)
+        text_confidence_display = _format_ocr_confidence("文字", text_confidence_raw)
+        value_confidence_display = _format_ocr_confidence("数字", value_confidence_raw)
+        confidence_display = value_confidence_display
         source_term_bbox_json = str(mapping.get("source_term_bbox_json") or "")
         source_value_bbox_json = str(mapping.get("source_value_bbox_json") or raw.get("source_bbox_json") or mapping.get("source_bbox_json") or "")
         section_key = "|".join(
@@ -241,7 +257,17 @@ def load_unified_review_items(job: JobRecord) -> list[dict[str, Any]]:
             "bbox_state": "has-bbox" if (source_term_bbox_json or source_value_bbox_json) else "missing-bbox",
             "confidence": confidence_raw,
             "confidence_display": confidence_display or "未记录",
-            "confidence_available": bool(confidence_display),
+            "confidence_available": bool(text_confidence_display or value_confidence_display),
+            "text_confidence": text_confidence_raw,
+            "value_confidence": value_confidence_raw,
+            "text_confidence_score": "" if text_confidence_score is None else f"{text_confidence_score:.6f}",
+            "value_confidence_score": "" if value_confidence_score is None else f"{value_confidence_score:.6f}",
+            "text_confidence_display": text_confidence_display or "文字 未记录",
+            "value_confidence_display": value_confidence_display or "数字 未记录",
+            "text_confidence_available": bool(text_confidence_display),
+            "value_confidence_available": bool(value_confidence_display),
+            "text_confidence_level": _confidence_level(text_confidence_score),
+            "value_confidence_level": _confidence_level(value_confidence_score),
             "mapping_confidence_display": "" if is_unmapped_without_suggestion else _format_mapping_confidence(mapping.get("mapping_confidence") or mapping.get("candidate_score") or mapping.get("映射置信度")),
             "ai_suggestion_label": str(mapping.get("ai_suggestion_label") or ""),
             "ai_confidence_display": str(mapping.get("ai_confidence_display") or ""),
@@ -264,6 +290,7 @@ def save_unified_review_actions(job: JobRecord, edits: Iterable[dict[str, Any]],
     by_raw_id = {str(item.get("raw_metric_id", "")): item for item in items}
     created_at = datetime.now(timezone.utc).isoformat()
     new_actions: list[dict[str, Any]] = []
+    precision_warnings_total = 0
     for edit in edits:
         if not isinstance(edit, dict):
             continue
@@ -281,6 +308,8 @@ def save_unified_review_actions(job: JobRecord, edits: Iterable[dict[str, Any]],
             if not parsed.get("valid"):
                 raise ValueError("数值格式有误，请输入普通数字或带千分位分隔符的数字。")
             action["new_value"] = str(parsed["value"])
+            if parsed.get("precision_adjusted"):
+                precision_warnings_total += 1
         new_actions.append(action)
 
     target_dir = unified_review_dir(job)
@@ -302,8 +331,11 @@ def save_unified_review_actions(job: JobRecord, edits: Iterable[dict[str, Any]],
         "new_actions_total": len(new_actions),
         "value_changes_total": sum(1 for action in new_actions if action.get("edit_type") in {"value_change", "reset_value"}),
         "mapping_changes_total": sum(1 for action in new_actions if action.get("edit_type") in {"mapping_change", "reset_mapping"}),
+        "precision_warnings_total": precision_warnings_total,
         "confidence_available_total": sum(1 for item in items if item.get("confidence_available")),
         "confidence_missing_total": sum(1 for item in items if not item.get("confidence_available")),
+        "text_confidence_available_total": sum(1 for item in items if item.get("text_confidence_available")),
+        "value_confidence_available_total": sum(1 for item in items if item.get("value_confidence_available")),
         "updated_at": created_at,
         "output_files": [str(csv_path), str(json_path), str(summary_path)],
     }
@@ -526,6 +558,38 @@ def _format_confidence(provider: str, raw_value: str) -> str:
     label = PROVIDER_LABELS_ZH.get(str(provider or "").strip(), str(provider or "").strip())
     value_text = f"{value:.0f}%" if abs(value - round(value)) < 0.01 else f"{value:.1f}%"
     return f"{label} {value_text}".strip()
+
+
+def _confidence_score(raw_value: object) -> float | None:
+    text = str(raw_value or "").strip()
+    if not text:
+        return None
+    try:
+        value = float(text)
+    except ValueError:
+        return None
+    if value > 1:
+        value /= 100
+    return max(0.0, min(1.0, value))
+
+
+def _format_ocr_confidence(label: str, raw_value: object) -> str:
+    score = _confidence_score(raw_value)
+    if score is None:
+        return ""
+    value = score * 100
+    value_text = f"{value:.0f}%" if abs(value - round(value)) < 0.01 else f"{value:.1f}%"
+    return f"{label} {value_text}"
+
+
+def _confidence_level(score: float | None) -> str:
+    if score is None:
+        return "missing"
+    if score < 0.8:
+        return "danger"
+    if score < 0.9:
+        return "warning"
+    return "ok"
 
 
 def _format_mapping_confidence(raw_value: object) -> str:
