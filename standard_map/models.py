@@ -8,6 +8,7 @@ from typing import Any
 STANDARD_OUTPUT_COLUMNS = [
     "填表日期",
     "当前条目日期",
+    "期间类型",
     "公司名",
     "原始指标名",
     "标准指标编码",
@@ -57,6 +58,7 @@ ISSUE_OUTPUT_COLUMNS = [
     "issue_reason",
     "填表日期",
     "当前条目日期",
+    "期间类型",
     "公司名",
     "原始指标名",
     "指标数值",
@@ -67,6 +69,7 @@ REVIEW_ITEM_COLUMNS = [
     "raw_metric_id",
     "填表日期",
     "当前条目日期",
+    "期间类型",
     "公司名",
     "原始指标名",
     "指标数值",
@@ -233,6 +236,7 @@ class RawMetricRow:
     company_name: str
     metric_name: str
     metric_value: Any
+    period_role: Any = ""
     raw_row: dict[str, Any] = field(default_factory=dict)
     provenance: dict[str, Any] = field(default_factory=dict)
 
@@ -284,6 +288,7 @@ class MappingResult:
         return {
             "填表日期": self.raw.fill_date,
             "当前条目日期": self.raw.item_date,
+            "期间类型": self.raw.period_role,
             "公司名": self.raw.company_name,
             "原始指标名": self.raw.metric_name,
             "标准指标编码": self.standard_code,
@@ -331,6 +336,7 @@ class MappingResult:
             "issue_reason": self.issue_reason or self.notes,
             "填表日期": self.raw.fill_date,
             "当前条目日期": self.raw.item_date,
+            "期间类型": self.raw.period_role,
             "公司名": self.raw.company_name,
             "原始指标名": self.raw.metric_name,
             "指标数值": self.raw.metric_value,
@@ -358,6 +364,7 @@ class MappingResult:
             "raw_metric_id": self.raw.raw_metric_id,
             "填表日期": self.raw.fill_date,
             "当前条目日期": self.raw.item_date,
+            "期间类型": self.raw.period_role,
             "公司名": self.raw.company_name,
             "原始指标名": self.raw.metric_name,
             "指标数值": self.raw.metric_value,

@@ -12,6 +12,7 @@ from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
 from project_paths import REPO_ROOT, STANDARD_METRICS_GENERATED_ROOT, WEB_GENERATED_ROOT
+from .review_quality import display_period_role, has_temporal_key, is_invalid_metric_name
 
 
 COMBINED_WORKBOOK_DOWNLOAD_NAME = "数据表.xlsx"
@@ -22,6 +23,7 @@ DATE_FORMAT = "yyyy-mm-dd"
 DATA_TOTAL_COLUMNS = [
     "填表日期",
     "当前条目日期",
+    "期间类型",
     "公司名",
     "原始指标名",
     "标准指标编码",
@@ -36,6 +38,7 @@ DATA_TOTAL_COLUMNS = [
 STANDARD_COLUMNS = [
     "填表日期",
     "当前条目日期",
+    "期间类型",
     "公司名",
     "原始指标名",
     "标准指标编码",
@@ -50,6 +53,7 @@ STANDARD_COLUMNS = [
 RAW_COLUMNS = [
     "填表日期",
     "当前条目日期",
+    "期间类型",
     "公司名",
     "指标名",
     "指标数值",
@@ -67,9 +71,23 @@ EXPLANATION_LINES = [
     "本工作簿包含原始识别数据和标准化映射结果。",
     "原始数据：未做标准术语映射。",
     "标准化数据：已根据系统规则映射为标准指标。",
+    "期间类型用于区分同一填表日期下的期初、期末、本期、上期等口径，入库时建议与填表日期一起作为期间维度。",
     "“是否需要人工校对”为“是”的行建议人工检查。",
     "数值仅做展示格式化，内部数据不应被随意改写。",
 ]
+
+PERIOD_ROLE_LABELS_ZH = {
+    "beginning": "期初数",
+    "ending": "期末数",
+    "previous_ending": "上期期末",
+    "current_point": "当前时点",
+    "current_period": "本期",
+    "current_year": "本年",
+    "previous_period": "上期",
+    "previous_year": "上年",
+    "amount": "金额",
+    "explicit_date": "明确日期",
+}
 
 
 def build_combined_metrics_workbook(
@@ -93,6 +111,7 @@ def build_combined_metrics_workbook(
     raw_detail_path = raw_path.parent / "raw_metrics_detailed.csv" if raw_path else None
     raw_detail_rows = _read_table(raw_detail_path, preferred_sheet="raw_metrics_detailed") if raw_detail_path and raw_detail_path.exists() else []
     raw_rows = _with_raw_metric_ids(raw_rows, raw_detail_rows)
+    raw_rows = _filter_valid_metric_rows(raw_rows)
 
     standard_rows = (
         _read_table(standard_path, preferred_sheet="standardized_metrics") if standard_path and standard_path.exists() else []
@@ -106,12 +125,14 @@ def build_combined_metrics_workbook(
         else []
     )
     standard_rows = _with_raw_metric_ids(standard_rows, standard_detail_rows)
+    standard_rows = _filter_valid_metric_rows(standard_rows)
 
     if (not review_path or not review_path.exists()) and standard_path and standard_path.exists():
         sibling_review = standard_path.parent / "mapping_review_items.csv"
         if sibling_review.exists():
             review_path = sibling_review
     review_rows = _read_table(review_path, preferred_sheet="mapping_review_items") if review_path and review_path.exists() else []
+    review_rows = _filter_valid_metric_rows(review_rows)
     action_path = _resolve_optional_path(unified_review_actions_path)
     action_rows = _load_unified_review_actions(action_path)
     overlay_summary = _apply_unified_review_overlays(
@@ -240,8 +261,41 @@ def _with_raw_metric_ids(rows: list[dict[str, Any]], detail_rows: list[dict[str,
         raw_metric_id = _first(item, "raw_metric_id") or _first(detail, "raw_metric_id", "source_cell_ref")
         if raw_metric_id:
             item["_raw_metric_id"] = str(raw_metric_id)
+        if not _first(item, "期间类型", "period_role"):
+            period_role = _period_role_from_row(detail)
+            if period_role:
+                item["期间类型"] = period_role
         result.append(item)
     return result
+
+
+def _filter_valid_metric_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    # Missing dates/period roles are retained and marked for review later.
+    # Numeric-only metric labels remain extraction noise and are filtered.
+    return [row for row in rows if not is_invalid_metric_name(_row_metric_name(row))]
+
+
+def _row_metric_name(row: dict[str, Any]) -> Any:
+    return _first(row, "原始指标名", "指标名", "metric_name", "original_metric_name", "raw_metric_name")
+
+
+def _row_has_temporal_key(row: dict[str, Any]) -> bool:
+    return has_temporal_key(
+        _first(row, "当前条目日期", "item_date"),
+        _first(row, "period_role_norm", "期间类型", "period_role"),
+        _first(row, "period_role_raw") or _period_role_from_row(row),
+    )
+
+
+def _temporal_review_required(row: dict[str, Any]) -> bool:
+    return not _row_has_temporal_key(row)
+
+
+def _append_review_note(value: Any, note: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return note
+    return text if note in text else f"{text}；{note}"
 
 
 def _load_unified_review_actions(path: Path | None) -> list[dict[str, Any]]:
@@ -351,20 +405,25 @@ def _action_created_timestamp(action: dict[str, Any]) -> float | None:
 
 def _build_combined_rows(raw_rows: list[dict[str, Any]], standard_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     if standard_rows:
-        return [_normalize_combined_from_standard(row) for row in standard_rows]
+        raw_lookup = {_row_raw_metric_id(row): row for row in raw_rows if _row_raw_metric_id(row)}
+        return [_normalize_combined_from_standard(row, raw_lookup.get(_row_raw_metric_id(row), {})) for row in standard_rows]
     return [_normalize_combined_from_raw(row) for row in raw_rows]
 
 
-def _normalize_combined_from_standard(row: dict[str, Any]) -> dict[str, Any]:
+def _normalize_combined_from_standard(row: dict[str, Any], raw_row: dict[str, Any] | None = None) -> dict[str, Any]:
     normalized = _normalize_standard_row(row)
+    if not normalized.get("期间类型") and raw_row:
+        normalized["期间类型"] = _normalize_raw_row(raw_row).get("期间类型", "")
     return {column: normalized.get(column, "") for column in DATA_TOTAL_COLUMNS}
 
 
 def _normalize_combined_from_raw(row: dict[str, Any]) -> dict[str, Any]:
     raw = _normalize_raw_row(row)
+    temporal_review = _temporal_review_required(row)
     return {
         "填表日期": raw.get("填表日期", ""),
         "当前条目日期": raw.get("当前条目日期", ""),
+        "期间类型": raw.get("期间类型", ""),
         "公司名": raw.get("公司名", ""),
         "原始指标名": raw.get("指标名", ""),
         "标准指标编码": "",
@@ -372,8 +431,8 @@ def _normalize_combined_from_raw(row: dict[str, Any]) -> dict[str, Any]:
         "指标数值": raw.get("指标数值", ""),
         "映射状态": "未标准化",
         "映射方法": "",
-        "口径说明": "",
-        "是否需要人工校对": "",
+        "口径说明": "日期或期间缺失，需人工校对。" if temporal_review else "",
+        "是否需要人工校对": "是" if temporal_review else "",
     }
 
 
@@ -381,9 +440,16 @@ def _normalize_standard_row(row: dict[str, Any]) -> dict[str, Any]:
     review_required = row.get("是否需要人工校对")
     if review_required in (None, ""):
         review_required = _review_required_from_status(_first(row, "映射状态", "mapping_status"))
+    temporal_review = _temporal_review_required(row)
+    if temporal_review:
+        review_required = "是"
+    notes = _first(row, "口径说明", "notes", "issue_reason")
+    if temporal_review:
+        notes = _append_review_note(notes, "日期或期间缺失，需人工校对。")
     return {
         "填表日期": _first(row, "填表日期", "fill_date"),
         "当前条目日期": _first(row, "当前条目日期", "item_date"),
+        "期间类型": _first(row, "期间类型", "period_role") or _period_role_from_row(row),
         "公司名": _first(row, "公司名", "company_name"),
         "原始指标名": _first(row, "原始指标名", "指标名", "metric_name", "original_metric_name"),
         "标准指标编码": _first(row, "标准指标编码", "standard_code", "candidate_code", "current_code"),
@@ -391,7 +457,7 @@ def _normalize_standard_row(row: dict[str, Any]) -> dict[str, Any]:
         "指标数值": _first(row, "指标数值", "metric_value", "value_raw"),
         "映射方法": _first(row, "映射方法", "mapping_method", "candidate_method"),
         "映射状态": _first(row, "映射状态", "mapping_status"),
-        "口径说明": _first(row, "口径说明", "notes", "issue_reason"),
+        "口径说明": notes,
         "是否需要人工校对": _normalize_yes_no(review_required),
     }
 
@@ -400,6 +466,7 @@ def _normalize_raw_row(row: dict[str, Any]) -> dict[str, Any]:
     return {
         "填表日期": _first(row, "填表日期", "fill_date"),
         "当前条目日期": _first(row, "当前条目日期", "item_date"),
+        "期间类型": _first(row, "期间类型", "period_role") or _period_role_from_row(row),
         "公司名": _first(row, "公司名", "company_name"),
         "指标名": _first(row, "指标名", "metric_name", "原始指标名"),
         "指标数值": _first(row, "指标数值", "metric_value", "value_raw"),
@@ -416,13 +483,19 @@ def _build_review_rows(review_rows: list[dict[str, Any]], standard_rows: list[di
         review_required = _first(row, "是否需要人工校对")
         if review_required == "":
             review_required = _review_required_from_status(status)
+        temporal_review = _temporal_review_required(row)
+        if temporal_review:
+            review_required = "是"
+        notes = _first(row, "口径说明", "issue_reason", "notes")
+        if temporal_review:
+            notes = _append_review_note(notes, "日期或期间缺失，需人工校对。")
         result.append(
             {
                 "原始指标名": _first(row, "原始指标名", "original_metric_name", "指标名", "metric_name"),
                 "当前映射": f"{code} {name}".strip(),
                 "映射状态": status,
                 "是否需要人工校对": _normalize_yes_no(review_required),
-                "口径说明": _first(row, "口径说明", "issue_reason", "notes"),
+                "口径说明": notes,
             }
         )
     return result
@@ -508,6 +581,7 @@ def _column_width(sheet, index: int, column: str) -> float:
     preferred = {
         "填表日期": 13,
         "当前条目日期": 13,
+        "期间类型": 12,
         "公司名": 24,
         "指标名": 26,
         "原始指标名": 28,
@@ -616,6 +690,12 @@ def _first(row: dict[str, Any], *keys: str) -> Any:
         if value not in (None, ""):
             return value
     return ""
+
+
+def _period_role_from_row(row: dict[str, Any]) -> str:
+    norm = str(_first(row, "period_role_norm", "期间类型", "period_role") or "").strip()
+    raw = str(_first(row, "period_role_raw", "header_path") or "").strip()
+    return display_period_role(norm, raw)
 
 
 def _normalize_yes_no(value: Any) -> str:

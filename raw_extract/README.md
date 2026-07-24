@@ -16,6 +16,7 @@ It reads already-produced OCR artifacts from providers such as `aliyun_table`, `
 ```text
 填表日期
 当前条目日期
+期间类型
 公司名
 指标名
 指标数值
@@ -28,6 +29,8 @@ It reads already-produced OCR artifacts from providers such as `aliyun_table`, `
 `填表日期` is the report or statement reference date for the table/document. A balance sheet dated `2022年12月31日` resolves to `2022-12-31`. An annual statement such as `2022年度` resolves to year end, `2022-12-31`, with an `annual_to_year_end` method.
 
 `当前条目日期` is the date represented by the metric value cell. For point-in-time tables, `期末数` maps to the fill date, `期初数`/`年初数` maps to January 1 of the fill-date year, and `上年年末` maps to the previous year end. For annual flow tables, `本期`/`本年累计` maps to January 1 of the fill-date year, while `上期`/`上年同期` maps to January 1 of the previous year.
+
+`期间类型` is the normalized business role of the value column, such as `期初数`, `期末数`, `本期`, or `上期`. It is intended to be used together with `填表日期` when importing rows into downstream databases.
 
 ## Number Semantics
 

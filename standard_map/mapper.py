@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Sequence
 
-from project_paths import STANDARD_METRICS_GENERATED_ROOT, WEB_MAPPING_STORE_PATH
+from project_paths import RAW_METRICS_GENERATED_ROOT, STANDARD_METRICS_GENERATED_ROOT, WEB_MAPPING_STORE_PATH
 from standardize.manifest import generate_run_id
 
 from .audit import build_summary, validate_output_base
@@ -26,8 +26,16 @@ from .store import LocalMappingStore
 def run_standard_mapping(*, args: argparse.Namespace, cli_args: Sequence[str] | None = None) -> StandardMappingRun:
     input_path = Path(args.input).resolve()
     output_base = Path(args.output_dir).resolve()
-    validate_output_base(output_base)
-    doc_id = infer_doc_id(input_path, str(getattr(args, "doc_id", "") or ""))
+    raw_metrics_root = Path(str(getattr(args, "raw_metrics_root", "") or RAW_METRICS_GENERATED_ROOT)).resolve()
+    standard_metrics_root = Path(
+        str(getattr(args, "standard_metrics_root", "") or STANDARD_METRICS_GENERATED_ROOT)
+    ).resolve()
+    validate_output_base(output_base, standard_metrics_root=standard_metrics_root)
+    doc_id = infer_doc_id(
+        input_path,
+        str(getattr(args, "doc_id", "") or ""),
+        raw_metrics_root=raw_metrics_root,
+    )
     run_id = generate_run_id(cli_args or build_cli_args_for_manifest(args))
     output_dir = resolve_run_output_dir(output_base, run_id)
 
@@ -37,7 +45,11 @@ def run_standard_mapping(*, args: argparse.Namespace, cli_args: Sequence[str] | 
     store = LocalMappingStore(mapping_store_path)
     store.sync_registry(registry)
     extend_registry_aliases(registry, store.load_local_alias_entries(registry))
-    raw_rows = load_raw_metrics(input_path, company_name_override=str(getattr(args, "company_name", "") or ""))
+    raw_rows = load_raw_metrics(
+        input_path,
+        company_name_override=str(getattr(args, "company_name", "") or ""),
+        raw_metrics_root=raw_metrics_root,
+    )
     llm_mock_arg = getattr(args, "llm_mock", None)
     llm_mock_override = None if llm_mock_arg is None else bool(llm_mock_arg)
     llm_config = load_deepseek_config(
@@ -123,6 +135,11 @@ def resolve_run_output_dir(output_base: Path, run_id: str) -> Path:
 
 
 def map_raw_metric(raw: RawMetricRow, registry: StandardRegistry, *, llm_service: LLMSuggestionService | None = None) -> MappingResult:
+    result = _map_raw_metric_core(raw, registry, llm_service=llm_service)
+    return _enforce_temporal_review(result)
+
+
+def _map_raw_metric_core(raw: RawMetricRow, registry: StandardRegistry, *, llm_service: LLMSuggestionService | None = None) -> MappingResult:
     normalized = normalize_metric_name(raw.metric_name)
     if not normalized:
         return MappingResult(
@@ -246,6 +263,28 @@ def map_raw_metric(raw: RawMetricRow, registry: StandardRegistry, *, llm_service
         issue_reason="unmapped_metric",
         candidates=llm_candidates,
     )
+
+
+def _enforce_temporal_review(result: MappingResult) -> MappingResult:
+    raw = result.raw
+    item_date = str(raw.item_date or "").strip()
+    period_role = str(raw.period_role or "").strip().lower()
+    has_period = period_role not in {"", "unknown", "amount", "金额"}
+    if item_date or has_period or not str(raw.metric_name or "").strip():
+        return result
+
+    result.review_required = True
+    if result.mapping_status == "mapped":
+        result.mapping_status = "review_required"
+    temporal_note = "日期或期间缺失，需人工校对。"
+    if temporal_note not in str(result.notes or ""):
+        result.notes = f"{str(result.notes or '').rstrip('。')}；{temporal_note}".lstrip("；")
+    if result.issue_reason:
+        if "missing_temporal_key" not in result.issue_reason:
+            result.issue_reason = f"{result.issue_reason};missing_temporal_key"
+    else:
+        result.issue_reason = "missing_temporal_key"
+    return result
 
 
 def _map_unsafe_relation(raw: RawMetricRow, registry: StandardRegistry) -> MappingResult | None:

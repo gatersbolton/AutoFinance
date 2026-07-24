@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field, fields, is_dataclass
 from typing import Any, Dict, List, Optional
 
@@ -8,6 +9,7 @@ from typing import Any, Dict, List, Optional
 MAIN_OUTPUT_COLUMNS = [
     "填表日期",
     "当前条目日期",
+    "期间类型",
     "公司名",
     "指标名",
     "指标数值",
@@ -23,6 +25,8 @@ DETAILED_OUTPUT_FIELDS = [
     "value_raw",
     "value_type",
     "unit_raw",
+    "statement_type",
+    "statement_name_raw",
     "provider",
     "doc_id",
     "source_file",
@@ -49,6 +53,52 @@ DETAILED_OUTPUT_FIELDS = [
     "evidence_path",
     "issue_flags",
 ]
+
+
+PERIOD_ROLE_LABELS_ZH = {
+    "beginning": "期初数",
+    "ending": "期末数",
+    "previous_ending": "上期期末",
+    "current_point": "当前时点",
+    "current_period": "本期",
+    "current_year": "本年",
+    "previous_period": "上期",
+    "previous_year": "上年",
+    "amount": "金额",
+    "explicit_date": "明确日期",
+}
+
+
+def display_period_role(period_role_norm: Any, period_role_raw: Any = "") -> str:
+    norm = str(period_role_norm or "").strip()
+    raw = str(period_role_raw or "").strip()
+    if norm and norm != "unknown":
+        label = PERIOD_ROLE_LABELS_ZH.get(norm)
+        if label:
+            return label
+        if _is_displayable_period_role_raw(norm):
+            return norm
+        return ""
+    if _is_displayable_period_role_raw(raw):
+        return raw
+    return ""
+
+
+def _is_displayable_period_role_raw(value: Any) -> bool:
+    text = str(value or "").strip()
+    if not text or text == "unknown":
+        return False
+    if "/" in text:
+        return False
+    compact = re.sub(r"\s+", "", text)
+    if re.fullmatch(r"[-+]?[\d,，]+(?:\.\d+)?%?", compact):
+        return False
+    if len(compact) > 16:
+        return False
+    return any(
+        keyword in compact
+        for keyword in ("期初", "年初", "期末", "年末", "当前时点", "本期", "上期", "本年", "上年", "本月", "累计")
+    )
 
 
 def compact_json(value: Any) -> str:
@@ -149,6 +199,8 @@ class RawMetricCandidate:
     text_confidence: Optional[float]
     value_confidence: Optional[float]
     confidence: Optional[float]
+    statement_type: str = ""
+    statement_name_raw: str = ""
     evidence_path: str = ""
     issue_flags: List[str] = field(default_factory=list)
     provider_rank: int = 9999
@@ -160,6 +212,7 @@ class RawMetricCandidate:
         return {
             "填表日期": self.fill_date,
             "当前条目日期": self.item_date,
+            "期间类型": display_period_role(self.period_role_norm, self.period_role_raw),
             "公司名": self.company_name,
             "指标名": self.metric_name,
             "指标数值": self.metric_value if self.metric_value is not None else "",

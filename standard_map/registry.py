@@ -116,6 +116,10 @@ def _load_terms(path: Path) -> list[StandardTerm]:
                 notes=str(item.get("notes", "") or "").strip(),
             )
         )
+    codes = [term.code for term in terms]
+    duplicates = sorted({code for code in codes if codes.count(code) > 1})
+    if duplicates:
+        raise ValueError(f"Duplicate standard term codes in {path}: {duplicates}")
     return terms
 
 
@@ -144,6 +148,11 @@ def _load_alias_entries(path: Path, term_by_code: dict[str, StandardTerm]) -> li
         term = term_by_code.get(code)
         if term is None:
             continue
+        configured_name = str(item.get("canonical_name", item.get("name", "")) or "").strip()
+        if configured_name and normalize_metric_name(configured_name) != normalize_metric_name(term.name):
+            raise ValueError(
+                f"Alias registry code/name mismatch in {path}: {code} is {term.name}, not {configured_name}"
+            )
         alias = str(item.get("alias", "") or "").strip()
         if not alias:
             continue
@@ -176,8 +185,18 @@ def _load_relations(path: Path, term_by_code: dict[str, StandardTerm]) -> list[T
         canonical_code = str(item.get("canonical_code", "") or "").strip()
         canonical_name = str(item.get("canonical_name", "") or "").strip()
         term = term_by_code.get(canonical_code)
+        if canonical_code and term is None:
+            raise ValueError(f"Relation registry references unknown canonical code in {path}: {canonical_code}")
+        if term is not None and canonical_name and normalize_metric_name(canonical_name) != normalize_metric_name(term.name):
+            raise ValueError(
+                f"Relation registry code/name mismatch in {path}: {canonical_code} is {term.name}, not {canonical_name}"
+            )
         if term is not None and not canonical_name:
             canonical_name = term.name
+        candidate_codes = _string_list(item.get("candidate_codes", ()))
+        unknown_candidate_codes = [code for code in candidate_codes if code not in term_by_code]
+        if unknown_candidate_codes:
+            raise ValueError(f"Relation registry references unknown candidate codes in {path}: {unknown_candidate_codes}")
         relations.append(
             TermRelation(
                 relation_type=relation_type,
@@ -186,7 +205,7 @@ def _load_relations(path: Path, term_by_code: dict[str, StandardTerm]) -> list[T
                 canonical_name=canonical_name,
                 raw_names=_string_list(item.get("raw_names", ())),
                 related_names=_string_list(item.get("related_names", ())),
-                candidate_codes=_string_list(item.get("candidate_codes", ())),
+                candidate_codes=candidate_codes,
                 formula_json=json.dumps(item.get("formula", {}) or {}, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
                 if item.get("formula") is not None
                 else "",

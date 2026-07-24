@@ -37,7 +37,7 @@ from standardize.metadata import evaluate_summary_payloads, prepare_nested_summa
 from standardize.mapping.review import apply_subject_mapping
 from standardize.models import AliasRecord, CellRecord, ConflictRecord, FactRecord, ProviderCell, ProviderPage, ReOCRTaskRecord, RelationRecord, ReviewQueueRecord, StatementMeta, TemplateSubject, ValidationResultRecord
 from standardize.normalize.conflicts import enrich_conflicts, resolve_conflicts
-from standardize.normalize.export import export_template
+from standardize.normalize.export import export_template, validate_template_output_sheet
 from standardize.normalize.labels import apply_label_canonicalization
 from standardize.normalize.mapping import load_template_subjects
 from standardize.normalize.numbers import analyze_numeric_text
@@ -1095,12 +1095,36 @@ class StandardizeTests(unittest.TestCase):
             )
 
             workbook = load_workbook(output_dir / "会计报表_填充结果.xlsx")
-            headers = [workbook[workbook.sheetnames[0]].cell(row=3, column=idx).value for idx in range(1, workbook[workbook.sheetnames[0]].max_column + 1)]
+            main_sheet = workbook[workbook.sheetnames[0]]
+            headers = [main_sheet.cell(row=3, column=idx).value for idx in range(1, main_sheet.max_column + 1)]
             self.assertIn("2022-12-31__期末数", headers)
             self.assertNotIn("unknown_date__期末数", headers)
+            self.assertNotIn("金额", headers)
+            self.assertNotIn("期初", headers)
+            self.assertNotIn("期末", headers)
+            period_column = headers.index("2022-12-31__期末数") + 1
+            self.assertEqual(main_sheet.cell(row=4, column=period_column).value, 100.0)
+            self.assertFalse(
+                any(
+                    cell.value == 1217282470
+                    for row in main_sheet.iter_rows(min_row=1, max_row=main_sheet.max_row)
+                    for cell in row
+                )
+            )
+            self.assertTrue(export_stats["template_output_validation_pass"])
             for sheet_name in ["_meta_summary", "_validation", "_duplicates", "_conflicts", "_unplaced_facts", "_review_queue"]:
                 self.assertIn(sheet_name, workbook.sheetnames)
             self.assertEqual(integrity["summary"]["integrity_fail_total"], 0)
+
+    def test_unsanitized_template_fails_placeholder_validation(self):
+        template_path = Path(__file__).resolve().parent.parent / "data" / "templates" / "会计报表.xlsx"
+        workbook = load_workbook(template_path)
+        try:
+            validation = validate_template_output_sheet(workbook[workbook.sheetnames[0]], 3, [])
+        finally:
+            workbook.close()
+        self.assertFalse(validation["pass"])
+        self.assertIn("金额", validation["placeholder_headers"])
 
     def test_review_queue_generates_crops(self):
         with tempfile.TemporaryDirectory() as tmpdir:

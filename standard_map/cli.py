@@ -5,7 +5,13 @@ import logging
 from pathlib import Path
 from typing import Sequence
 
-from project_paths import STANDARD_METRICS_GENERATED_ROOT, STANDARD_TERMS_PATH, WEB_MAPPING_STORE_PATH, repo_relative
+from project_paths import (
+    RAW_METRICS_GENERATED_ROOT,
+    STANDARD_METRICS_GENERATED_ROOT,
+    STANDARD_TERMS_PATH,
+    WEB_MAPPING_STORE_PATH,
+    repo_relative,
+)
 
 from .mapper import run_standard_mapping
 
@@ -30,6 +36,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--mapping-store-path",
         default=str(WEB_MAPPING_STORE_PATH),
         help="Runtime SQLite local mapping store. Defaults to data/generated/web/mapping_store/local_mappings.sqlite.",
+    )
+    parser.add_argument(
+        "--raw-metrics-root",
+        default=str(RAW_METRICS_GENERATED_ROOT),
+        help="Allowed root containing the Stage 12 input.",
+    )
+    parser.add_argument(
+        "--standard-metrics-root",
+        default=str(STANDARD_METRICS_GENERATED_ROOT),
+        help="Allowed root containing the Stage 13 output directory.",
     )
     parser.add_argument("--doc-id", default="", help="Optional document id override.")
     parser.add_argument("--company-name", default="", help="Optional company name override for all rows.")

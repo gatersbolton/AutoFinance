@@ -7,13 +7,13 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from project_paths import RAW_METRICS_GENERATED_ROOT, REPO_ROOT
+from project_paths import REPO_ROOT
 from raw_extract.cli import validate_output_base
 from raw_extract.company_resolver import resolve_company_name
 from raw_extract.date_resolver import resolve_item_date
 from raw_extract.export import export_raw_metrics_run
 from raw_extract.metric_extractor import extract_raw_metric_candidates, select_accepted_candidates
-from raw_extract.models import MAIN_OUTPUT_COLUMNS, CompanyResolution, RawMetricCandidate
+from raw_extract.models import MAIN_OUTPUT_COLUMNS, CompanyResolution, RawMetricCandidate, display_period_role
 from raw_extract.number_parser import parse_metric_number
 from raw_extract.table_rebuild import rebuild_logical_subtables
 from standardize.models import DiscoveredSource, ProviderCell, ProviderPage
@@ -40,6 +40,50 @@ class RawExtractTests(unittest.TestCase):
         self.assertEqual(resolve_item_date(fill_date="2022-12-31", header_path=["本期"], period_role_raw="本期", statement_type="cash_flow").item_date, "2022-01-01")
         self.assertEqual(resolve_item_date(fill_date="2022-12-31", header_path=["上期"], period_role_raw="上期", statement_type="income_statement").item_date, "2021-01-01")
         self.assertEqual(resolve_item_date(fill_date="2022-12-31", header_path=["上年同期"], period_role_raw="上年同期", statement_type="income_statement").item_date, "2021-01-01")
+        self.assertEqual(display_period_role("beginning", "42,940,481.00"), "期初数")
+        self.assertEqual(display_period_role("unknown", "42,940,481.00"), "")
+        self.assertEqual(display_period_role("unknown", "期末余额"), "期末余额")
+
+    def test_numeric_only_metric_names_are_rejected(self):
+        row = self._candidate("tencent_table_v3", 0, 7132218.77)
+        row.metric_name = "26"
+        row.row_label_clean = "26"
+        row.row_label_raw = "53,295,859.26"
+        row.period_role_raw = "42,940,481.00"
+        row.period_role_norm = "unknown"
+        accepted, issues = select_accepted_candidates([row], include_blank=False, include_ratios=True)
+
+        self.assertEqual(accepted, [])
+        self.assertEqual(row.selection_status, "rejected_invalid_metric_name")
+        self.assertIn("invalid_metric_name", {issue.issue_type for issue in issues})
+
+    def test_missing_item_date_and_period_role_candidates_are_kept_for_review(self):
+        row = self._candidate("tencent_table_v3", 0, 113866652.0)
+        row.metric_name = "其他应付款"
+        row.item_date = ""
+        row.period_role_raw = ""
+        row.period_role_norm = "unknown"
+
+        accepted, issues = select_accepted_candidates([row], include_blank=False, include_ratios=True)
+
+        self.assertEqual(accepted, [row])
+        self.assertTrue(row.accepted)
+        self.assertEqual(row.selection_status, "accepted_needs_temporal_review")
+        self.assertIn("missing_temporal_key", row.issue_flags)
+        self.assertIn("missing_temporal_key", {issue.issue_type for issue in issues})
+
+    def test_amount_header_without_date_is_kept_for_temporal_review(self):
+        row = self._candidate("tencent_table_v3", 0, 113866652.0)
+        row.metric_name = "其他应付款"
+        row.item_date = ""
+        row.period_role_raw = "金额"
+        row.period_role_norm = "amount"
+
+        accepted, issues = select_accepted_candidates([row], include_blank=False, include_ratios=True)
+
+        self.assertEqual(accepted, [row])
+        self.assertEqual(row.selection_status, "accepted_needs_temporal_review")
+        self.assertIn("missing_temporal_key", {issue.issue_type for issue in issues})
 
     def test_company_resolver_from_prepared_by_label(self):
         page = ProviderPage(
@@ -92,6 +136,38 @@ class RawExtractTests(unittest.TestCase):
         accepted, issues = select_accepted_candidates([first, second], include_blank=False, include_ratios=True)
         self.assertEqual(accepted[0].provider, "aliyun_table")
         self.assertIn("provider_value_conflict", {issue.issue_type for issue in issues})
+
+    def test_accepted_candidates_keep_logical_subtables_contiguous(self):
+        candidates = []
+        for index, (subtable_id, row_index, metric_name) in enumerate(
+            [
+                ("1_sub1", 1, "资产1"),
+                ("1_sub2", 1, "负债1"),
+                ("1_sub1", 2, "资产2"),
+                ("1_sub2", 2, "负债2"),
+            ],
+            start=1,
+        ):
+            candidate = self._candidate("aliyun_table", 0, float(index))
+            candidate.candidate_id = f"candidate_{index}"
+            candidate.logical_subtable_id = subtable_id
+            candidate.row_index = row_index
+            candidate.metric_name = metric_name
+            candidate.source_cell_ref = f"DTEST:1:aliyun_table:1:{row_index}-{row_index}:2-2"
+            candidate.duplicate_key = f"DTEST|balance_sheet|{metric_name}|{subtable_id}"
+            candidates.append(candidate)
+
+        accepted, _ = select_accepted_candidates(candidates, include_blank=False, include_ratios=True)
+
+        self.assertEqual(
+            [(row.logical_subtable_id, row.row_index, row.metric_name) for row in accepted],
+            [
+                ("1_sub1", 1, "资产1"),
+                ("1_sub1", 2, "资产2"),
+                ("1_sub2", 1, "负债1"),
+                ("1_sub2", 2, "负债2"),
+            ],
+        )
 
     def test_tencent_table_range_does_not_treat_line_numbers_as_metric_names(self):
         self.assertEqual(normalize_tencent_range(0, 1), (0, 0))
@@ -193,8 +269,7 @@ class RawExtractTests(unittest.TestCase):
         self.assertTrue(all(cell.bbox is None for cell in page.tables["1"]))
 
     def test_output_chinese_headers_exactly(self):
-        RAW_METRICS_GENERATED_ROOT.mkdir(parents=True, exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=RAW_METRICS_GENERATED_ROOT) as tmp:
+        with tempfile.TemporaryDirectory() as tmp:
             output_dir = Path(tmp)
             row = self._candidate("aliyun_table", 0, 100.0)
             export_raw_metrics_run(
@@ -212,9 +287,11 @@ class RawExtractTests(unittest.TestCase):
                 self.assertEqual(next(reader), MAIN_OUTPUT_COLUMNS)
 
     def test_path_hygiene_under_raw_metrics(self):
-        validate_output_base(RAW_METRICS_GENERATED_ROOT / "DTEST")
-        with self.assertRaises(ValueError):
-            validate_output_base(REPO_ROOT)
+        with tempfile.TemporaryDirectory() as tmp:
+            raw_metrics_root = Path(tmp) / "raw_metrics"
+            validate_output_base(raw_metrics_root / "DTEST", raw_metrics_root=raw_metrics_root)
+            with self.assertRaises(ValueError):
+                validate_output_base(REPO_ROOT, raw_metrics_root=raw_metrics_root)
 
     def _tiny_balance_sheet_page(self, provider: str) -> ProviderPage:
         cells = [

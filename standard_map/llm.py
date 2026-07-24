@@ -168,7 +168,14 @@ def load_deepseek_config(
     mock_mode: bool | None = None,
     cache_enabled_override: bool | None = None,
 ) -> DeepSeekConfig:
-    env_values = _load_env_file(Path(env_file) if env_file else SECRETS_ROOT / "deepseek.env")
+    if env_file:
+        env_values = _load_env_file(Path(env_file))
+    elif env is None:
+        env_values = _load_env_file(SECRETS_ROOT / "deepseek.env")
+    else:
+        # An explicitly supplied environment is a complete, deterministic
+        # configuration source (primarily for tests and controlled callers).
+        env_values = {}
     process_env = dict(os.environ if env is None else env)
     values = {**env_values, **process_env}
 
@@ -183,19 +190,26 @@ def load_deepseek_config(
     resolved_mock = _bool_value(values.get("LLM_MAPPING_MOCK"), False) if mock_mode is None else bool(mock_mode)
     has_key = is_valid_deepseek_api_key(api_key)
     enabled_env = _optional_bool(values.get("DEEPSEEK_ENABLED"))
-    if enabled_override is not None:
-        enabled = bool(enabled_override)
-    elif resolved_mock:
-        enabled = True
-    elif enabled_env is None:
+    if resolved_mock:
+        enabled = enabled_override is not False
+    elif enabled_override is not None:
+        enabled = bool(enabled_override) and has_key
+    elif enabled_env is True:
         enabled = has_key
     else:
-        enabled = enabled_env and has_key
+        # A valid API key is necessary but not consent to send financial
+        # context. Live mapping is opt-in through env or CLI.
+        enabled = False
     disabled_reason = ""
     if not enabled:
-        disabled_reason = "mock_disabled" if resolved_mock is False and not has_key else "explicitly_disabled"
         if not has_key and not resolved_mock:
             disabled_reason = "missing_or_placeholder_api_key"
+        elif enabled_override is False or enabled_env is False:
+            disabled_reason = "explicitly_disabled"
+        elif enabled_env is None and enabled_override is None and not resolved_mock:
+            disabled_reason = "not_explicitly_enabled"
+        else:
+            disabled_reason = "mock_disabled"
     return DeepSeekConfig(
         api_key=api_key,
         model=model,

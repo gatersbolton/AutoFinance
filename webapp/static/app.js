@@ -450,6 +450,10 @@ function formatBulkThreshold(value) {
     return `${Math.round(percent * 10) / 10}%`;
 }
 
+function formatConfidenceLabel(label, value) {
+    return `${label} 置信度${formatBulkThreshold(value)}`;
+}
+
 function renderBulkConfidencePreview(panel, preview) {
     panel.replaceChildren();
     panel.hidden = false;
@@ -480,7 +484,7 @@ function renderBulkConfidencePreview(panel, preview) {
             const rawName = candidate.raw_metric_name || candidate.original_metric_name || candidate.raw_metric_id || "未记录术语";
             const standardName = candidate.selected_name || candidate.candidate_name || candidate.standard_name || candidate.selected_code || candidate.candidate_code || "未记录标准术语";
             const confidenceValue = candidate.confidence ?? candidate.candidate_score;
-            const confidence = confidenceValue !== undefined ? ` · ${formatBulkThreshold(confidenceValue)}` : "";
+            const confidence = confidenceValue !== undefined ? ` · ${formatConfidenceLabel("词语映射", confidenceValue)}` : "";
             item.textContent = `${rawName}：本次采纳为 ${standardName}${confidence}`;
             list.appendChild(item);
         });
@@ -520,14 +524,23 @@ function hideBulkConfidencePreview(root) {
         panel.hidden = true;
         panel.dataset.previewState = "";
     }
+    setBulkConfidenceApplyEnabled(root, false);
     root.querySelectorAll("[data-bulk-confidence-preview-form] button[type='submit']").forEach((button) => {
-        button.textContent = button.dataset.defaultLabel || "先预览";
+        button.textContent = button.dataset.defaultLabel || "生成采纳预览";
     });
 }
 
-function markBulkConfidencePreviewVisible(root) {
+function markBulkConfidencePreviewVisible(root, preview = {}) {
+    setBulkConfidenceApplyEnabled(root, Number(preview.eligible_total || 0) > 0);
     root.querySelectorAll("[data-bulk-confidence-preview-form] button[type='submit']").forEach((button) => {
         button.textContent = "收起预览";
+    });
+}
+
+function setBulkConfidenceApplyEnabled(root, enabled) {
+    root.querySelectorAll("[data-bulk-confidence-apply-button]").forEach((button) => {
+        button.disabled = !enabled;
+        button.setAttribute("aria-disabled", enabled ? "false" : "true");
     });
 }
 
@@ -539,6 +552,7 @@ function syncBulkConfidenceThresholds(root, value) {
 
 function initBulkConfidenceControls(root) {
     const previewPanel = root.querySelector("[data-bulk-confidence-preview]");
+    setBulkConfidenceApplyEnabled(root, false);
     root.querySelectorAll("[data-bulk-threshold-input]").forEach((input) => {
         syncBulkConfidenceThresholds(root, input.value || "90");
         input.addEventListener("input", () => {
@@ -549,7 +563,7 @@ function initBulkConfidenceControls(root) {
     root.querySelectorAll("[data-bulk-confidence-preview-form]").forEach((form) => {
         const button = form.querySelector("button[type='submit']");
         if (button && !button.dataset.defaultLabel) {
-            button.dataset.defaultLabel = button.textContent.trim() || "先预览";
+            button.dataset.defaultLabel = button.textContent.trim() || "生成采纳预览";
         }
         form.addEventListener("submit", async (event) => {
             event.preventDefault();
@@ -577,14 +591,26 @@ function initBulkConfidenceControls(root) {
                 if (!response.ok) {
                     throw new Error(`HTTP ${response.status}`);
                 }
-                renderBulkConfidencePreview(previewPanel, await response.json());
-                markBulkConfidencePreviewVisible(root);
+                const preview = await response.json();
+                renderBulkConfidencePreview(previewPanel, preview);
+                markBulkConfidencePreviewVisible(root, preview);
             } catch (error) {
                 renderBulkConfidenceError(previewPanel, "预览生成失败，请稍后重试。");
-                markBulkConfidencePreviewVisible(root);
+                markBulkConfidencePreviewVisible(root, { eligible_total: 0 });
             } finally {
                 if (button) {
                     button.disabled = false;
+                }
+            }
+        });
+    });
+    root.querySelectorAll("[data-bulk-confidence-apply-form]").forEach((form) => {
+        form.addEventListener("submit", (event) => {
+            const button = form.querySelector("[data-bulk-confidence-apply-button]");
+            if (button && button.disabled) {
+                event.preventDefault();
+                if (previewPanel) {
+                    renderBulkConfidenceError(previewPanel, "请先生成采纳预览。");
                 }
             }
         });
@@ -733,6 +759,9 @@ function updateUnifiedStatus(row) {
     if (row.dataset.mappingChanged === "true") {
         list.appendChild(statusBadge("term_changed", "术语已修改"));
     }
+    if (row.dataset.temporalReviewRequired === "true") {
+        list.appendChild(statusBadge("review_required", "日期待校对"));
+    }
     if (!list.children.length) {
         list.appendChild(statusBadge(row.dataset.baseStatusCode || "unmapped", row.dataset.baseStatusLabel || "未映射"));
     }
@@ -740,6 +769,10 @@ function updateUnifiedStatus(row) {
 
 function isValueChangedFromOriginal(input) {
     return (input.dataset.currentValue || "") !== (input.getAttribute("data-original-value") || "");
+}
+
+function rowHasChangedMetricValue(row) {
+    return Array.from(row.querySelectorAll("[data-metric-value-input]")).some((input) => isValueChangedFromOriginal(input));
 }
 
 function isMappingChangedFromOriginal(picker) {
@@ -836,7 +869,7 @@ function markUnifiedValueChanged(row, input) {
         cell.dataset.resetPending = resetPending ? "true" : "false";
         cell.classList.toggle("metric-cell--dirty", changedFromOriginal);
     }
-    row.dataset.valueChanged = changedFromOriginal ? "true" : "false";
+    row.dataset.valueChanged = rowHasChangedMetricValue(row) ? "true" : "false";
     updateValuePrecisionNote(input, parsed);
     updateValueResetVisibility(input);
     updateUnifiedStatus(row);
@@ -859,7 +892,7 @@ function resetUnifiedValue(row, input) {
         }
         updateValuePrecisionNote(input, null);
     }
-    row.dataset.valueChanged = "false";
+    row.dataset.valueChanged = rowHasChangedMetricValue(row) ? "true" : "false";
     updateValueResetVisibility(input);
     updateUnifiedStatus(row);
 }
@@ -926,27 +959,34 @@ function collectUnifiedEdits(root) {
     root.querySelectorAll("[data-unified-row]").forEach((row) => {
         const itemId = row.getAttribute("data-review-item-id") || "";
         const rawMetricId = row.getAttribute("data-raw-metric-id") || "";
-        const valueInput = row.querySelector("[data-metric-value-input]");
-        const valueCell = row.querySelector("[data-value-cell]");
-        if (valueInput && valueInput.dataset.dirty === "true") {
-            const savedValue = valueInput.dataset.savedValue || valueInput.getAttribute("data-original-value") || "";
-            edits.push({
-                item_id: itemId,
-                raw_metric_id: rawMetricId,
-                edit_type: "value_change",
-                previous_value: savedValue,
-                new_value: valueInput.dataset.currentValue || valueInput.value,
-            });
-        } else if (valueCell && valueCell.dataset.resetPending === "true") {
-            const savedValue = valueInput ? (valueInput.dataset.savedValue || valueInput.getAttribute("data-original-value") || "") : "";
-            edits.push({
-                item_id: itemId,
-                raw_metric_id: rawMetricId,
-                edit_type: "reset_value",
-                previous_value: savedValue,
-                new_value: valueInput ? (valueInput.getAttribute("data-original-value") || "") : "",
-            });
-        }
+        row.querySelectorAll("[data-metric-value-input]").forEach((valueInput) => {
+            const valueCell = valueInput.closest("[data-value-cell]");
+            const inputRawMetricId = valueInput.getAttribute("data-raw-metric-id") || valueCell?.getAttribute("data-raw-metric-id") || rawMetricId;
+            if (!inputRawMetricId) {
+                return;
+            }
+            if (valueInput.dataset.dirty === "true") {
+                const savedValue = valueInput.dataset.savedValue || valueInput.getAttribute("data-original-value") || "";
+                edits.push({
+                    item_id: itemId,
+                    raw_metric_id: inputRawMetricId,
+                    value_slot: valueInput.getAttribute("data-value-slot") || valueCell?.getAttribute("data-value-slot") || "",
+                    edit_type: "value_change",
+                    previous_value: savedValue,
+                    new_value: valueInput.dataset.currentValue || valueInput.value,
+                });
+            } else if (valueCell && valueCell.dataset.resetPending === "true") {
+                const savedValue = valueInput.dataset.savedValue || valueInput.getAttribute("data-original-value") || "";
+                edits.push({
+                    item_id: itemId,
+                    raw_metric_id: inputRawMetricId,
+                    value_slot: valueInput.getAttribute("data-value-slot") || valueCell.getAttribute("data-value-slot") || "",
+                    edit_type: "reset_value",
+                    previous_value: savedValue,
+                    new_value: valueInput.getAttribute("data-original-value") || "",
+                });
+            }
+        });
         const picker = row.querySelector("[data-mapping-picker]");
         if (picker && picker.dataset.dirty === "true") {
             const savedCode = picker.dataset.savedCode || picker.getAttribute("data-original-code") || "";
@@ -954,6 +994,7 @@ function collectUnifiedEdits(root) {
             edits.push({
                 item_id: itemId,
                 raw_metric_id: rawMetricId,
+                raw_metric_ids: (row.getAttribute("data-raw-metric-ids") || rawMetricId).split(",").filter(Boolean),
                 edit_type: "mapping_change",
                 previous_code: savedCode,
                 previous_name: savedName,
@@ -966,6 +1007,7 @@ function collectUnifiedEdits(root) {
             edits.push({
                 item_id: itemId,
                 raw_metric_id: rawMetricId,
+                raw_metric_ids: (row.getAttribute("data-raw-metric-ids") || rawMetricId).split(",").filter(Boolean),
                 edit_type: "reset_mapping",
                 previous_code: savedCode,
                 previous_name: savedName,
@@ -999,7 +1041,8 @@ function unifiedStatusMatches(row, filterValue) {
         return decisionNote.includes("已本次采用");
     }
     if (filterValue === "review_required") {
-        return ["review_required", "candidate", "relation_review"].includes(baseStatus);
+        return row.dataset.temporalReviewRequired === "true"
+            || ["review_required", "candidate", "relation_review"].includes(baseStatus);
     }
     return baseStatus === filterValue;
 }
@@ -1027,6 +1070,9 @@ function unifiedConfidenceMatches(row, filterValue, threshold) {
 function unifiedStatusPriority(row) {
     const baseStatus = row.getAttribute("data-base-status-code") || "";
     const decisionNote = row.getAttribute("data-mapping-decision-note") || "";
+    if (row.dataset.temporalReviewRequired === "true") {
+        return 0;
+    }
     if (baseStatus === "unmapped") {
         return 0;
     }
@@ -1154,9 +1200,8 @@ async function saveUnifiedEdits(root, options = {}) {
         }
         const payload = await response.json();
         root.querySelectorAll("[data-unified-row]").forEach((row) => {
-            const valueInput = row.querySelector("[data-metric-value-input]");
-            const valueCell = row.querySelector("[data-value-cell]");
-            if (valueInput) {
+            row.querySelectorAll("[data-metric-value-input]").forEach((valueInput) => {
+                const valueCell = valueInput.closest("[data-value-cell]");
                 const originalValue = valueInput.getAttribute("data-original-value") || "";
                 const currentValue = valueInput.dataset.currentValue || originalValue;
                 if (valueCell && valueCell.dataset.resetPending === "true") {
@@ -1172,9 +1217,9 @@ async function saveUnifiedEdits(root, options = {}) {
                     valueCell.dataset.resetPending = "false";
                     valueCell.classList.toggle("metric-cell--dirty", changedFromOriginal);
                 }
-                row.dataset.valueChanged = changedFromOriginal ? "true" : "false";
                 updateValueResetVisibility(valueInput);
-            }
+            });
+            row.dataset.valueChanged = rowHasChangedMetricValue(row) ? "true" : "false";
             const picker = row.querySelector("[data-mapping-picker]");
             const mappingInput = row.querySelector("[data-standard-term-input]");
             if (picker) {
@@ -1260,8 +1305,7 @@ function initUnifiedProofreadWorkbench() {
     }
     rows.forEach((row) => {
         row.addEventListener("click", (event) => selectUnifiedRow(row, event.target));
-        const valueInput = row.querySelector("[data-metric-value-input]");
-        if (valueInput) {
+        row.querySelectorAll("[data-metric-value-input]").forEach((valueInput) => {
             valueInput.value = formatMetricNumber(valueInput.value, valueInput.getAttribute("data-value-type") || "");
             valueInput.addEventListener("focus", () => {
                 selectUnifiedRow(row, valueInput);
@@ -1277,7 +1321,7 @@ function initUnifiedProofreadWorkbench() {
                 updateValuePrecisionNote(valueInput, parsed.valid ? parsed : null);
                 window.setTimeout(() => updateValueResetVisibility(valueInput), 80);
             });
-            const reset = row.querySelector("[data-reset-value]");
+            const reset = valueInput.closest("[data-value-cell]")?.querySelector("[data-reset-value]");
             if (reset) {
                 reset.addEventListener("mousedown", (event) => {
                     event.preventDefault();
@@ -1288,7 +1332,7 @@ function initUnifiedProofreadWorkbench() {
                     resetUnifiedValue(row, valueInput);
                 });
             }
-        }
+        });
         const standardInput = row.querySelector("[data-standard-term-input]");
         if (standardInput) {
             initStandardTermAutocomplete(standardInput, row, root);

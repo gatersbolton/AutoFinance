@@ -34,6 +34,31 @@ def run_artifact_integrity(
 
     add_record(records, "required_helper_sheets", "error", all(sheet in workbook.sheetnames for sheet in required_sheets), "Workbook helper sheet contract check.", {"required_sheets": required_sheets, "actual_sheets": workbook.sheetnames})
     add_record(records, "duplicate_main_period_columns", "error", len(period_columns) == len(set(period_columns)), "Main sheet must not contain duplicate period columns.", {"period_columns": period_columns})
+    placeholder_headers = sorted(
+        header
+        for header in main_headers[1:]
+        if header in {"示例", "金额", "当前金额", "期初", "期末", "上期/期初", "本期/期末"}
+    )
+    blank_header_value_columns = [
+        column
+        for column in range(2, main_sheet.max_column + 1)
+        if not str(main_sheet.cell(row=header_row, column=column).value or "").strip()
+        and any(main_sheet.cell(row=row, column=column).value not in (None, "") for row in range(header_row + 1, main_sheet.max_row + 1))
+    ]
+    add_record(
+        records,
+        "template_placeholder_values_removed",
+        "error",
+        bool(export_stats.get("template_output_validation_pass", False))
+        and not placeholder_headers
+        and not blank_header_value_columns,
+        "Final workbook must not retain template demonstration or ambiguous placeholder result columns.",
+        {
+            "export_validation": export_stats.get("template_output_validation", {}),
+            "placeholder_headers": placeholder_headers,
+            "blank_header_value_columns": blank_header_value_columns,
+        },
+    )
     meta_rows = read_sheet_rows(workbook["_meta_summary"]) if "_meta_summary" in workbook.sheetnames else []
     meta_map = {row.get("key", ""): row.get("value", "") for row in meta_rows}
     if run_summary.get("run_id"):

@@ -11,11 +11,7 @@ from typing import Any, Iterable, Sequence
 
 from fastapi import UploadFile
 
-from project_paths import (
-    RAW_METRICS_GENERATED_ROOT,
-    REPO_ROOT,
-    STANDARD_METRICS_GENERATED_ROOT,
-)
+from project_paths import REPO_ROOT
 
 from .config import WebAppSettings
 from .document_models import (
@@ -200,7 +196,7 @@ def refresh_document_status(settings: WebAppSettings, document: DocumentRecord, 
     raw_summary = load_json(_raw_step_summary_path(settings, document.doc_id))
     raw_path = Path(str(raw_summary.get("raw_metrics_csv", "") or ""))
     if not raw_path.exists():
-        raw_path = _latest_file(RAW_METRICS_GENERATED_ROOT / document.doc_id, "raw_metrics.csv")
+        raw_path = _latest_file(settings.raw_metrics_root / document.doc_id, "raw_metrics.csv")
     if raw_path.exists() and document.raw_metrics_status != STATUS_COMPLETED:
         document.raw_metrics_status = STATUS_COMPLETED
         changed = True
@@ -208,7 +204,7 @@ def refresh_document_status(settings: WebAppSettings, document: DocumentRecord, 
     standard_summary = load_json(_standard_step_summary_path(settings, document.doc_id))
     standard_path = Path(str(standard_summary.get("standardized_metrics_csv", "") or ""))
     if not standard_path.exists():
-        standard_path = _latest_file(STANDARD_METRICS_GENERATED_ROOT / document.doc_id, "standardized_metrics.csv")
+        standard_path = _latest_file(settings.standard_metrics_root / document.doc_id, "standardized_metrics.csv")
     if standard_path.exists() and document.standard_metrics_status != STATUS_COMPLETED:
         document.standard_metrics_status = STATUS_COMPLETED
         changed = True
@@ -464,8 +460,8 @@ def _tail_text(path: Path, limit_chars: int = 4000) -> str:
 
 def build_delete_plan(settings: WebAppSettings, document: DocumentRecord) -> dict[str, Any]:
     doc_root = document_root(settings, document.doc_id).resolve()
-    raw_root = (RAW_METRICS_GENERATED_ROOT / document.doc_id).resolve()
-    standard_root = (STANDARD_METRICS_GENERATED_ROOT / document.doc_id).resolve()
+    raw_root = (settings.raw_metrics_root / document.doc_id).resolve()
+    standard_root = (settings.standard_metrics_root / document.doc_id).resolve()
     job_root = (settings.jobs_root / document.doc_id).resolve()
     result_root = (settings.results_root / document.doc_id).resolve()
     log_root = (settings.logs_root / document.doc_id).resolve()
@@ -484,8 +480,8 @@ def build_delete_plan(settings: WebAppSettings, document: DocumentRecord) -> dic
     delete_targets = [doc_root, raw_root, standard_root, job_root, result_root, log_root]
     allowed_roots = [
         settings.library_root.resolve(),
-        RAW_METRICS_GENERATED_ROOT.resolve(),
-        STANDARD_METRICS_GENERATED_ROOT.resolve(),
+        settings.raw_metrics_root.resolve(),
+        settings.standard_metrics_root.resolve(),
         settings.jobs_root.resolve(),
         settings.results_root.resolve(),
         settings.logs_root.resolve(),

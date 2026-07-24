@@ -12,6 +12,7 @@ The raw metrics table is intentionally not mapped to ZT or any other standard te
 ```text
 填表日期
 当前条目日期
+期间类型
 公司名
 指标名
 指标数值
@@ -64,6 +65,7 @@ The web app exposes a simple raw-data proofreading page. It shows the original P
 公司名
 填表日期
 当前条目日期
+期间类型
 指标名
 指标数值
 ```

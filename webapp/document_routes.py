@@ -136,7 +136,7 @@ def continue_document(request: Request, doc_id: str) -> Response:
         {
             "document": document,
             "job": job,
-            "simple_flow": load_simple_flow_state(job),
+            "simple_flow": load_simple_flow_state(job, settings),
         },
     )
 
@@ -184,7 +184,7 @@ def download_document_artifact(request: Request, doc_id: str, slug: str) -> File
         raise HTTPException(status_code=404, detail="文件不存在。") from exc
     job = document_to_job(settings, document)
     if slug == "combined_metrics_xlsx":
-        state = load_simple_flow_state(job)
+        state = load_simple_flow_state(job, settings)
         path_text = str(state.get("combined_metrics_xlsx", "") or "")
         path = Path(path_text) if path_text else Path()
         action_path = job_root(job) / "unified_review" / "unified_review_actions.json"
@@ -208,14 +208,14 @@ def document_combined_metrics_download_preview(request: Request, doc_id: str) ->
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="文件不存在。") from exc
     job = document_to_job(settings, document)
-    state = load_simple_flow_state(job)
+    state = load_simple_flow_state(job, settings)
     path_text = str(state.get("combined_metrics_xlsx", "") or "")
     path = Path(path_text) if path_text else Path()
     action_path = job_root(job) / "unified_review" / "unified_review_actions.json"
     needs_refresh = not path_text or not path.exists() or (action_path.exists() and path.exists() and action_path.stat().st_mtime > path.stat().st_mtime)
     if needs_refresh and (state.get("raw_ready") or state.get("standard_ready")):
         refresh_combined_metrics_workbook(settings, job)
-        state = load_simple_flow_state(job)
+        state = load_simple_flow_state(job, settings)
         path_text = str(state.get("combined_metrics_xlsx", "") or "")
         path = Path(path_text) if path_text else Path()
     if not path_text or not path.exists():
@@ -538,16 +538,19 @@ async def document_mapping_review_action_route(request: Request, doc_id: str) ->
         registry = load_standard_registry()
         selected = registry.term_by_code.get(selected_code)
         selected_name = selected.name if selected else selected_name
-    save_mapping_review_action(
-        job,
-        item=item,
-        action=action,
-        selected_code=selected_code,
-        selected_name=selected_name,
-        reviewer_note=str(form.get("reviewer_note", "") or ""),
-        mapping_store_path=settings.mapping_store_path,
-    )
-    refresh_combined_metrics_workbook(settings, job)
+    try:
+        save_mapping_review_action(
+            job,
+            item=item,
+            action=action,
+            selected_code=selected_code,
+            selected_name=selected_name,
+            reviewer_note=str(form.get("reviewer_note", "") or ""),
+            mapping_store_path=settings.mapping_store_path,
+        )
+        refresh_combined_metrics_workbook(settings, job)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     return RedirectResponse(url=f"/documents/{doc_id}/mapping-review/items/{review_item_id}", status_code=303)
 
 
@@ -594,7 +597,7 @@ async def document_mapping_reject_route(request: Request, doc_id: str) -> Respon
 def document_mapping_bulk_confidence_preview_route(request: Request, doc_id: str, threshold: float = 0.9) -> JSONResponse:
     settings = get_settings(request)
     job = document_to_job(settings, load_document(settings, doc_id))
-    state = load_simple_flow_state(job)
+    state = load_simple_flow_state(job, settings)
     standard_csv = Path(str(state.get("standardized_metrics_csv", "") or ""))
     if not standard_csv.exists():
         raise HTTPException(status_code=404, detail="请先生成标准化数据。")
@@ -616,7 +619,7 @@ async def document_mapping_bulk_accept_confidence_route(request: Request, doc_id
     job = document_to_job(settings, load_document(settings, doc_id))
     payload = await _document_mapping_decision_payload(request)
     threshold_value = float(payload.get("threshold") or payload.get("threshold_pct") or threshold or 0.9)
-    state = load_simple_flow_state(job)
+    state = load_simple_flow_state(job, settings)
     standard_csv = Path(str(state.get("standardized_metrics_csv", "") or ""))
     if not standard_csv.exists():
         raise HTTPException(status_code=404, detail="请先生成标准化数据。")
@@ -669,17 +672,20 @@ def _save_document_mapping_decision(settings, job, payload: dict[str, str]) -> d
         raise HTTPException(status_code=404, detail="术语映射校对项不存在。")
     selected_code = str(payload.get("selected_code") or payload.get("final_code") or item.get("current_code") or item.get("candidate_code") or "")
     selected_name = str(payload.get("selected_name") or payload.get("final_name") or item.get("current_name") or item.get("candidate_name") or "")
-    saved = save_mapping_review_action(
-        job,
-        item=item,
-        action=str(payload.get("decision") or payload.get("action") or ""),
-        selected_code=selected_code,
-        selected_name=selected_name,
-        reviewer_note=str(payload.get("note") or payload.get("reviewer_note") or ""),
-        mapping_store_path=settings.mapping_store_path,
-        decided_by=str(payload.get("decided_by") or "web"),
-    )
-    refresh_combined_metrics_workbook(settings, job)
+    try:
+        saved = save_mapping_review_action(
+            job,
+            item=item,
+            action=str(payload.get("decision") or payload.get("action") or ""),
+            selected_code=selected_code,
+            selected_name=selected_name,
+            reviewer_note=str(payload.get("note") or payload.get("reviewer_note") or ""),
+            mapping_store_path=settings.mapping_store_path,
+            decided_by=str(payload.get("decided_by") or "web"),
+        )
+        refresh_combined_metrics_workbook(settings, job)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {
         "pass": True,
         "doc_id": job.job_id,

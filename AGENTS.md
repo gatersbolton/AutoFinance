@@ -2,13 +2,90 @@
 
 ## Project Goal
 
-This repo turns OCR output from scanned financial statements into structured facts and a filled accounting workbook.
+This repo turns OCR output from scanned financial statements into reviewable structured facts and a filled accounting workbook. Both deliverables belong to the same product: finance staff need to be able to inspect and correct the structured facts before relying on the workbook.
 
-Primary flow:
+Two implementation paths currently coexist:
 
-1. `OCR.py` reads PDFs from a corpus input directory and writes provider outputs.
-2. `standardize.cli` reads provider outputs, resolves facts, validates them, and exports a workbook plus audit artifacts.
-3. `standardize.batch` runs `standardize.cli` across the document registry in `benchmarks/registry.yml`.
+1. Legacy workbook path: `OCR.py` -> `standardize.cli` / `standardize.batch` -> filled accounting workbook and audit artifacts.
+2. Reviewable-data path: `OCR.py` -> `raw_extract` -> `standard_map` -> web proofreading -> Excel/CSV dataset.
+
+The target integration between these paths is still being designed. Do not remove either path or assume that one of the two deliverables is optional without an explicit product decision.
+
+## Confirmed Product Requirements
+
+- The structured dataset and the filled accounting workbook are both formal outputs of one project.
+- The structured dataset is also the finance-user review surface for extraction accuracy.
+- A single reviewed structured-fact layer must feed both Excel/CSV exports and workbook filling. Do not build two independently corrected sources of truth.
+- Store canonical facts in long form: one metric, period, reporting scope, and value per fact. Finance-facing Excel may pivot those facts into beginning/end or current/prior columns.
+- The current default workbook layout is fixed at `data/templates/会计报表.xlsx`. Its 194 `ZT_*` subjects are the canonical template codes and names. Keep template-specific cell placement behind an adapter boundary for future layouts.
+- Current workbook filling covers the balance sheet and income statement. Cash-flow workbook support is deferred, not part of the current acceptance scope.
+- Preserve every valid extracted metric in the structured dataset. Classify it as template-mapped, known outside the template, unresolved mapping, or uncertain extraction/period; do not report every non-template metric as an error.
+- Only safely template-mapped facts fill workbook cells.
+- Support arbitrary numbers of periods in the canonical layer and dynamic period columns in finance-facing Excel. Do not hard-code the data model to exactly two periods.
+- If a metric name and value are valid but OCR did not capture a date, do not silently discard the row solely because the date is missing.
+- Infer a date or period only when the available evidence reaches an explicit confidence standard; otherwise route the row to human review. Same-table headers and current-page statement titles are the strongest evidence. Cover/report periods, adjacent pages, column context, and filenames require corroboration.
+- Persist whether a date or period was observed, inferred, or manually corrected, together with its evidence and confidence.
+- Downstream business amounts are normalized RMB-yuan values and should use precise decimal arithmetic. Foreign-currency conversion is out of the current scope, but raw OCR values and units remain audit provenance.
+- Only genuine one-to-one synonyms may auto-map. Aggregate, split, and ambiguous relationships must not be persisted as exact aliases; use an explicit computation/relation or human review.
+- Learned mapping decisions are scoped by company and statement type by default; they must not silently become global aliases.
+- Primary downstream interchange formats are Excel and CSV.
+- A risk-marked draft dataset may be downloaded before review is complete. A workbook with unresolved high-risk facts remains incomplete unless the user explicitly requests a risk-bearing export, and that override must be audited.
+- When both consolidated and parent-company statements exist, preserve both scopes and use consolidated statements as the default workbook scope. Fall back to parent-company statements only when the consolidated scope is absent or the user explicitly selects it.
+- Primary statement values take precedence for workbook filling. Notes may supplement a missing primary-statement value only when metric, period, unit, and reporting scope align; conflicts require review and must not silently overwrite the primary statement.
+- Preserve reported totals and independently calculate consistency checks. A computed total may flag a discrepancy but must not silently replace the reported fact.
+- Treat an explicit numeric zero as zero, a blank as missing, and a dash as missing/not-presented unless the table's convention reliably establishes that the dash means zero. Parenthesized amounts are negative.
+- The user manually confirms generation of the final workbook. Automatically produced workbooks are drafts.
+- An uploaded PDF and each processing run are versioned. Company-and-statement mapping memory may carry forward, but manually corrected amounts and dates must not silently carry into a new OCR/source version.
+- The expected deployment environment is a domestic enterprise server.
+- Public Aliyun/Tencent OCR and DeepSeek use is currently permitted, including sending the financial context needed for extraction and mapping. Provider selection, enablement, and outbound use must still be explicit, configurable, and auditable.
+- Corpus documents D01-D08 are representative of expected production inputs.
+- Expected usage is one or two regular users and no more than roughly five concurrent users, using one shared application account.
+- The server may be low-specification. Load balancing, horizontal scaling, and high-throughput architecture are out of scope; bounded resource use, serialized or tightly limited background work, recoverable failures, and preserving completed results are still required.
+- The production target is Linux with Docker. Batch upload of multiple PDFs is required.
+- Current accepted document scope is annual reports. Keep the period model extensible, but do not claim that monthly, quarterly, or half-year reports are tested or supported.
+- A normal batch contains two to five PDFs. The desktop browser target is Chrome; mobile-specific UI and email/SMS/IM completion notifications are out of scope.
+- Prefer a durable SQLite-backed queue with one worker and one actively processing document at a time for the current deployment profile. Do not retain OCR/extraction/mapping execution inside a long-lived HTTP request.
+- Production OCR is cloud-based. Select the primary provider using D01-D08 quality results and use the other permitted cloud provider as fallback; local PaddleOCR is not a production dependency on the low-specification server.
+- Initial configurable safety limits may use 50 MB and 300 pages per PDF and five PDFs per upload batch. D01-D08 currently range from 3 to 69 pages and under 1 MB to about 26 MB.
+- Implement browser batch upload as sequential single-file requests grouped into one logical batch. Do not send all two-to-five PDFs in one large multipart request.
+- Retain original PDFs, processing versions, and review history until explicit user deletion.
+- Automatic backup is out of the current scope. Never claim that server-local retained data is backed up or protected against disk/server loss.
+
+## Observed Production Baseline
+
+Read-only SSH inspection on 2026-07-23 found:
+
+- Ubuntu 24.04, Docker 29 / Compose 2.40, 2 vCPU, about 1.6 GB RAM, no swap, and a 40 GB root disk with about 17 GB free.
+- Four healthy containers: web, worker, Redis, and Nginx. None has a Docker CPU or memory limit.
+- The deployed data directory is about 1.7 GB: generated output about 880 MB, vendor files about 450 MB, and corpus data about 342 MB.
+- Docker reported about 6.1 GB of reclaimable image data and about 2.2 GB of reclaimable build cache. Do not prune automatically; inspect exact targets before a user-authorized cleanup.
+- Production currently sets `WEBAPP_QUEUE_BACKEND=local`, runs a separate worker, and also runs Redis. Reconcile this topology rather than assuming Redis is providing queue durability.
+- The web and worker containers use different image ids/build dates; inspected `webapp/main.py` hashes differ. Build both services from one immutable release/version and verify it at startup.
+- Nginx listens publicly on ports 80 and 443. HTTPS has an enabled renewal timer, but the HTTP AutoFinance endpoint currently challenges for Basic Auth instead of redirecting to HTTPS.
+- Public SSH currently permits root password authentication; UFW is active and fail2ban is inactive.
+- The deployed Git worktree contains local modifications and backup files. Do not overwrite it or infer that a checkout/rebuild is reproducible without first inventorying and preserving those changes.
+
+## Terminology Namespace Contract
+
+- `config/standard_terms.yml` is synchronized from the 194 `ZT_*` subjects in `data/templates/会计报表.xlsx`; non-template terms use a separate non-`ZT_*` namespace.
+- Regenerate and verify it with `python tools/sync_standard_terms_from_template.py` and `python tools/sync_standard_terms_from_template.py --check` after an approved template-subject change.
+- Legacy local aliases and decisions from the former conflicting 14-term registry are migrated by canonical name and recorded in the SQLite `namespace_migrations` audit table.
+- Never reinterpret a historical mapping by a conflicting code alone. For example, legacy `ZT_002 短期借款` migrates by name to `ZT_068 短期借款`; current `ZT_002` means `结算备付金`.
+
+## Template Export Safety Contract
+
+- `data/templates/会计报表.xlsx` contains demonstration amounts, so exporters must treat it as a layout source rather than trusted output data.
+- `standardize/normalize/export.py` clears every result column from column B onward before writing real dynamic-period values. It must not leave unused `金额`, `期初`, or `期末` columns beside actual-period columns.
+- Final-workbook validation is fail-closed when demonstration values, ambiguous placeholder headers, numeric values under blank result headers, or inconsistent period columns remain.
+- Keep the `template_placeholder_values_removed` integrity check and its regression tests when changing workbook export behavior. Never weaken this contract to accommodate a new template; adapt and sanitize the template explicitly.
+
+## Benchmark Label Policy
+
+- Agent-produced reference labels are permitted for D01-D08 and future benchmark samples.
+- Record the source document/page, labeling method, label version, confidence, and unresolved ambiguity for every reference set.
+- Call agent-produced labels `reference labels` or `silver labels`; do not describe them as independently human-verified gold labels.
+- Structural and accounting consistency checks should validate labels where possible, but they do not erase uncertainty in ambiguous source documents.
+- On the representative corpus, prioritize retaining valid facts over minimizing the number of review rows.
 
 ## Top-Level Repo Contract
 

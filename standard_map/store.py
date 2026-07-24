@@ -10,11 +10,7 @@ from typing import Any, Iterable
 
 import yaml
 
-from project_paths import (
-    WEB_LOCAL_ALIASES_EXPORT_PATH,
-    WEB_MAPPING_DECISIONS_AUDIT_PATH,
-    WEB_MAPPING_STORE_PATH,
-)
+from project_paths import WEB_MAPPING_STORE_PATH
 
 from .models import AliasEntry, StandardRegistry, StandardTerm
 from .models import LLM_SUGGESTION_AUDIT_COLUMNS, LLM_SUGGESTION_COLUMNS
@@ -135,6 +131,19 @@ class LocalMappingStore:
                     validation_status TEXT,
                     created_at TEXT
                 );
+
+                CREATE TABLE IF NOT EXISTS namespace_migrations (
+                    migration_id TEXT PRIMARY KEY,
+                    entity_type TEXT NOT NULL,
+                    entity_id TEXT NOT NULL,
+                    field_name TEXT NOT NULL,
+                    old_code TEXT,
+                    old_name TEXT,
+                    new_code TEXT,
+                    new_name TEXT,
+                    migrated_at TEXT,
+                    note TEXT
+                );
                 """
             )
             self._migrate_llm_suggestions(conn)
@@ -143,6 +152,11 @@ class LocalMappingStore:
         self.initialize()
         now = _utc_now()
         with self._connect() as conn:
+            self._migrate_non_base_namespace(conn, registry, now)
+            # Base aliases and relations are config-owned. Rebuild them so old
+            # code ids cannot survive a namespace change as active records.
+            conn.execute("DELETE FROM term_aliases WHERE COALESCE(source, '') = 'base'")
+            conn.execute("DELETE FROM term_relations")
             for term in registry.terms:
                 conn.execute(
                     """
@@ -171,6 +185,10 @@ class LocalMappingStore:
                         now,
                     ),
                 )
+            registry_codes = [term.code for term in registry.terms]
+            if registry_codes:
+                placeholders = ",".join("?" for _ in registry_codes)
+                conn.execute(f"DELETE FROM standard_terms WHERE code NOT IN ({placeholders})", registry_codes)
             for alias in registry.aliases:
                 self._upsert_alias(
                     conn,
@@ -352,7 +370,7 @@ class LocalMappingStore:
 
     def export_aliases(self, path: str | Path | None = None) -> Path:
         self.initialize()
-        path = Path(path or WEB_LOCAL_ALIASES_EXPORT_PATH).resolve()
+        path = Path(path or self.path.parent / "local_aliases_export.yml").resolve()
         path.parent.mkdir(parents=True, exist_ok=True)
         rows = self.alias_rows(include_base=False)
         payload = {
@@ -365,7 +383,7 @@ class LocalMappingStore:
 
     def export_decision_audit(self, path: str | Path | None = None) -> Path:
         self.initialize()
-        path = Path(path or WEB_MAPPING_DECISIONS_AUDIT_PATH).resolve()
+        path = Path(path or self.path.parent / "mapping_decisions_audit.csv").resolve()
         path.parent.mkdir(parents=True, exist_ok=True)
         rows = self.decision_rows()
         with path.open("w", encoding="utf-8-sig", newline="") as handle:
@@ -479,6 +497,7 @@ class LocalMappingStore:
             "term_relations_total": self.count("term_relations", where="enabled = 1"),
             "mapping_decisions_total": self.count("mapping_decisions"),
             "llm_suggestions_total": self.count("llm_suggestions"),
+            "namespace_migrations_total": self.count("namespace_migrations"),
             "aliases": self.alias_rows(include_base=False),
         }
         path.write_text(yaml.safe_dump(payload, allow_unicode=True, sort_keys=False), encoding="utf-8")
@@ -516,7 +535,7 @@ class LocalMappingStore:
 
     def count(self, table: str, *, where: str = "") -> int:
         self.initialize()
-        allowed = {"standard_terms", "term_aliases", "term_relations", "mapping_decisions", "llm_suggestions"}
+        allowed = {"standard_terms", "term_aliases", "term_relations", "mapping_decisions", "llm_suggestions", "namespace_migrations"}
         if table not in allowed:
             raise ValueError(f"Unsupported table: {table}")
         query = f"SELECT COUNT(*) AS total FROM {table}"
@@ -602,6 +621,131 @@ class LocalMappingStore:
                 conn.execute(f"ALTER TABLE llm_suggestions ADD COLUMN {column} {column_type}")
         conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_llm_suggestions_cache_key ON llm_suggestions(cache_key)")
 
+    def _migrate_non_base_namespace(self, conn: sqlite3.Connection, registry: StandardRegistry, migrated_at: str) -> None:
+        terms_by_name: dict[str, list[StandardTerm]] = {}
+        for term in registry.terms:
+            terms_by_name.setdefault(normalize_metric_name(term.name), []).append(term)
+        old_names = {
+            str(row["code"]): str(row["name"] or "")
+            for row in conn.execute("SELECT code, name FROM standard_terms").fetchall()
+        }
+
+        alias_rows = conn.execute(
+            """
+            SELECT id, alias_norm, standard_code, standard_name, relation_type, source, note
+            FROM term_aliases
+            WHERE COALESCE(source, '') != 'base'
+            """
+        ).fetchall()
+        for row in alias_rows:
+            old_code = str(row["standard_code"] or "")
+            old_name = str(row["standard_name"] or old_names.get(old_code, "") or "")
+            target = _unique_term_by_name(terms_by_name, old_name)
+            if target is None or (target.code == old_code and target.name == old_name):
+                continue
+            old_id = str(row["id"])
+            new_id = _stable_id(
+                "alias",
+                str(row["alias_norm"] or ""),
+                target.code,
+                str(row["relation_type"] or ""),
+                str(row["source"] or ""),
+            )
+            existing = conn.execute("SELECT id FROM term_aliases WHERE id = ?", (new_id,)).fetchone()
+            if existing is not None and new_id != old_id:
+                conn.execute("DELETE FROM term_aliases WHERE id = ?", (old_id,))
+            else:
+                note = _append_migration_note(str(row["note"] or ""), old_code, target.code)
+                conn.execute(
+                    "UPDATE term_aliases SET id = ?, standard_code = ?, standard_name = ?, note = ? WHERE id = ?",
+                    (new_id, target.code, target.name, note, old_id),
+                )
+            self._record_namespace_migration(
+                conn,
+                entity_type="term_alias",
+                entity_id=old_id,
+                field_name="standard_code",
+                old_code=old_code,
+                old_name=old_name,
+                new_code=target.code,
+                new_name=target.name,
+                migrated_at=migrated_at,
+            )
+
+        decision_rows = conn.execute(
+            """
+            SELECT decision_id, suggested_code, suggested_name, final_code, final_name, note
+            FROM mapping_decisions
+            """
+        ).fetchall()
+        for row in decision_rows:
+            updates: dict[str, str] = {}
+            migration_notes: list[str] = []
+            for prefix in ("suggested", "final"):
+                code_field = f"{prefix}_code"
+                name_field = f"{prefix}_name"
+                old_code = str(row[code_field] or "")
+                old_name = str(row[name_field] or old_names.get(old_code, "") or "")
+                target = _unique_term_by_name(terms_by_name, old_name)
+                if target is None or (target.code == old_code and target.name == old_name):
+                    continue
+                updates[code_field] = target.code
+                updates[name_field] = target.name
+                migration_notes.append(f"{prefix}:{old_code}->{target.code}")
+                self._record_namespace_migration(
+                    conn,
+                    entity_type="mapping_decision",
+                    entity_id=str(row["decision_id"]),
+                    field_name=code_field,
+                    old_code=old_code,
+                    old_name=old_name,
+                    new_code=target.code,
+                    new_name=target.name,
+                    migrated_at=migrated_at,
+                )
+            if updates:
+                updates["note"] = _append_text_note(str(row["note"] or ""), "命名空间迁移 " + ", ".join(migration_notes))
+                assignments = ", ".join(f"{field} = ?" for field in updates)
+                conn.execute(
+                    f"UPDATE mapping_decisions SET {assignments} WHERE decision_id = ?",
+                    (*updates.values(), str(row["decision_id"])),
+                )
+
+    def _record_namespace_migration(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        entity_type: str,
+        entity_id: str,
+        field_name: str,
+        old_code: str,
+        old_name: str,
+        new_code: str,
+        new_name: str,
+        migrated_at: str,
+    ) -> None:
+        migration_id = _stable_id("nsmig", entity_type, entity_id, field_name, old_code, new_code)
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO namespace_migrations (
+                migration_id, entity_type, entity_id, field_name, old_code,
+                old_name, new_code, new_name, migrated_at, note
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                migration_id,
+                entity_type,
+                entity_id,
+                field_name,
+                old_code,
+                old_name,
+                new_code,
+                new_name,
+                migrated_at,
+                "按标准科目名称迁移；未按冲突代码直接重解释。",
+            ),
+        )
+
 
 def initialize_mapping_store(path: str | Path | None, registry: StandardRegistry | None = None) -> LocalMappingStore:
     store = LocalMappingStore(path)
@@ -633,3 +777,19 @@ def _nullable_float(value: Any) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _unique_term_by_name(terms_by_name: dict[str, list[StandardTerm]], name: str) -> StandardTerm | None:
+    matches = terms_by_name.get(normalize_metric_name(name), [])
+    return matches[0] if len(matches) == 1 else None
+
+
+def _append_migration_note(note: str, old_code: str, new_code: str) -> str:
+    return _append_text_note(note, f"标准编码按名称迁移：{old_code}->{new_code}")
+
+
+def _append_text_note(note: str, suffix: str) -> str:
+    text = str(note or "").strip()
+    if suffix in text:
+        return text
+    return f"{text}；{suffix}" if text else suffix

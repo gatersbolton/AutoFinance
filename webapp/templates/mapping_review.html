@@ -64,14 +64,17 @@
             <form action="{{ base_url }}/mapping/bulk-confidence-preview" method="get" data-bulk-confidence-preview-form>
                 <label>
                     采纳所有置信度大于
-                    <input type="number" name="threshold" min="0" max="100" step="1" value="90" data-bulk-threshold-input>
-                    % 的术语
+                    <span class="percent-input">
+                        <input type="number" name="threshold" min="0" max="100" step="1" value="90" data-bulk-threshold-input>
+                        <span aria-hidden="true">%</span>
+                    </span>
+                    的术语
                 </label>
-                <button class="button button--secondary" type="submit">先预览</button>
+                <button class="button button--secondary" type="submit">生成采纳预览</button>
             </form>
             <form action="{{ base_url }}/mapping/bulk-accept-confidence" method="post" data-bulk-confidence-apply-form>
                 <input type="hidden" name="threshold" value="90">
-                <button class="button button--secondary" type="submit">确认本次采纳</button>
+                <button class="button button--secondary" type="submit" disabled data-bulk-confidence-apply-button>确认本次采纳</button>
             </form>
         </div>
         <div class="bulk-confidence-preview" data-bulk-confidence-preview hidden></div>
@@ -115,7 +118,7 @@
                                     name="standard_term_query"
                                     type="text"
                                     value="{{ row.current_mapping_label }}"
-                                    placeholder="搜索标准术语，如：短期、借款、2、dqjk"
+                                    placeholder="搜索标准术语，如：短期、借款、68、dqjk"
                                     autocomplete="off"
                                     data-standard-term-input
                                 >
@@ -133,7 +136,7 @@
                         <td>
                             <span class="status status--mapping status--mapping-{{ row.get('mapping_status_code', row.get('mapping_status', '')) }}" data-mapping-status-label>{{ row.mapping_status_label }}</span>
                         </td>
-                        <td>{{ row.mapping_confidence or "未记录" }}</td>
+                        <td>{{ row.mapping_confidence_display or "未记录" }}</td>
                         <td>
                             {% if row.issue_reason %}
                             <span class="mapping-issue-note">{{ row.issue_reason }}</span>

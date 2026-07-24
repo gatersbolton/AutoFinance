@@ -70,14 +70,16 @@
             <form class="unified-bulk-confidence" action="{{ base_url }}/mapping/bulk-confidence-preview" method="get" data-bulk-confidence-preview-form>
                 <label>
                     AI置信度
-                    <input type="number" name="threshold" min="0" max="100" step="1" value="90" data-bulk-threshold-input>
-                    %
+                    <span class="percent-input">
+                        <input type="number" name="threshold" min="0" max="100" step="1" value="90" data-bulk-threshold-input>
+                        <span aria-hidden="true">%</span>
+                    </span>
                 </label>
-                <button class="button button--secondary" type="submit">先预览</button>
+                <button class="button button--secondary" type="submit">生成采纳预览</button>
             </form>
             <form class="unified-bulk-confidence" action="{{ base_url }}/mapping/bulk-accept-confidence" method="post" data-bulk-confidence-apply-form>
                 <input type="hidden" name="threshold" value="90">
-                <button class="button button--secondary" type="submit">确认本次采纳</button>
+                <button class="button button--secondary" type="submit" disabled data-bulk-confidence-apply-button>确认本次采纳</button>
             </form>
             <button class="button button--primary" type="button" data-unified-save>保存修改</button>
             <a class="button button--secondary" href="{{ base_url }}/download-preview/combined_metrics_xlsx" target="_blank" rel="noopener" data-unified-download-preview>预览下载版</a>
@@ -106,8 +108,10 @@
             </label>
             <label>
                 阈值
-                <input type="number" min="0" max="100" step="1" value="90" data-unified-confidence-threshold>
-                %
+                <span class="percent-input">
+                    <input type="number" min="0" max="100" step="1" value="90" data-unified-confidence-threshold>
+                    <span aria-hidden="true">%</span>
+                </span>
             </label>
             <label>
                 排序
@@ -130,7 +134,8 @@
                 <colgroup>
                     <col class="unified-col-original-term">
                     <col class="unified-col-item-date">
-                    <col class="unified-col-metric-value">
+                    <col class="unified-col-period-value">
+                    <col class="unified-col-period-value">
                     <col class="unified-col-standard-term">
                     <col class="unified-col-status">
                     <col class="unified-col-decision">
@@ -138,8 +143,9 @@
                 <thead>
                     <tr>
                         <th class="row-heading">原始术语</th>
-                        <th>当前条目日期</th>
-                        <th>指标数值</th>
+                        <th>表格日期</th>
+                        <th>期间数值一</th>
+                        <th>期间数值二</th>
                         <th>标准术语</th>
                         <th>状态</th>
                         <th>映射决策</th>
@@ -149,7 +155,11 @@
                     {% for row in items %}
                     {% if row.starts_section %}
                     <tr class="table-section-row" data-section-header data-section-key="{{ row.section_key }}">
-                        <th colspan="6">{{ row.section_label }}</th>
+                        <th colspan="2">{{ row.section_label }}</th>
+                        {% for column in row.period_columns %}
+                        <th class="period-section-heading">{{ column.label }}</th>
+                        {% endfor %}
+                        <th colspan="3"></th>
                     </tr>
                     {% endif %}
                     <tr
@@ -163,12 +173,14 @@
                         data-bbox='{{ row.source_term_bbox_json | e }}'
                         data-term-bbox='{{ row.source_term_bbox_json | e }}'
                         data-value-bbox='{{ row.source_value_bbox_json | e }}'
+                        data-raw-metric-ids="{{ row.raw_metric_ids_joined }}"
                         data-bbox-state="{{ row.bbox_state }}"
                         data-original-metric-name="{{ row.original_metric_name }}"
                         data-current-mapping-label="{{ row.current_mapping_label }}"
                         data-section-key="{{ row.section_key }}"
                         data-base-status-code="{{ row.base_status }}"
                         data-base-status-label="{{ row.base_status_label }}"
+                        data-temporal-review-required="{{ 'true' if row.temporal_review_required else 'false' }}"
                         data-value-changed="{{ 'true' if row.value_changed else 'false' }}"
                         data-mapping-changed="{{ 'true' if row.mapping_changed else 'false' }}"
                         data-mapping-decision-note="{{ row.mapping_decision_note }}"
@@ -183,34 +195,44 @@
                             <span class="confidence-inline confidence-inline--{{ row.text_confidence_level }}" data-ocr-confidence-text hidden>{{ row.text_confidence_display }}</span>
                             {% endif %}
                         </th>
-                        <td>{{ row.item_date or "未记录" }}</td>
+                        <td>{{ row.table_date or "未记录" }}</td>
+                        {% for value in row.period_values %}
                         <td
-                            class="metric-value-cell {% if row.value_changed %}metric-cell--dirty{% endif %}"
+                            class="metric-value-cell {% if value.cell_changed %}metric-cell--dirty{% endif %} {% if not value.available %}metric-value-cell--empty{% endif %}"
                             data-value-cell
-                            data-page-no="{{ row.source_page_no }}"
-                            data-bbox='{{ row.source_value_bbox_json | e }}'
+                            data-value-slot="{{ value.slot }}"
+                            data-raw-metric-id="{{ value.raw_metric_id }}"
+                            data-page-no="{{ value.source_page_no or row.source_page_no }}"
+                            data-bbox='{{ value.source_value_bbox_json | e }}'
                             data-missing-highlight-message="当前数值未记录位置"
                         >
+                            {% if value.available %}
                             <div class="cell-edit-wrap">
                                 <input
                                     class="metric-value-input"
                                     type="text"
-                                    value="{{ row.display_value }}"
+                                    value="{{ value.display_value }}"
                                     data-metric-value-input
-                                    data-original-value="{{ row.original_value_normalized }}"
-                                    data-current-value="{{ row.current_value }}"
-                                    data-saved-value="{{ row.current_value }}"
-                                    data-value-type="{{ row.value_type }}"
+                                    data-value-slot="{{ value.slot }}"
+                                    data-raw-metric-id="{{ value.raw_metric_id }}"
+                                    data-original-value="{{ value.original_value_normalized }}"
+                                    data-current-value="{{ value.current_value }}"
+                                    data-saved-value="{{ value.current_value }}"
+                                    data-value-type="{{ value.value_type }}"
                                     autocomplete="off"
                                 >
                                 <button class="cell-reset" type="button" data-reset-value hidden>重置</button>
                             </div>
-                            {% if row.value_confidence_available %}
-                            <span class="confidence-inline confidence-inline--{{ row.value_confidence_level }}" data-ocr-confidence-text hidden>{{ row.value_confidence_display }}</span>
+                            {% if value.value_confidence_available %}
+                            <span class="confidence-inline confidence-inline--{{ value.value_confidence_level }}" data-ocr-confidence-text hidden>{{ value.value_confidence_display }}</span>
                             {% endif %}
                             <span class="cell-error" data-value-error hidden>数值格式有误</span>
                             <span class="cell-precision-note" data-value-precision-note hidden>已按金额保留两位</span>
+                            {% else %}
+                            <span class="metric-value-empty">未记录</span>
+                            {% endif %}
                         </td>
+                        {% endfor %}
                         <td class="standard-term-cell">
                             <div
                                 class="standard-term-picker unified-standard-term-picker {% if row.mapping_changed %}mapping-row--dirty{% endif %}"
@@ -227,7 +249,7 @@
                                         class="standard-term-input"
                                         type="text"
                                         value="{{ row.current_mapping_label }}"
-                                        placeholder="搜索标准术语，如：短期、借款、2、dqjk"
+                                        placeholder="搜索标准术语，如：短期、借款、68、dqjk"
                                         autocomplete="off"
                                         data-standard-term-input
                                     >

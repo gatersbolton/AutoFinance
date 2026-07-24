@@ -297,7 +297,7 @@ def job_detail(request: Request, job_id: str) -> HTMLResponse:
             "auto_refresh": job.status in ACTIVE_JOB_STATUSES or active_operation,
             "latest_operation": latest_operation,
             "recent_operations": recent_operations,
-            "simple_flow": load_simple_flow_state(job),
+            "simple_flow": load_simple_flow_state(job, settings),
         },
     )
 
@@ -663,7 +663,7 @@ async def mapping_reject_route(request: Request, job_id: str) -> Response:
 def mapping_bulk_confidence_preview_route(request: Request, job_id: str, threshold: float = 0.9) -> JSONResponse:
     settings = get_settings(request)
     job = require_job(settings, job_id)
-    output_dir = _standard_output_dir_for_job(job)
+    output_dir = _standard_output_dir_for_job(job, settings)
     store = LocalMappingStore(settings.mapping_store_path)
     before = store.count("term_aliases", where="enabled = 1 AND COALESCE(source, '') != 'base'")
     preview = build_confidence_bulk_accept_preview(output_dir, threshold=threshold, before_alias_count=before, after_alias_count=before)
@@ -676,7 +676,7 @@ async def mapping_bulk_accept_confidence_route(request: Request, job_id: str, th
     job = require_job(settings, job_id)
     payload = await _mapping_decision_payload(request)
     threshold_value = float(payload.get("threshold") or payload.get("threshold_pct") or threshold or 0.9)
-    output_dir = _standard_output_dir_for_job(job)
+    output_dir = _standard_output_dir_for_job(job, settings)
     store = LocalMappingStore(settings.mapping_store_path)
     summary = apply_confidence_bulk_accept(
         output_dir,
@@ -719,7 +719,7 @@ def download_artifact(request: Request, job_id: str, slug: str) -> FileResponse:
     settings = get_settings(request)
     job = require_job(settings, job_id)
     if slug == "combined_metrics_xlsx":
-        state = load_simple_flow_state(job)
+        state = load_simple_flow_state(job, settings)
         path_text = str(state.get("combined_metrics_xlsx", "") or "")
         path = Path(path_text) if path_text else Path()
         action_path = job_root(job) / "unified_review" / "unified_review_actions.json"
@@ -739,14 +739,14 @@ def download_artifact(request: Request, job_id: str, slug: str) -> FileResponse:
 def combined_metrics_download_preview(request: Request, job_id: str) -> HTMLResponse:
     settings = get_settings(request)
     job = require_job(settings, job_id)
-    state = load_simple_flow_state(job)
+    state = load_simple_flow_state(job, settings)
     path_text = str(state.get("combined_metrics_xlsx", "") or "")
     path = Path(path_text) if path_text else Path()
     action_path = job_root(job) / "unified_review" / "unified_review_actions.json"
     needs_refresh = not path_text or not path.exists() or (action_path.exists() and path.exists() and action_path.stat().st_mtime > path.stat().st_mtime)
     if needs_refresh and (state.get("raw_ready") or state.get("standard_ready")):
         refresh_combined_metrics_workbook(settings, job)
-        state = load_simple_flow_state(job)
+        state = load_simple_flow_state(job, settings)
         path_text = str(state.get("combined_metrics_xlsx", "") or "")
         path = Path(path_text) if path_text else Path()
     if not path_text or not path.exists():
@@ -1215,8 +1215,8 @@ def _save_mapping_decision(settings: WebAppSettings, job, payload: dict[str, str
     }
 
 
-def _standard_output_dir_for_job(job) -> Path:
-    state = load_simple_flow_state(job)
+def _standard_output_dir_for_job(job, settings: WebAppSettings) -> Path:
+    state = load_simple_flow_state(job, settings)
     standard_csv = Path(str(state.get("standardized_metrics_csv", "") or ""))
     if not standard_csv.exists():
         raise HTTPException(status_code=404, detail="请先生成标准化数据。")

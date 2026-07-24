@@ -68,13 +68,19 @@ def main(argv: Sequence[str] | None = None) -> int:
 def run_raw_extraction(*, args: argparse.Namespace, cli_args: Sequence[str] | None = None) -> RawExtractionResult:
     input_dir = Path(args.input_dir).resolve()
     output_base = Path(args.output_dir).resolve()
+    raw_metrics_root = Path(str(getattr(args, "raw_metrics_root", "") or RAW_METRICS_GENERATED_ROOT)).resolve()
     source_image_dir = Path(args.source_image_dir).resolve() if args.source_image_dir else None
     provider_priority = expand_provider_priority(args.provider_priority)
     doc_id = infer_doc_id(input_dir, args.doc_id)
     run_id = generate_run_id(cli_args or build_cli_args_for_manifest(args))
     output_dir = resolve_run_output_dir(output_base, run_id)
 
-    validate_inputs(input_dir=input_dir, output_base=output_base, source_image_dir=source_image_dir)
+    validate_inputs(
+        input_dir=input_dir,
+        output_base=output_base,
+        source_image_dir=source_image_dir,
+        raw_metrics_root=raw_metrics_root,
+    )
     output_dir.mkdir(parents=True, exist_ok=True)
 
     pages, sources, load_errors = load_existing_provider_pages(
@@ -162,16 +168,26 @@ def run_raw_extraction(*, args: argparse.Namespace, cli_args: Sequence[str] | No
     )
 
 
-def validate_inputs(*, input_dir: Path, output_base: Path, source_image_dir: Path | None) -> None:
+def validate_inputs(
+    *,
+    input_dir: Path,
+    output_base: Path,
+    source_image_dir: Path | None,
+    raw_metrics_root: Path = RAW_METRICS_GENERATED_ROOT,
+) -> None:
     if not input_dir.exists():
         raise ValueError(f"Input directory does not exist: {input_dir}")
     if source_image_dir and not source_image_dir.exists():
         raise ValueError(f"Source image directory does not exist: {source_image_dir}")
-    validate_output_base(output_base)
+    validate_output_base(output_base, raw_metrics_root=raw_metrics_root)
 
 
-def validate_output_base(output_base: Path) -> None:
-    raw_root = RAW_METRICS_GENERATED_ROOT.resolve()
+def validate_output_base(
+    output_base: Path,
+    *,
+    raw_metrics_root: Path = RAW_METRICS_GENERATED_ROOT,
+) -> None:
+    raw_root = raw_metrics_root.resolve()
     try:
         output_base.resolve().relative_to(raw_root)
     except ValueError as exc:

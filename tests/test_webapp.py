@@ -14,7 +14,7 @@ from unittest import mock
 from fastapi.testclient import TestClient
 from openpyxl import Workbook, load_workbook
 
-from project_paths import RAW_METRICS_GENERATED_ROOT, STANDARD_METRICS_GENERATED_ROOT, REPO_ROOT
+from project_paths import REPO_ROOT
 from scripts.deployment_check import main as deployment_check_main
 from standard_map.store import LocalMappingStore
 from standard_map.search import search_standard_terms
@@ -71,6 +71,8 @@ class WebAppTests(unittest.TestCase):
         self.temp_path = Path(self.tempdir.name)
         self.corpus_root = self.temp_path / "corpus"
         self.runtime_root = self.temp_path / "generated" / "web"
+        self.raw_metrics_root = self.temp_path / "generated" / "raw_metrics"
+        self.standard_metrics_root = self.temp_path / "generated" / "standard_metrics"
         self.template_path = REPO_ROOT / "data" / "templates" / "会计报表.xlsx"
         self.secret_path = self.temp_path / "secret"
         self.settings = self.make_settings()
@@ -93,6 +95,8 @@ class WebAppTests(unittest.TestCase):
             results_root=self.runtime_root / "results",
             logs_root=self.runtime_root / "logs",
             deletions_root=self.runtime_root / "deletions",
+            raw_metrics_root=self.raw_metrics_root,
+            standard_metrics_root=self.standard_metrics_root,
             db_path=self.runtime_root / "webapp.sqlite3",
             corpus_root=self.corpus_root,
             library_root=self.corpus_root / "library",
@@ -205,9 +209,11 @@ class WebAppTests(unittest.TestCase):
         confidence: str = "",
         text_confidence: str = "",
         value_confidence: str = "",
+        period_role_norm: str = "ending",
+        period_role_raw: str = "期末数",
     ) -> Path:
-        RAW_METRICS_GENERATED_ROOT.mkdir(parents=True, exist_ok=True)
-        tempdir = tempfile.TemporaryDirectory(dir=RAW_METRICS_GENERATED_ROOT)
+        self.raw_metrics_root.mkdir(parents=True, exist_ok=True)
+        tempdir = tempfile.TemporaryDirectory(dir=self.raw_metrics_root)
         self.addCleanup(tempdir.cleanup)
         run_dir = Path(tempdir.name) / "RUN_WEB_TEST"
         run_dir.mkdir(parents=True, exist_ok=True)
@@ -240,6 +246,15 @@ class WebAppTests(unittest.TestCase):
                     "source_file": str(detailed_source_file),
                     "provider": "aliyun_table",
                     "doc_id": "CASE1",
+                    "table_id": "0",
+                    "logical_subtable_id": "0_sub1",
+                    "row_index": "1",
+                    "col_index": "2",
+                    "row_label_clean": metric_name,
+                    "period_role_raw": period_role_raw,
+                    "period_role_norm": period_role_norm,
+                    "statement_type": "balance_sheet",
+                    "statement_name_raw": "资产负债表",
                     "value_type": "amount",
                     "confidence": confidence,
                 }
@@ -254,16 +269,25 @@ class WebAppTests(unittest.TestCase):
                 "source_file",
                 "provider",
                 "doc_id",
+                "table_id",
+                "logical_subtable_id",
+                "row_index",
+                "col_index",
+                "row_label_clean",
+                "period_role_raw",
+                "period_role_norm",
+                "statement_type",
+                "statement_name_raw",
                 "value_type",
                 "confidence",
             ],
         )
-        self.addCleanup(lambda: shutil.rmtree(STANDARD_METRICS_GENERATED_ROOT / Path(tempdir.name).name, ignore_errors=True))
+        self.addCleanup(lambda: shutil.rmtree(self.standard_metrics_root / Path(tempdir.name).name, ignore_errors=True))
         return raw_path
 
     def _create_two_table_raw_metrics_fixture(self) -> Path:
-        RAW_METRICS_GENERATED_ROOT.mkdir(parents=True, exist_ok=True)
-        tempdir = tempfile.TemporaryDirectory(dir=RAW_METRICS_GENERATED_ROOT)
+        self.raw_metrics_root.mkdir(parents=True, exist_ok=True)
+        tempdir = tempfile.TemporaryDirectory(dir=self.raw_metrics_root)
         self.addCleanup(tempdir.cleanup)
         run_dir = Path(tempdir.name) / "RUN_WEB_TEST"
         run_dir.mkdir(parents=True, exist_ok=True)
@@ -300,6 +324,10 @@ class WebAppTests(unittest.TestCase):
                 "row_index": "1",
                 "col_index": "2",
                 "row_label_clean": "货币资金",
+                "period_role_raw": "期末数",
+                "period_role_norm": "ending",
+                "statement_type": "balance_sheet",
+                "statement_name_raw": "资产负债表",
             },
             {
                 "source_cell_ref": "CASE1:1:aliyun_table:2:1-1:2-2",
@@ -314,6 +342,10 @@ class WebAppTests(unittest.TestCase):
                 "row_index": "1",
                 "col_index": "2",
                 "row_label_clean": "短期借款",
+                "period_role_raw": "期末数",
+                "period_role_norm": "ending",
+                "statement_type": "balance_sheet",
+                "statement_name_raw": "资产负债表",
             },
         ]
         self._write_csv(
@@ -332,9 +364,13 @@ class WebAppTests(unittest.TestCase):
                 "row_index",
                 "col_index",
                 "row_label_clean",
+                "period_role_raw",
+                "period_role_norm",
+                "statement_type",
+                "statement_name_raw",
             ],
         )
-        self.addCleanup(lambda: shutil.rmtree(STANDARD_METRICS_GENERATED_ROOT / Path(tempdir.name).name, ignore_errors=True))
+        self.addCleanup(lambda: shutil.rmtree(self.standard_metrics_root / Path(tempdir.name).name, ignore_errors=True))
         return raw_path
 
     def _upload_library_pdf(self, filename: str = "A公司财务报表.pdf") -> str:
@@ -889,7 +925,7 @@ class WebAppTests(unittest.TestCase):
         state = load_simple_flow_state(document_to_job(self.settings, document))
         self.assertTrue(state["raw_ready"])
         self.assertTrue(Path(state["raw_metrics_csv"]).exists())
-        self.assertTrue(str(Path(state["raw_metrics_csv"]).resolve()).startswith(str((RAW_METRICS_GENERATED_ROOT / doc_id).resolve())))
+        self.assertTrue(str(Path(state["raw_metrics_csv"]).resolve()).startswith(str((self.raw_metrics_root / doc_id).resolve())))
         self.assertTrue(state["combined_ready"])
         workbook = load_workbook(Path(state["combined_metrics_xlsx"]))
         self.assertIn("数据总表", workbook.sheetnames)
@@ -969,8 +1005,8 @@ class WebAppTests(unittest.TestCase):
     def test_document_delete_confirmation_lists_associated_files(self):
         doc_id = self._upload_library_pdf()
         self._write_tiny_library_ocr(doc_id)
-        (RAW_METRICS_GENERATED_ROOT / doc_id / "RUN_TEST").mkdir(parents=True, exist_ok=True)
-        (STANDARD_METRICS_GENERATED_ROOT / doc_id / "RUN_TEST").mkdir(parents=True, exist_ok=True)
+        (self.raw_metrics_root / doc_id / "RUN_TEST").mkdir(parents=True, exist_ok=True)
+        (self.standard_metrics_root / doc_id / "RUN_TEST").mkdir(parents=True, exist_ok=True)
         response = self.client.get(f"/documents/{doc_id}/delete-confirm")
         self.assertEqual(response.status_code, 200)
         for text in ("原始 PDF", "OCR 输出", "原始数据结果", "标准化数据结果", "相关网页任务文件", "确认删除"):
@@ -979,8 +1015,8 @@ class WebAppTests(unittest.TestCase):
     def test_document_delete_action_removes_allowed_paths_and_writes_summary(self):
         doc_id = self._upload_library_pdf()
         self._write_tiny_library_ocr(doc_id)
-        raw_dir = RAW_METRICS_GENERATED_ROOT / doc_id / "RUN_TEST"
-        standard_dir = STANDARD_METRICS_GENERATED_ROOT / doc_id / "RUN_TEST"
+        raw_dir = self.raw_metrics_root / doc_id / "RUN_TEST"
+        standard_dir = self.standard_metrics_root / doc_id / "RUN_TEST"
         raw_dir.mkdir(parents=True, exist_ok=True)
         standard_dir.mkdir(parents=True, exist_ok=True)
         (raw_dir / "raw_metrics.csv").write_text("x\n", encoding="utf-8")
@@ -988,8 +1024,8 @@ class WebAppTests(unittest.TestCase):
         response = self.client.post(f"/documents/{doc_id}/delete", follow_redirects=False)
         self.assertEqual(response.status_code, 303)
         self.assertFalse((self.corpus_root / "library" / doc_id).exists())
-        self.assertFalse((RAW_METRICS_GENERATED_ROOT / doc_id).exists())
-        self.assertFalse((STANDARD_METRICS_GENERATED_ROOT / doc_id).exists())
+        self.assertFalse((self.raw_metrics_root / doc_id).exists())
+        self.assertFalse((self.standard_metrics_root / doc_id).exists())
         summaries = sorted(self.settings.deletions_root.glob(f"{doc_id}_*_delete_summary.json"))
         self.assertTrue(summaries)
         summary = json.loads(summaries[-1].read_text(encoding="utf-8"))
@@ -1028,7 +1064,7 @@ class WebAppTests(unittest.TestCase):
         state = load_simple_flow_state(job)
         self.assertTrue(state["standard_ready"])
         self.assertTrue(Path(state["standardized_metrics_csv"]).exists())
-        self.assertTrue(str(Path(state["standardized_metrics_csv"]).resolve()).startswith(str(STANDARD_METRICS_GENERATED_ROOT.resolve())))
+        self.assertTrue(str(Path(state["standardized_metrics_csv"]).resolve()).startswith(str(self.standard_metrics_root.resolve())))
         self.assertTrue(state["combined_ready"])
         self.assertTrue(Path(state["combined_metrics_xlsx"]).exists())
         self.assertTrue(str(Path(state["combined_metrics_xlsx"]).resolve()).startswith(str(self.settings.results_root.resolve())))
@@ -1059,10 +1095,12 @@ class WebAppTests(unittest.TestCase):
         self.assertGreater(total_sheet.column_dimensions["D"].width, 20)
         value_col = self._column_index(total_sheet, "指标数值")
         fill_date_col = self._column_index(total_sheet, "填表日期")
+        period_role_col = self._column_index(total_sheet, "期间类型")
         value_cell = total_sheet.cell(row=2, column=value_col)
         fill_date_cell = total_sheet.cell(row=2, column=fill_date_col)
         self.assertIsInstance(value_cell.value, (int, float))
         self.assertEqual(value_cell.value, 12345.67)
+        self.assertEqual(total_sheet.cell(row=2, column=period_role_col).value, "期末数")
         self.assertEqual(value_cell.number_format, "#,##0.00")
         self.assertEqual(fill_date_cell.number_format, "yyyy-mm-dd")
 
@@ -1084,6 +1122,7 @@ class WebAppTests(unittest.TestCase):
         self.assertIn("数据总表", preview.text)
         self.assertIn("标准化数据", preview.text)
         self.assertIn("12,345.67", preview.text)
+        self.assertIn("期末数", preview.text)
         self.assertIn(f'href="/jobs/{job_id}/download/combined_metrics_xlsx"', preview.text)
 
         detail = self.client.get(f"/jobs/{job_id}")
@@ -1185,7 +1224,7 @@ class WebAppTests(unittest.TestCase):
         self.assertIn('class="spreadsheet-table mapping-table"', response.text)
         self.assertIn("原始术语", response.text)
         self.assertIn("标准术语", response.text)
-        self.assertIn("搜索标准术语，如：短期、借款、2、dqjk", response.text)
+        self.assertIn("搜索标准术语，如：短期、借款、68、dqjk", response.text)
         self.assertIn("data-standard-term-input", response.text)
         self.assertIn("data-mapping-cell", response.text)
         self.assertIn("data-bbox=", response.text)
@@ -1213,7 +1252,7 @@ class WebAppTests(unittest.TestCase):
             data={
                 "review_item_id": "maprev_000001",
                 "action": "change_mapping",
-                "selected_code": "ZT_002",
+                "selected_code": "ZT_068",
                 "selected_name": "短期借款",
                 "reviewer_note": "change",
             },
@@ -1229,7 +1268,7 @@ class WebAppTests(unittest.TestCase):
         self.assertEqual(actions[-1]["original_metric_name"], "货币资金")
         self.assertEqual(actions[-1]["previous_code"], "ZT_001")
         self.assertEqual(actions[-1]["previous_name"], "货币资金")
-        self.assertEqual(actions[-1]["selected_code"], "ZT_002")
+        self.assertEqual(actions[-1]["selected_code"], "ZT_068")
         self.assertEqual(actions[-1]["selected_name"], "短期借款")
         self.assertTrue(str(actions_path.resolve()).startswith(str(self.runtime_root.resolve())))
 
@@ -1246,6 +1285,26 @@ class WebAppTests(unittest.TestCase):
         job = get_job(self.settings, job_id)
         state = load_simple_flow_state(job)
         output_dir = Path(state["standardized_metrics_csv"]).parent
+
+        invalid_code = self.client.post(
+            f"/jobs/{job_id}/mapping/accept-once",
+            data={
+                "review_item_id": "maprev_000001",
+                "selected_code": "ZT_999",
+                "selected_name": "伪造科目",
+            },
+        )
+        self.assertEqual(invalid_code.status_code, 400)
+
+        mismatched_name = self.client.post(
+            f"/jobs/{job_id}/mapping/accept-once",
+            data={
+                "review_item_id": "maprev_000001",
+                "selected_code": "ZT_001",
+                "selected_name": "短期借款",
+            },
+        )
+        self.assertEqual(mismatched_name.status_code, 400)
 
         accept_once = self.client.post(
             f"/jobs/{job_id}/mapping/accept-once",
@@ -1269,7 +1328,7 @@ class WebAppTests(unittest.TestCase):
             f"/jobs/{job_id}/mapping/accept-and-remember",
             data={
                 "review_item_id": "maprev_000001",
-                "selected_code": "ZT_002",
+                "selected_code": "ZT_068",
                 "selected_name": "短期借款",
                 "note": "remember",
             },
@@ -1277,7 +1336,7 @@ class WebAppTests(unittest.TestCase):
         self.assertEqual(remember.status_code, 200)
         self.assertEqual(remember.json()["decision"], "accept_and_remember")
         aliases = store.alias_rows(include_base=False)
-        self.assertTrue(any(row["alias"] == "阶段十五待映射" and row["standard_code"] == "ZT_002" for row in aliases))
+        self.assertTrue(any(row["alias"] == "阶段十五待映射" and row["standard_code"] == "ZT_068" for row in aliases))
         self.assertTrue((self.settings.mapping_store_root / "local_aliases_export.yml").exists())
         self.assertTrue((self.settings.mapping_store_root / "mapping_decisions_audit.csv").exists())
 
@@ -1301,7 +1360,7 @@ class WebAppTests(unittest.TestCase):
         candidates = self.client.get("/api/mapping/candidates?raw_metric_name=阶段十五待映射")
         self.assertEqual(candidates.status_code, 200)
         self.assertEqual(candidates.json()["mapping_method"], "local_alias")
-        self.assertEqual(candidates.json()["standard_code"], "ZT_002")
+        self.assertEqual(candidates.json()["standard_code"], "ZT_068")
 
         before_aliases = store.count("term_aliases", where="enabled = 1 AND COALESCE(source, '') != 'base'")
         preview = self.client.get(f"/jobs/{job_id}/mapping/bulk-confidence-preview?threshold=0.9")
@@ -1402,12 +1461,16 @@ class WebAppTests(unittest.TestCase):
         response = self.client.get(f"/jobs/{job_id}/proofread")
         self.assertEqual(response.status_code, 200)
         self.assertIn("data-unified-proofread-workbench", response.text)
-        self.assertIn("/static/app.js?v=proofread-confidence-preview-20260601-1", response.text)
+        self.assertIn("/static/app.js?v=proofread-period-columns-20260616-4", response.text)
         self.assertIn("source-panel", response.text)
         self.assertIn("sheet-panel", response.text)
         self.assertIn("data-page-image-key=", response.text)
-        for text in ("原始术语", "指标数值", "标准术语", "状态", "映射决策"):
+        for text in ("原始术语", "表格日期", "期间数值一", "期间数值二", "期末数", "标准术语", "状态", "映射决策"):
             self.assertIn(text, response.text)
+        self.assertNotIn("期间类型", response.text)
+        self.assertIn("资产负债表", response.text)
+        self.assertNotIn("来源表 0", response.text)
+        self.assertNotIn("拆分区 1", response.text)
         self.assertIn("精确匹配，无需决策", response.text)
         self.assertNotIn("不采纳", response.text)
         self.assertNotIn("仅本次采用", response.text)
@@ -1423,9 +1486,10 @@ class WebAppTests(unittest.TestCase):
         self.assertIn('value="90"', response.text)
         self.assertIn("data-unified-sort", response.text)
         self.assertIn("data-bulk-confidence-preview-form", response.text)
-        self.assertIn("文字 91%", response.text)
-        self.assertIn("数字 92%", response.text)
-        self.assertIn("映射 100%", response.text)
+        self.assertIn("data-bulk-confidence-apply-button", response.text)
+        self.assertIn("OCR识别文字 置信度91%", response.text)
+        self.assertIn("OCR识别数字 置信度92%", response.text)
+        self.assertIn("词语映射 置信度100%", response.text)
         self.assertIn("data-mapping-confidence-text", response.text)
         self.assertIn("预览下载版", response.text)
         self.assertIn("data-unified-download-preview", response.text)
@@ -1462,7 +1526,7 @@ class WebAppTests(unittest.TestCase):
                         "edit_type": "mapping_change",
                         "previous_code": "ZT_001",
                         "previous_name": "货币资金",
-                        "new_code": "ZT_002",
+                        "new_code": "ZT_068",
                         "new_name": "短期借款",
                     },
                 ],
@@ -1483,7 +1547,7 @@ class WebAppTests(unittest.TestCase):
         actions = json.loads(actions_path.read_text(encoding="utf-8"))
         self.assertEqual([item["edit_type"] for item in actions[-2:]], ["value_change", "mapping_change"])
         self.assertEqual(actions[-2]["new_value"], "12346.68")
-        self.assertEqual(actions[-1]["new_code"], "ZT_002")
+        self.assertEqual(actions[-1]["new_code"], "ZT_068")
         self.assertEqual(actions[-1]["new_name"], "短期借款")
         state = load_simple_flow_state(job)
         workbook = load_workbook(Path(state["combined_metrics_xlsx"]), data_only=True)
@@ -1492,7 +1556,7 @@ class WebAppTests(unittest.TestCase):
         code_col = self._column_index(total_sheet, "标准指标编码")
         name_col = self._column_index(total_sheet, "标准指标名称")
         self.assertEqual(total_sheet.cell(row=2, column=value_col).value, 12346.68)
-        self.assertEqual(total_sheet.cell(row=2, column=code_col).value, "ZT_002")
+        self.assertEqual(total_sheet.cell(row=2, column=code_col).value, "ZT_068")
         self.assertEqual(total_sheet.cell(row=2, column=name_col).value, "短期借款")
         workbook.close()
         preview_response = self.client.get(f"/jobs/{job_id}/download-preview/combined_metrics_xlsx")
@@ -1509,11 +1573,462 @@ class WebAppTests(unittest.TestCase):
         self.assertIn('data-original-value="12345.67"', saved_page.text)
         self.assertIn('data-saved-value="12346.68"', saved_page.text)
         self.assertIn('data-original-code="ZT_001"', saved_page.text)
-        self.assertIn('data-saved-code="ZT_002"', saved_page.text)
+        self.assertIn('data-saved-code="ZT_068"', saved_page.text)
         self.assertTrue((raw_review_dir(job) / "raw_review_actions.json").exists())
         self.assertTrue((mapping_review_dir(job) / "mapping_review_actions.json").exists())
         self.assertTrue(str(actions_path.resolve()).startswith(str(self.runtime_root.resolve())))
         self.assertFalse((REPO_ROOT / "unified_review_actions.csv").exists())
+
+    def test_unified_proofread_merges_beginning_and_ending_values_into_one_row(self):
+        job_id = self._create_job("unified merged periods")
+        raw_path = self._create_raw_metrics_fixture(metric_name="货币资金", metric_value="100")
+        run_dir = raw_path.parent
+        self._write_csv(
+            raw_path,
+            [
+                {
+                    "填表日期": "2022-12-31",
+                    "当前条目日期": "2022-01-01",
+                    "期间类型": "期初数",
+                    "公司名": "AAA有限公司",
+                    "指标名": "应收帐款",
+                    "指标数值": "74954432.97",
+                },
+                {
+                    "填表日期": "2022-12-31",
+                    "当前条目日期": "2022-12-31",
+                    "期间类型": "期末数",
+                    "公司名": "AAA有限公司",
+                    "指标名": "应收帐款",
+                    "指标数值": "80163547.04",
+                },
+            ],
+            ["填表日期", "当前条目日期", "期间类型", "公司名", "指标名", "指标数值"],
+        )
+        self._write_csv(
+            run_dir / "raw_metrics_detailed.csv",
+            [
+                {
+                    "source_cell_ref": "CASE1:1:aliyun_table:0:1-1:2-2",
+                    "page_no": "1",
+                    "bbox_json": '[{"x":1,"y":2},{"x":3,"y":4}]',
+                    "text_confidence": "0.96",
+                    "value_confidence": "0.91",
+                    "evidence_path": str(self.corpus_root / "CASE1" / "input" / "sample.pdf"),
+                    "source_file": "fixture.json",
+                    "provider": "aliyun_table",
+                    "doc_id": "CASE1",
+                    "table_id": "0",
+                    "logical_subtable_id": "0_sub1",
+                    "row_index": "1",
+                    "col_index": "2",
+                    "row_label_raw": "应收帐款",
+                    "row_label_clean": "应收帐款",
+                    "period_role_raw": "期初数",
+                    "period_role_norm": "beginning",
+                    "statement_type": "balance_sheet",
+                    "statement_name_raw": "资产负债表",
+                    "value_type": "amount",
+                    "confidence": "0.91",
+                },
+                {
+                    "source_cell_ref": "CASE1:1:aliyun_table:0:1-1:3-3",
+                    "page_no": "1",
+                    "bbox_json": '[{"x":5,"y":6},{"x":7,"y":8}]',
+                    "text_confidence": "0.96",
+                    "value_confidence": "0.93",
+                    "evidence_path": str(self.corpus_root / "CASE1" / "input" / "sample.pdf"),
+                    "source_file": "fixture.json",
+                    "provider": "aliyun_table",
+                    "doc_id": "CASE1",
+                    "table_id": "0",
+                    "logical_subtable_id": "0_sub1",
+                    "row_index": "1",
+                    "col_index": "3",
+                    "row_label_raw": "应收帐款",
+                    "row_label_clean": "应收帐款",
+                    "period_role_raw": "期末数",
+                    "period_role_norm": "ending",
+                    "statement_type": "balance_sheet",
+                    "statement_name_raw": "资产负债表",
+                    "value_type": "amount",
+                    "confidence": "0.93",
+                },
+            ],
+            [
+                "source_cell_ref",
+                "page_no",
+                "bbox_json",
+                "text_confidence",
+                "value_confidence",
+                "evidence_path",
+                "source_file",
+                "provider",
+                "doc_id",
+                "table_id",
+                "logical_subtable_id",
+                "row_index",
+                "col_index",
+                "row_label_raw",
+                "row_label_clean",
+                "period_role_raw",
+                "period_role_norm",
+                "statement_type",
+                "statement_name_raw",
+                "value_type",
+                "confidence",
+            ],
+        )
+        self.client.post(
+            f"/jobs/{job_id}/standard-metrics/run",
+            data={"raw_metrics_path": str(raw_path)},
+            follow_redirects=False,
+        )
+        job = get_job(self.settings, job_id)
+        self.assertIsNotNone(job)
+        items = load_unified_review_items(job)
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["original_metric_name"], "应收帐款")
+        self.assertEqual(items[0]["table_date"], "2022-12-31")
+        self.assertEqual(items[0]["beginning_value"]["current_value"], "74954432.97")
+        self.assertEqual(items[0]["ending_value"]["current_value"], "80163547.04")
+        self.assertEqual(items[0]["value_confidence_score"], "0.910000")
+
+        response = self.client.get(f"/jobs/{job_id}/proofread")
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn("期间类型", response.text)
+        self.assertEqual(response.text.count('data-original-metric-name="应收帐款"'), 1)
+        self.assertIn("74,954,432.97", response.text)
+        self.assertIn("80,163,547.04", response.text)
+
+    def test_unified_proofread_merges_current_and_previous_period_values_into_one_row(self):
+        job_id = self._create_job("unified merged current previous periods")
+        raw_path = self._create_raw_metrics_fixture(metric_name="主营业务收入", metric_value="100")
+        run_dir = raw_path.parent
+        self._write_csv(
+            raw_path,
+            [
+                {
+                    "填表日期": "2022-12-31",
+                    "当前条目日期": "",
+                    "期间类型": "本期",
+                    "公司名": "AAA有限公司",
+                    "指标名": "主营业务收入",
+                    "指标数值": "251143230.20",
+                },
+                {
+                    "填表日期": "2022-12-31",
+                    "当前条目日期": "",
+                    "期间类型": "上年累计",
+                    "公司名": "AAA有限公司",
+                    "指标名": "主营业务收入",
+                    "指标数值": "227585011.97",
+                },
+            ],
+            ["填表日期", "当前条目日期", "期间类型", "公司名", "指标名", "指标数值"],
+        )
+        self._write_csv(
+            run_dir / "raw_metrics_detailed.csv",
+            [
+                {
+                    "source_cell_ref": "CASE1:2:aliyun_table:0:1-1:2-2",
+                    "page_no": "2",
+                    "bbox_json": '[{"x":1,"y":2},{"x":3,"y":4}]',
+                    "text_confidence": "",
+                    "value_confidence": "0.91",
+                    "evidence_path": str(self.corpus_root / "CASE1" / "input" / "sample.pdf"),
+                    "source_file": "fixture.json",
+                    "provider": "aliyun_table",
+                    "doc_id": "CASE1",
+                    "table_id": "0",
+                    "logical_subtable_id": "0_sub1",
+                    "row_index": "1",
+                    "col_index": "2",
+                    "row_label_raw": "主营业务收入",
+                    "row_label_clean": "主营业务收入",
+                    "header_path": "本年累计数",
+                    "period_role_raw": "本期",
+                    "period_role_norm": "current_period",
+                    "statement_type": "income_statement",
+                    "statement_name_raw": "利润表",
+                    "value_type": "amount",
+                    "confidence": "0.91",
+                },
+                {
+                    "source_cell_ref": "CASE1:2:aliyun_table:0:1-1:3-3",
+                    "page_no": "2",
+                    "bbox_json": '[{"x":5,"y":6},{"x":7,"y":8}]',
+                    "text_confidence": "",
+                    "value_confidence": "0.92",
+                    "evidence_path": str(self.corpus_root / "CASE1" / "input" / "sample.pdf"),
+                    "source_file": "fixture.json",
+                    "provider": "aliyun_table",
+                    "doc_id": "CASE1",
+                    "table_id": "0",
+                    "logical_subtable_id": "0_sub1",
+                    "row_index": "1",
+                    "col_index": "3",
+                    "row_label_raw": "主营业务收入",
+                    "row_label_clean": "主营业务收入",
+                    "header_path": "上年累计数",
+                    "period_role_raw": "上年累计",
+                    "period_role_norm": "previous_period",
+                    "statement_type": "income_statement",
+                    "statement_name_raw": "利润表",
+                    "value_type": "amount",
+                    "confidence": "0.92",
+                },
+            ],
+            [
+                "source_cell_ref",
+                "page_no",
+                "bbox_json",
+                "text_confidence",
+                "value_confidence",
+                "evidence_path",
+                "source_file",
+                "provider",
+                "doc_id",
+                "table_id",
+                "logical_subtable_id",
+                "row_index",
+                "col_index",
+                "row_label_raw",
+                "row_label_clean",
+                "header_path",
+                "period_role_raw",
+                "period_role_norm",
+                "statement_type",
+                "statement_name_raw",
+                "value_type",
+                "confidence",
+            ],
+        )
+        self.client.post(
+            f"/jobs/{job_id}/standard-metrics/run",
+            data={"raw_metrics_path": str(raw_path)},
+            follow_redirects=False,
+        )
+        job = get_job(self.settings, job_id)
+        self.assertIsNotNone(job)
+        items = load_unified_review_items(job)
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["original_metric_name"], "主营业务收入")
+        self.assertEqual(items[0]["beginning_value"]["slot_label"], "本年累计数")
+        self.assertEqual(items[0]["ending_value"]["slot_label"], "上年累计数")
+        self.assertEqual(items[0]["beginning_value"]["current_value"], "251143230.20")
+        self.assertEqual(items[0]["ending_value"]["current_value"], "227585011.97")
+
+        response = self.client.get(f"/jobs/{job_id}/proofread")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.text.count('data-original-metric-name="主营业务收入"'), 1)
+        self.assertIn("本年累计数", response.text)
+        self.assertIn("上年累计数", response.text)
+        self.assertIn("251,143,230.20", response.text)
+        self.assertIn("227,585,011.97", response.text)
+
+    def test_unified_proofread_single_amount_column_uses_generic_empty_second_header(self):
+        job_id = self._create_job("unified single amount period")
+        raw_path = self._create_raw_metrics_fixture(metric_name="支付给职工以及为职工支付的现金", metric_value="2698533.22")
+        run_dir = raw_path.parent
+        self._write_csv(
+            raw_path,
+            [
+                {
+                    "填表日期": "2022-12-31",
+                    "当前条目日期": "2022-12-31",
+                    "期间类型": "金额",
+                    "公司名": "AAA有限公司",
+                    "指标名": "支付给职工以及为职工支付的现金",
+                    "指标数值": "2698533.22",
+                }
+            ],
+            ["填表日期", "当前条目日期", "期间类型", "公司名", "指标名", "指标数值"],
+        )
+        self._write_csv(
+            run_dir / "raw_metrics_detailed.csv",
+            [
+                {
+                    "source_cell_ref": "CASE1:3:aliyun_table:0:64-64:2-2",
+                    "page_no": "3",
+                    "bbox_json": '[{"x":1,"y":2},{"x":3,"y":4}]',
+                    "text_confidence": "",
+                    "value_confidence": "0.91",
+                    "evidence_path": str(self.corpus_root / "CASE1" / "input" / "sample.pdf"),
+                    "source_file": "fixture.json",
+                    "provider": "aliyun_table",
+                    "doc_id": "CASE1",
+                    "table_id": "0",
+                    "logical_subtable_id": "0_sub1",
+                    "row_index": "64",
+                    "col_index": "2",
+                    "row_label_raw": "支付给职工以及为职工支付的现金",
+                    "row_label_clean": "支付给职工以及为职工支付的现金",
+                    "header_path": "金额",
+                    "period_role_raw": "金额",
+                    "period_role_norm": "amount",
+                    "statement_type": "cash_flow",
+                    "statement_name_raw": "现金流量表",
+                    "value_type": "amount",
+                    "confidence": "0.91",
+                }
+            ],
+            [
+                "source_cell_ref",
+                "page_no",
+                "bbox_json",
+                "text_confidence",
+                "value_confidence",
+                "evidence_path",
+                "source_file",
+                "provider",
+                "doc_id",
+                "table_id",
+                "logical_subtable_id",
+                "row_index",
+                "col_index",
+                "row_label_raw",
+                "row_label_clean",
+                "header_path",
+                "period_role_raw",
+                "period_role_norm",
+                "statement_type",
+                "statement_name_raw",
+                "value_type",
+                "confidence",
+            ],
+        )
+        self.client.post(
+            f"/jobs/{job_id}/standard-metrics/run",
+            data={"raw_metrics_path": str(raw_path)},
+            follow_redirects=False,
+        )
+        job = get_job(self.settings, job_id)
+        self.assertIsNotNone(job)
+        items = load_unified_review_items(job)
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["period_columns"][0]["label"], "金额")
+        self.assertEqual(items[0]["period_columns"][1]["label"], "期间数值二")
+
+        response = self.client.get(f"/jobs/{job_id}/proofread")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("金额", response.text)
+        self.assertIn("期间数值二", response.text)
+        self.assertNotIn("现金流量表 期初数 期末数", response.text)
+
+    def test_unified_proofread_section_label_infers_statement_name_and_split_position(self):
+        job_id = self._create_job("unified readable section label")
+        source_file = self.temp_path / "tencent_balance_page.json"
+        source_file.write_text(
+            json.dumps(
+                {
+                    "TableDetections": [
+                        {
+                            "TableCoordPoint": [
+                                {"X": 100, "Y": 100},
+                                {"X": 900, "Y": 100},
+                                {"X": 900, "Y": 500},
+                                {"X": 100, "Y": 500},
+                            ],
+                            "Cells": [
+                                {"RowTl": 0, "RowBr": 1, "ColTl": 0, "ColBr": 1, "Text": "资产"},
+                                {"RowTl": 0, "RowBr": 1, "ColTl": 1, "ColBr": 2, "Text": "行次"},
+                                {"RowTl": 0, "RowBr": 1, "ColTl": 2, "ColBr": 3, "Text": "年初数"},
+                                {"RowTl": 0, "RowBr": 1, "ColTl": 3, "ColBr": 4, "Text": "期末数"},
+                                {"RowTl": 0, "RowBr": 1, "ColTl": 4, "ColBr": 5, "Text": "负债及所有者权益"},
+                                {"RowTl": 0, "RowBr": 1, "ColTl": 5, "ColBr": 6, "Text": "行次"},
+                                {"RowTl": 0, "RowBr": 1, "ColTl": 6, "ColBr": 7, "Text": "年初数"},
+                                {"RowTl": 0, "RowBr": 1, "ColTl": 7, "ColBr": 8, "Text": "期末数"},
+                                {"RowTl": 2, "RowBr": 3, "ColTl": 4, "ColBr": 5, "Text": "短期借款"},
+                                {"RowTl": 2, "RowBr": 3, "ColTl": 6, "ColBr": 7, "Text": "37,550,000.00"},
+                                {"RowTl": 2, "RowBr": 3, "ColTl": 7, "ColBr": 8, "Text": "136,000,000.00"},
+                            ],
+                        }
+                    ],
+                    "Angle": 0,
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        raw_path = self._create_raw_metrics_fixture(metric_name="短期借款", metric_value="136000000")
+        run_dir = raw_path.parent
+        self._write_csv(
+            raw_path,
+            [
+                {
+                    "填表日期": "2022-12-31",
+                    "当前条目日期": "2022-12-31",
+                    "期间类型": "期末数",
+                    "公司名": "AAA有限公司",
+                    "指标名": "短期借款",
+                    "指标数值": "136000000",
+                }
+            ],
+            ["填表日期", "当前条目日期", "期间类型", "公司名", "指标名", "指标数值"],
+        )
+        self._write_csv(
+            run_dir / "raw_metrics_detailed.csv",
+            [
+                {
+                    "source_cell_ref": "CASE1:1:tencent_table_v3:1:2-2:7-7",
+                    "page_no": "1",
+                    "bbox_json": "",
+                    "text_confidence": "",
+                    "value_confidence": "0.94",
+                    "evidence_path": str(self.corpus_root / "CASE1" / "input" / "sample.pdf"),
+                    "source_file": str(source_file),
+                    "provider": "tencent_table_v3",
+                    "doc_id": "CASE1",
+                    "table_id": "1",
+                    "logical_subtable_id": "1_sub2",
+                    "row_index": "2",
+                    "col_index": "7",
+                    "row_label_raw": "短期借款",
+                    "row_label_clean": "短期借款",
+                    "period_role_raw": "期末数",
+                    "period_role_norm": "ending",
+                    "statement_type": "",
+                    "statement_name_raw": "",
+                    "value_type": "amount",
+                    "confidence": "0.94",
+                }
+            ],
+            [
+                "source_cell_ref",
+                "page_no",
+                "bbox_json",
+                "text_confidence",
+                "value_confidence",
+                "evidence_path",
+                "source_file",
+                "provider",
+                "doc_id",
+                "table_id",
+                "logical_subtable_id",
+                "row_index",
+                "col_index",
+                "row_label_raw",
+                "row_label_clean",
+                "period_role_raw",
+                "period_role_norm",
+                "statement_type",
+                "statement_name_raw",
+                "value_type",
+                "confidence",
+            ],
+        )
+        self.client.post(
+            f"/jobs/{job_id}/standard-metrics/run",
+            data={"raw_metrics_path": str(raw_path)},
+            follow_redirects=False,
+        )
+
+        response = self.client.get(f"/jobs/{job_id}/proofread")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("资产负债表-右半部分", response.text)
+        self.assertNotIn("来源表 1", response.text)
+        self.assertNotIn("拆分区 2", response.text)
 
     def test_unified_proofread_rejects_invalid_numeric_edit_and_documents_link_to_it(self):
         job_id = self._create_job("unified invalid")
@@ -1567,17 +2082,181 @@ class WebAppTests(unittest.TestCase):
         self.assertIn("data-row-page-chip", script)
         self.assertNotIn('setAttribute("data-original-value"', script)
         self.assertNotIn("search();\n    });\n    input.addEventListener(\"click\"", script)
+        style = (REPO_ROOT / "webapp" / "static" / "style.css").read_text(encoding="utf-8")
+        self.assertIn(".unified-review-table thead th", style)
+        self.assertIn("position: static;", style)
+        self.assertIn(".table-section-row th", style)
+        self.assertIn("top: 0;", style)
+
+    def test_unified_proofread_filters_numeric_metric_name_but_keeps_missing_period_for_review(self):
+        job_id = self._create_job("unified filters bad source rows")
+        raw_path = self._create_raw_metrics_fixture(metric_name="货币资金", metric_value="100")
+        run_dir = raw_path.parent
+        self._write_csv(
+            raw_path,
+            [
+                {
+                    "填表日期": "2022-12-31",
+                    "当前条目日期": "2022-12-31",
+                    "期间类型": "期末数",
+                    "公司名": "AAA有限公司",
+                    "指标名": "货币资金",
+                    "指标数值": "100",
+                },
+                {
+                    "填表日期": "2022-12-31",
+                    "当前条目日期": "",
+                    "期间类型": "42,940,481.00",
+                    "公司名": "AAA有限公司",
+                    "指标名": "26",
+                    "指标数值": "7132218.77",
+                },
+                {
+                    "填表日期": "2022-12-31",
+                    "当前条目日期": "",
+                    "期间类型": "",
+                    "公司名": "AAA有限公司",
+                    "指标名": "其他应付款",
+                    "指标数值": "113866652.00",
+                },
+            ],
+            ["填表日期", "当前条目日期", "期间类型", "公司名", "指标名", "指标数值"],
+        )
+        coarse_bbox = '[{"X":77,"Y":211},{"X":1159,"Y":211},{"X":1159,"Y":1513},{"X":77,"Y":1513}]'
+        self._write_csv(
+            run_dir / "raw_metrics_detailed.csv",
+            [
+                {
+                    "source_cell_ref": "CASE1:1:aliyun_table:0:1-1:2-2",
+                    "page_no": "1",
+                    "bbox_json": '[{"x":1,"y":2},{"x":3,"y":4}]',
+                    "text_confidence": "",
+                    "value_confidence": "",
+                    "evidence_path": str(self.corpus_root / "CASE1" / "input" / "sample.pdf"),
+                    "source_file": "fixture.json",
+                    "provider": "aliyun_table",
+                    "doc_id": "CASE1",
+                    "table_id": "0",
+                    "logical_subtable_id": "0_sub1",
+                    "row_index": "1",
+                    "col_index": "2",
+                    "row_label_raw": "货币资金",
+                    "row_label_clean": "货币资金",
+                    "period_role_raw": "期末数",
+                    "period_role_norm": "ending",
+                    "statement_type": "balance_sheet",
+                    "statement_name_raw": "资产负债表",
+                    "value_type": "amount",
+                    "confidence": "",
+                },
+                {
+                    "source_cell_ref": "CASE1:1:tencent_table_v3:5:6-8:1-3",
+                    "page_no": "1",
+                    "bbox_json": coarse_bbox,
+                    "text_confidence": "",
+                    "value_confidence": "",
+                    "evidence_path": str(self.corpus_root / "CASE1" / "input" / "sample.pdf"),
+                    "source_file": "fixture.json",
+                    "provider": "tencent_table_v3",
+                    "doc_id": "CASE1",
+                    "table_id": "5",
+                    "logical_subtable_id": "5_sub1",
+                    "row_index": "6",
+                    "col_index": "1",
+                    "row_label_raw": "53,295,859.26",
+                    "row_label_clean": "26",
+                    "period_role_raw": "42,940,481.00",
+                    "period_role_norm": "unknown",
+                    "statement_type": "balance_sheet",
+                    "statement_name_raw": "资产负债表",
+                    "value_type": "amount",
+                    "confidence": "",
+                },
+                {
+                    "source_cell_ref": "CASE1:1:tencent_table_v3:5:8-10:3-5",
+                    "page_no": "1",
+                    "bbox_json": coarse_bbox,
+                    "text_confidence": "",
+                    "value_confidence": "",
+                    "evidence_path": str(self.corpus_root / "CASE1" / "input" / "sample.pdf"),
+                    "source_file": "fixture.json",
+                    "provider": "tencent_table_v3",
+                    "doc_id": "CASE1",
+                    "table_id": "5",
+                    "logical_subtable_id": "5_sub1",
+                    "row_index": "8",
+                    "col_index": "3",
+                    "row_label_raw": "其他应付款",
+                    "row_label_clean": "其他应付款",
+                    "period_role_raw": "",
+                    "period_role_norm": "unknown",
+                    "statement_type": "balance_sheet",
+                    "statement_name_raw": "资产负债表",
+                    "value_type": "amount",
+                    "confidence": "",
+                },
+            ],
+            [
+                "source_cell_ref",
+                "page_no",
+                "bbox_json",
+                "text_confidence",
+                "value_confidence",
+                "evidence_path",
+                "source_file",
+                "provider",
+                "doc_id",
+                "table_id",
+                "logical_subtable_id",
+                "row_index",
+                "col_index",
+                "row_label_raw",
+                "row_label_clean",
+                "period_role_raw",
+                "period_role_norm",
+                "statement_type",
+                "statement_name_raw",
+                "value_type",
+                "confidence",
+            ],
+        )
+        self.client.post(
+            f"/jobs/{job_id}/standard-metrics/run",
+            data={"raw_metrics_path": str(raw_path)},
+            follow_redirects=False,
+        )
+        job = get_job(self.settings, job_id)
+        self.assertIsNotNone(job)
+
+        unified_items = load_unified_review_items(job)
+        mapping_items = load_mapping_review_items(job)
+        self.assertEqual([item["original_metric_name"] for item in unified_items], ["货币资金", "其他应付款"])
+        missing_period_item = next(item for item in unified_items if item["original_metric_name"] == "其他应付款")
+        self.assertTrue(missing_period_item["temporal_review_required"])
+        self.assertEqual(missing_period_item["base_status"], "review_required")
+        self.assertFalse(any(item.get("original_metric_name") == "26" for item in mapping_items))
+        self.assertTrue(any(item.get("original_metric_name") == "其他应付款" for item in mapping_items))
+
+        response = self.client.get(f"/jobs/{job_id}/proofread")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("货币资金", response.text)
+        self.assertIn("期末数", response.text)
+        self.assertNotIn(">26<", response.text)
+        self.assertIn("其他应付款", response.text)
+        self.assertIn("日期待校对", response.text)
+        self.assertNotIn("42,940,481.00", response.text)
+        self.assertNotIn(coarse_bbox, response.text)
 
     def test_standard_term_search_supports_code_name_and_pinyin_initials(self):
-        for query in ("2", "002", "ZT_002", "短期", "借款", "dqjk"):
+        for query in ("68", "068", "ZT_068", "短期", "借款", "dqjk"):
             results = search_standard_terms(query, limit=5)
             self.assertTrue(results, query)
-            self.assertEqual(results[0]["code"], "ZT_002")
+            self.assertEqual(results[0]["code"], "ZT_068")
             self.assertEqual(results[0]["name"], "短期借款")
 
         response = self.client.get("/api/standard-terms/search?q=dqjk")
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["results"][0]["display_label"], "ZT_002 短期借款")
+        self.assertEqual(response.json()["results"][0]["display_label"], "ZT_068 短期借款")
 
     def test_webapp_base_path_serves_pages_api_and_redirects(self):
         settings = self.make_settings(base_path="/AutoFinance")
@@ -1595,9 +2274,9 @@ class WebAppTests(unittest.TestCase):
             static_response = client.get("/AutoFinance/static/app.js")
             self.assertEqual(static_response.status_code, 200)
 
-            api_response = client.get("/AutoFinance/api/standard-terms/search?q=2")
+            api_response = client.get("/AutoFinance/api/standard-terms/search?q=68")
             self.assertEqual(api_response.status_code, 200)
-            self.assertEqual(api_response.json()["results"][0]["display_label"], "ZT_002 短期借款")
+            self.assertEqual(api_response.json()["results"][0]["display_label"], "ZT_068 短期借款")
 
             redirect_response = client.get("/AutoFinance/advanced", follow_redirects=False)
             self.assertEqual(redirect_response.status_code, 303)
@@ -1752,7 +2431,7 @@ class WebAppTests(unittest.TestCase):
         self.assertEqual(Path(raw_items[0]["source_file"]).resolve(), source_json.resolve())
         self.assertEqual(source_preview_rotation_degrees(raw_items[0]), -90)
 
-        standard_dir = STANDARD_METRICS_GENERATED_ROOT / "WEB_TEST_STALE_SOURCE" / "RUN_WEB_TEST"
+        standard_dir = self.standard_metrics_root / "WEB_TEST_STALE_SOURCE" / "RUN_WEB_TEST"
         self.addCleanup(lambda: shutil.rmtree(standard_dir.parent, ignore_errors=True))
         standard_dir.mkdir(parents=True, exist_ok=True)
         standard_csv = standard_dir / "standardized_metrics.csv"
@@ -1764,7 +2443,7 @@ class WebAppTests(unittest.TestCase):
                     "review_item_id": "maprev_000001",
                     "raw_metric_id": "CASE1:1:aliyun_table:0:1-1:2-2",
                     "original_metric_name": "短期借款",
-                    "candidate_code": "ZT_002",
+                    "candidate_code": "ZT_068",
                     "candidate_name": "短期借款",
                     "mapping_status": "review_required",
                     "mapping_method": "candidate",
@@ -1807,7 +2486,7 @@ class WebAppTests(unittest.TestCase):
         job = get_job(self.settings, job_id)
         state = load_simple_flow_state(job)
         output_dir = Path(state["standard_summary"]["output_dir"]).resolve()
-        self.assertTrue(str(output_dir).startswith(str(STANDARD_METRICS_GENERATED_ROOT.resolve())))
+        self.assertTrue(str(output_dir).startswith(str(self.standard_metrics_root.resolve())))
         self.assertTrue(str(Path(job.output_dir)).startswith(str(self.settings.jobs_root)))
         self.assertFalse((REPO_ROOT / "standardized_metrics.csv").exists())
 

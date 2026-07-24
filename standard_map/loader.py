@@ -13,18 +13,40 @@ from .models import RawMetricRow
 
 RAW_REQUIRED_COLUMNS = ["填表日期", "当前条目日期", "公司名", "指标名", "指标数值"]
 
+PERIOD_ROLE_LABELS_ZH = {
+    "beginning": "期初数",
+    "ending": "期末数",
+    "previous_ending": "上期期末",
+    "current_point": "当前时点",
+    "current_period": "本期",
+    "current_year": "本年",
+    "previous_period": "上期",
+    "previous_year": "上年",
+    "amount": "金额",
+    "explicit_date": "明确日期",
+}
 
-def validate_input_path(input_path: Path) -> None:
-    raw_root = RAW_METRICS_GENERATED_ROOT.resolve()
+
+def validate_input_path(
+    input_path: Path,
+    *,
+    raw_metrics_root: Path = RAW_METRICS_GENERATED_ROOT,
+) -> None:
+    raw_root = raw_metrics_root.resolve()
     try:
         input_path.resolve().relative_to(raw_root)
     except ValueError as exc:
         raise ValueError(f"Stage 13 input must be under {raw_root}; got {input_path}") from exc
 
 
-def load_raw_metrics(input_path: Path, *, company_name_override: str = "") -> list[RawMetricRow]:
+def load_raw_metrics(
+    input_path: Path,
+    *,
+    company_name_override: str = "",
+    raw_metrics_root: Path = RAW_METRICS_GENERATED_ROOT,
+) -> list[RawMetricRow]:
     input_path = input_path.resolve()
-    validate_input_path(input_path)
+    validate_input_path(input_path, raw_metrics_root=raw_metrics_root)
     if not input_path.exists() or not input_path.is_file():
         raise ValueError(f"Raw metrics input does not exist: {input_path}")
     if input_path.suffix.lower() == ".csv":
@@ -49,6 +71,8 @@ def load_raw_metrics(input_path: Path, *, company_name_override: str = "") -> li
             "source_cell_ref": detailed.get("source_cell_ref", ""),
             "statement_type": detailed.get("statement_type", ""),
             "header_path": detailed.get("header_path", ""),
+            "period_role_raw": detailed.get("period_role_raw", ""),
+            "period_role_norm": detailed.get("period_role_norm", ""),
             "row_context_path": detailed.get("row_context_path", ""),
             "value_type": detailed.get("value_type", ""),
         }
@@ -62,6 +86,7 @@ def load_raw_metrics(input_path: Path, *, company_name_override: str = "") -> li
                 company_name=str(company_name_override or row.get("公司名", "") or ""),
                 metric_name=str(row.get("指标名", "") or ""),
                 metric_value=row.get("指标数值", ""),
+                period_role=_period_role_from_row(row, detailed),
                 raw_row=dict(row),
                 provenance=provenance,
             )
@@ -69,11 +94,16 @@ def load_raw_metrics(input_path: Path, *, company_name_override: str = "") -> li
     return results
 
 
-def infer_doc_id(input_path: Path, override: str = "") -> str:
+def infer_doc_id(
+    input_path: Path,
+    override: str = "",
+    *,
+    raw_metrics_root: Path = RAW_METRICS_GENERATED_ROOT,
+) -> str:
     if override.strip():
         return override.strip()
     try:
-        relative = input_path.resolve().relative_to(RAW_METRICS_GENERATED_ROOT.resolve())
+        relative = input_path.resolve().relative_to(raw_metrics_root.resolve())
     except ValueError:
         return ""
     return relative.parts[0] if len(relative.parts) >= 3 else ""
@@ -111,3 +141,16 @@ def _load_detailed_sidecar(input_path: Path) -> list[dict[str, Any]]:
         return []
     with sidecar.open("r", encoding="utf-8-sig", newline="") as handle:
         return [dict(row) for row in csv.DictReader(handle)]
+
+
+def _period_role_from_row(row: dict[str, Any], detailed: dict[str, Any]) -> str:
+    explicit = str(row.get("期间类型", "") or row.get("period_role", "") or "").strip()
+    if explicit:
+        return explicit
+    norm = str(detailed.get("period_role_norm", "") or "").strip()
+    raw = str(detailed.get("period_role_raw", "") or "").strip()
+    if norm and norm != "unknown":
+        return PERIOD_ROLE_LABELS_ZH.get(norm, norm)
+    if raw and raw != "unknown":
+        return raw
+    return ""

@@ -21,6 +21,8 @@ x-webapp-env: &webapp-env
   WEBAPP_RESULTS_ROOT: ${WEBAPP_RESULTS_ROOT:-data/generated/web/results}
   WEBAPP_LOGS_ROOT: ${WEBAPP_LOGS_ROOT:-data/generated/web/logs}
   WEBAPP_DELETIONS_ROOT: ${WEBAPP_DELETIONS_ROOT:-data/generated/web/deletions}
+  WEBAPP_RAW_METRICS_ROOT: ${WEBAPP_RAW_METRICS_ROOT:-data/generated/raw_metrics}
+  WEBAPP_STANDARD_METRICS_ROOT: ${WEBAPP_STANDARD_METRICS_ROOT:-data/generated/standard_metrics}
   WEBAPP_DB_PATH: ${WEBAPP_DB_PATH:-data/generated/web/webapp.sqlite3}
   WEBAPP_CORPUS_ROOT: ${WEBAPP_CORPUS_ROOT:-data/corpus}
   WEBAPP_LIBRARY_ROOT: ${WEBAPP_LIBRARY_ROOT:-data/corpus/library}

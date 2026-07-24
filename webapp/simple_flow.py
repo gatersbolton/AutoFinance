@@ -17,11 +17,15 @@ from standard_map.decisions import append_mapping_decision_file, apply_mapping_d
 from standard_map.loader import infer_doc_id as infer_standard_doc_id
 from standard_map.loader import validate_input_path as validate_raw_metrics_input_path
 from standard_map.mapper import mapping_run_to_web_summary, run_standard_mapping
+from standard_map.normalizer import normalize_metric_name
+from standard_map.registry import load_standard_registry
+from standard_map.search import normalize_standard_code
 from standard_map.store import LocalMappingStore
 
 from .combined_downloads import COMBINED_WORKBOOK_DOWNLOAD_NAME, build_combined_metrics_workbook
 from .config import WebAppSettings
 from .models import JOB_MODE_UPLOAD, JobRecord
+from .review_quality import display_period_role, has_temporal_key, is_invalid_metric_name
 
 
 _WINDOWS_ABSOLUTE_PATH_RE = re.compile(r"^[A-Za-z]:[\\/]")
@@ -39,6 +43,27 @@ _SOURCE_TABLE_CELL_CACHE: dict[Path, list[dict[str, Any]]] = {}
 _SOURCE_PAGE_METADATA_CACHE: dict[Path, dict[str, Any]] = {}
 _SOURCE_PATH_RESOLUTION_CACHE: dict[tuple[str, ...], str] = {}
 _OCR_FILENAME_INDEX_CACHE: dict[str, dict[str, list[Path]]] = {}
+PERIOD_ROLE_LABELS_ZH = {
+    "beginning": "期初数",
+    "ending": "期末数",
+    "previous_ending": "上期期末",
+    "current_point": "当前时点",
+    "current_period": "本期",
+    "current_year": "本年",
+    "previous_period": "上期",
+    "previous_year": "上年",
+    "amount": "金额",
+    "explicit_date": "明确日期",
+}
+STATEMENT_TYPE_LABELS_ZH = {
+    "balance_sheet": "资产负债表",
+    "income_statement": "利润表",
+    "cash_flow": "现金流量表",
+    "changes_in_equity": "所有者权益变动表",
+    "equity_statement": "所有者权益变动表",
+    "note": "附注",
+    "unknown": "未识别报表",
+}
 
 
 def job_root(job: JobRecord) -> Path:
@@ -92,22 +117,27 @@ def write_json(path: Path, payload: Any) -> None:
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
 
 
-def load_simple_flow_state(job: JobRecord) -> dict[str, Any]:
+def load_simple_flow_state(
+    job: JobRecord,
+    settings: WebAppSettings | None = None,
+) -> dict[str, Any]:
+    raw_metrics_root = settings.raw_metrics_root if settings is not None else RAW_METRICS_GENERATED_ROOT
+    standard_metrics_root = settings.standard_metrics_root if settings is not None else STANDARD_METRICS_GENERATED_ROOT
     raw_summary = load_json(raw_step_summary_path(job))
     standard_summary = load_json(standard_step_summary_path(job))
     combined_summary = load_json(combined_download_summary_path(job))
-    raw_metrics_csv = _portable_summary_file(raw_summary.get("raw_metrics_csv", ""), RAW_METRICS_GENERATED_ROOT / job.job_id, "raw_metrics.csv")
+    raw_metrics_csv = _portable_summary_file(raw_summary.get("raw_metrics_csv", ""), raw_metrics_root / job.job_id, "raw_metrics.csv")
     if raw_metrics_csv is None and standard_summary.get("input_path"):
-        raw_metrics_csv = _portable_summary_file(standard_summary.get("input_path", ""), RAW_METRICS_GENERATED_ROOT / job.job_id, "raw_metrics.csv")
-    raw_metrics_xlsx = _portable_summary_file(raw_summary.get("raw_metrics_xlsx", ""), RAW_METRICS_GENERATED_ROOT / job.job_id, "raw_metrics.xlsx")
+        raw_metrics_csv = _portable_summary_file(standard_summary.get("input_path", ""), raw_metrics_root / job.job_id, "raw_metrics.csv")
+    raw_metrics_xlsx = _portable_summary_file(raw_summary.get("raw_metrics_xlsx", ""), raw_metrics_root / job.job_id, "raw_metrics.xlsx")
     standardized_metrics_csv = _portable_summary_file(
         standard_summary.get("standardized_metrics_csv", ""),
-        STANDARD_METRICS_GENERATED_ROOT / job.job_id,
+        standard_metrics_root / job.job_id,
         "standardized_metrics.csv",
     )
     standardized_metrics_xlsx = _portable_summary_file(
         standard_summary.get("standardized_metrics_xlsx", ""),
-        STANDARD_METRICS_GENERATED_ROOT / job.job_id,
+        standard_metrics_root / job.job_id,
         "standardized_metrics.xlsx",
     )
     combined_workbook = _portable_summary_file(
@@ -153,7 +183,7 @@ def run_raw_metrics_step(settings: WebAppSettings, job: JobRecord) -> dict[str, 
         raise ValueError(f"OCR 输出目录不存在: {input_dir}")
     source_image_dir = Path(job.source_image_dir).resolve() if job.source_image_dir and Path(job.source_image_dir).exists() else None
     doc_id = infer_raw_doc_id(input_dir, "")
-    output_base = RAW_METRICS_GENERATED_ROOT / doc_id
+    output_base = settings.raw_metrics_root / doc_id
     args = argparse.Namespace(
         input_dir=str(input_dir),
         output_dir=str(output_base),
@@ -165,6 +195,7 @@ def run_raw_metrics_step(settings: WebAppSettings, job: JobRecord) -> dict[str, 
         include_ratios=True,
         include_blank=False,
         debug=False,
+        raw_metrics_root=str(settings.raw_metrics_root),
     )
     result = run_raw_extraction(args=args, cli_args=["--input-dir", str(input_dir), "--output-dir", str(output_base)])
     payload = {
@@ -185,32 +216,42 @@ def run_raw_metrics_step(settings: WebAppSettings, job: JobRecord) -> dict[str, 
     return payload
 
 
-def resolve_raw_metrics_for_step2(raw_metrics_path: str, job: JobRecord) -> Path:
+def resolve_raw_metrics_for_step2(
+    raw_metrics_path: str,
+    job: JobRecord,
+    *,
+    settings: WebAppSettings,
+) -> Path:
+    raw_metrics_root = settings.raw_metrics_root
     explicit = str(raw_metrics_path or "").strip()
     if explicit:
         path = Path(explicit)
         if not path.is_absolute():
             path = REPO_ROOT / path
         path = path.resolve()
-        validate_raw_metrics_input_path(path)
+        validate_raw_metrics_input_path(path, raw_metrics_root=raw_metrics_root)
         if not path.exists():
             raise ValueError(f"原始数据表不存在: {path}")
         return path
-    state = load_simple_flow_state(job)
+    state = load_simple_flow_state(job, settings)
     raw_csv = str(state.get("raw_metrics_csv", "") or "")
     if not raw_csv:
         raise ValueError("请先生成原始数据表，或提供 raw_metrics.csv 路径。")
     path = Path(raw_csv).resolve()
-    validate_raw_metrics_input_path(path)
+    validate_raw_metrics_input_path(path, raw_metrics_root=raw_metrics_root)
     if not path.exists():
         raise ValueError(f"原始数据表不存在: {path}")
     return path
 
 
 def run_standard_metrics_step(settings: WebAppSettings, job: JobRecord, *, raw_metrics_path: str = "") -> dict[str, Any]:
-    input_path = resolve_raw_metrics_for_step2(raw_metrics_path, job)
-    doc_id = infer_standard_doc_id(input_path, "")
-    output_base = STANDARD_METRICS_GENERATED_ROOT / (doc_id or "default")
+    input_path = resolve_raw_metrics_for_step2(
+        raw_metrics_path,
+        job,
+        settings=settings,
+    )
+    doc_id = infer_standard_doc_id(input_path, "", raw_metrics_root=settings.raw_metrics_root)
+    output_base = settings.standard_metrics_root / (doc_id or "default")
     args = argparse.Namespace(
         input=str(input_path),
         output_dir=str(output_base),
@@ -218,13 +259,15 @@ def run_standard_metrics_step(settings: WebAppSettings, job: JobRecord, *, raw_m
         mapping_store_path=str(settings.mapping_store_path),
         doc_id=doc_id,
         company_name="",
-        enable_llm_mapping=True,
+        enable_llm_mapping=False,
         disable_llm_mapping=False,
-        llm_model="deepseek-v4-flash",
+        llm_model="",
         llm_env_file=str(settings.deepseek_env_path),
         llm_mock=None,
         disable_llm_cache=False,
         debug=False,
+        raw_metrics_root=str(settings.raw_metrics_root),
+        standard_metrics_root=str(settings.standard_metrics_root),
     )
     result = run_standard_mapping(args=args, cli_args=["--input", str(input_path), "--output-dir", str(output_base)])
     payload = mapping_run_to_web_summary(result)
@@ -235,7 +278,7 @@ def run_standard_metrics_step(settings: WebAppSettings, job: JobRecord, *, raw_m
 
 
 def refresh_combined_metrics_workbook(settings: WebAppSettings, job: JobRecord) -> dict[str, Any]:
-    state = load_simple_flow_state(job)
+    state = load_simple_flow_state(job, settings)
     raw_csv = _existing_state_file(state.get("raw_metrics_csv", ""))
     standard_csv = _existing_state_file(state.get("standardized_metrics_csv", ""))
     mapping_review_csv = standard_csv.parent / "mapping_review_items.csv" if standard_csv else None
@@ -251,7 +294,7 @@ def refresh_combined_metrics_workbook(settings: WebAppSettings, job: JobRecord) 
             "doc_id": doc_id,
             "job_id": job.job_id,
             "summary_path": combined_download_summary_path(job),
-            "path_hygiene_roots": [settings.runtime_root, STANDARD_METRICS_GENERATED_ROOT],
+            "path_hygiene_roots": [settings.runtime_root, settings.standard_metrics_root],
         },
         unified_review_actions_path=job_root(job) / "unified_review" / "unified_review_actions.json",
     )
@@ -504,6 +547,18 @@ def load_raw_review_items(job: JobRecord, *, apply_actions: bool = True) -> list
     items: list[dict[str, Any]] = []
     for index, row in enumerate(rows, start=1):
         detailed = _resolve_detailed_source_paths(job, detailed_rows[index - 1] if index - 1 < len(detailed_rows) else {})
+        metric_name = str(row.get("指标名") or detailed.get("metric_name") or detailed.get("row_label_clean") or "").strip()
+        if is_invalid_metric_name(metric_name):
+            continue
+        period_role = _display_period_role(detailed.get("period_role_norm", ""), detailed.get("period_role_raw", "")) or _display_period_role(
+            row.get("期间类型", ""), ""
+        )
+        item_date = str(row.get("当前条目日期", "") or "").strip()
+        temporal_review_required = not has_temporal_key(
+            item_date,
+            detailed.get("period_role_norm", ""),
+            detailed.get("period_role_raw", "") or row.get("期间类型", ""),
+        )
         raw_metric_id = str(detailed.get("source_cell_ref", "") or f"raw_{index:06d}")
         source_bbox_json = detailed.get("bbox_json", "") or _infer_bbox_json_from_source_blocks(detailed, row)
         if _is_coarse_bbox_json(source_bbox_json):
@@ -524,9 +579,10 @@ def load_raw_review_items(job: JobRecord, *, apply_actions: bool = True) -> list
                 "review_item_id": f"rawrev_{index:06d}",
                 "raw_metric_id": raw_metric_id,
                 "填表日期": row.get("填表日期", ""),
-                "当前条目日期": row.get("当前条目日期", ""),
+                "当前条目日期": item_date,
+                "期间类型": period_role,
                 "公司名": row.get("公司名", ""),
-                "指标名": row.get("指标名", ""),
+                "指标名": row.get("指标名", "") or metric_name,
                 "指标数值": row.get("指标数值", ""),
                 "source_page_no": detailed.get("page_no", ""),
                 "source_bbox_json": source_bbox_json,
@@ -542,13 +598,20 @@ def load_raw_review_items(job: JobRecord, *, apply_actions: bool = True) -> list
                 "row_label_raw": detailed.get("row_label_raw", ""),
                 "header_path": detailed.get("header_path", ""),
                 "period_role_raw": detailed.get("period_role_raw", ""),
+                "period_role_norm": detailed.get("period_role_norm", ""),
+                "statement_type": detailed.get("statement_type", ""),
+                "statement_name_raw": detailed.get("statement_name_raw", ""),
                 "value_raw": detailed.get("value_raw", ""),
                 "value_type": detailed.get("value_type", ""),
                 "text_confidence": detailed.get("text_confidence", ""),
                 "value_confidence": detailed.get("value_confidence") or detailed.get("confidence", ""),
                 "confidence": detailed.get("confidence") or detailed.get("value_confidence", ""),
+                "issue_flags": detailed.get("issue_flags", ""),
+                "temporal_review_required": temporal_review_required,
+                "_source_order_index": index,
             }
         )
+    items = sorted(items, key=_source_item_sort_key)
     return _apply_raw_review_table_edits(job, items) if apply_actions else items
 
 
@@ -838,6 +901,7 @@ def build_raw_review_sheet(job: JobRecord, selected_item_id: str = "") -> dict[s
                 "key": "|".join(key),
                 "page_no": key[1],
                 "first_item_id": item.get("review_item_id", ""),
+                "label": _source_group_label(item, len(groups) + 1),
                 "count": 0,
                 "selected": key == selected_key,
             }
@@ -846,8 +910,6 @@ def build_raw_review_sheet(job: JobRecord, selected_item_id: str = "") -> dict[s
         group["count"] = int(group["count"]) + 1
         if key == selected_key:
             group["selected"] = True
-    for index, group in enumerate(groups, start=1):
-        group["label"] = f"第{group.get('page_no') or '?'}页 表格{index}"
     selected_group_index = next((index for index, group in enumerate(groups) if group.get("selected")), -1)
     next_group = groups[selected_group_index + 1] if 0 <= selected_group_index < len(groups) - 1 else None
 
@@ -896,6 +958,149 @@ def _safe_int(value: Any, *, default: int = 0) -> int:
         return default
 
 
+def _source_item_sort_key(item: dict[str, Any]) -> tuple[Any, ...]:
+    return (
+        str(item.get("source_pdf_path", "") or ""),
+        _safe_int(item.get("source_page_no"), default=0),
+        _natural_sort_key(item.get("table_id", "")),
+        _natural_sort_key(item.get("logical_subtable_id", "")),
+        _safe_int(item.get("row_index"), default=0),
+        _safe_int(item.get("col_index"), default=0),
+        _safe_int(item.get("_source_order_index"), default=0),
+    )
+
+
+def _natural_sort_key(value: Any) -> tuple[Any, ...]:
+    parts = re.split(r"(\d+)", str(value or ""))
+    key: list[Any] = []
+    for part in parts:
+        if not part:
+            continue
+        key.append((0, int(part)) if part.isdigit() else (1, part))
+    return tuple(key)
+
+
+def _display_period_role(period_role_norm: Any, period_role_raw: Any = "") -> str:
+    return display_period_role(period_role_norm, period_role_raw)
+
+
+def _source_group_label(item: dict[str, Any], fallback_index: int) -> str:
+    page = str(item.get("source_page_no", "") or "?")
+    parts = [f"第{page}页"]
+    fill_date = str(item.get("填表日期", "") or item.get("fill_date", "") or "").strip()
+    if fill_date:
+        parts.append(f"填表日期 {fill_date}")
+    source_label = _table_source_label(item, fallback_index)
+    if source_label:
+        parts.append(source_label)
+    return " | ".join(parts)
+
+
+def _statement_label(item: dict[str, Any]) -> str:
+    raw_name = str(item.get("statement_name_raw", "") or "").strip()
+    if raw_name:
+        return raw_name
+    statement_type = str(item.get("statement_type", "") or "").strip()
+    return STATEMENT_TYPE_LABELS_ZH.get(statement_type, statement_type)
+
+
+def _table_source_label(item: dict[str, Any], fallback_index: int) -> str:
+    statement = _statement_label(item) or _infer_statement_label_from_source_table(item)
+    position = _split_position_label(item)
+    if statement and position:
+        return f"{statement}-{position}"
+    if statement:
+        return statement
+    if position:
+        return f"表格区域-{position}"
+    return "表格区域"
+
+
+def _infer_statement_label_from_source_table(item: dict[str, Any]) -> str:
+    cells = _source_table_cells_for_item(item)
+    text = _compact_source_text(" ".join(str(cell.get("word") or cell.get("text") or "") for cell in cells))
+    if not text:
+        return ""
+    if "资产" in text and ("负债及所有者权益" in text or "负债和所有者权益" in text):
+        return "资产负债表"
+    if "现金流量" in text or "经营活动产生的现金流量" in text:
+        return "现金流量表"
+    if "所有者权益变动" in text:
+        return "所有者权益变动表"
+    if ("营业收入" in text or "净利润" in text or "利润总额" in text) and "现金流量" not in text:
+        return "利润表"
+    return ""
+
+
+def _split_position_label(item: dict[str, Any]) -> str:
+    sub_index = _subtable_index(str(item.get("logical_subtable_id", "") or ""))
+    if not sub_index:
+        return ""
+    cells = _source_table_cells_for_item(item)
+    if not cells:
+        return ""
+    target_cell = _source_cell_for_item(item, cells)
+    if target_cell is None:
+        return ""
+    table_bbox = _bbox_from_raw_points(target_cell.get("table_bbox"))
+    cell_bbox = _cell_bbox(target_cell)
+    if table_bbox is None:
+        return ""
+    if cell_bbox is None or _same_bbox(cell_bbox, table_bbox):
+        cell_bbox = _infer_cell_bbox_from_table_grid(target_cell)
+    if cell_bbox is None:
+        return ""
+
+    table_left, table_top, table_right, table_bottom = table_bbox
+    cell_left, cell_top, cell_right, cell_bottom = cell_bbox
+    table_width = max(table_right - table_left, 1.0)
+    table_height = max(table_bottom - table_top, 1.0)
+    x_ratio = (((cell_left + cell_right) / 2) - table_left) / table_width
+    y_ratio = (((cell_top + cell_bottom) / 2) - table_top) / table_height
+
+    grid_col_count = max(_safe_int(cell.get("grid_col_count"), default=0) for cell in cells)
+    if grid_col_count >= 6 and abs(x_ratio - 0.5) >= 0.12:
+        return "左半部分" if x_ratio < 0.5 else "右半部分"
+    grid_row_count = max(_safe_int(cell.get("grid_row_count"), default=0) for cell in cells)
+    if grid_row_count >= 6 and abs(y_ratio - 0.5) >= 0.18:
+        return "上半部分" if y_ratio < 0.5 else "下半部分"
+    return ""
+
+
+def _source_table_cells_for_item(item: dict[str, Any]) -> list[dict[str, Any]]:
+    source_file = str(item.get("source_file", "") or "").strip()
+    if not source_file:
+        return []
+    table_id = str(item.get("table_id", "") or "").strip()
+    cells = _load_source_table_cells(source_file)
+    if not table_id:
+        return cells
+    table_cells = [cell for cell in cells if str(cell.get("tableId", cell.get("table_id", ""))) == table_id]
+    return table_cells or cells
+
+
+def _source_cell_for_item(item: dict[str, Any], cells: list[dict[str, Any]]) -> dict[str, Any] | None:
+    row_index = _safe_int(item.get("row_index"), default=-1)
+    col_index = _safe_int(item.get("col_index"), default=-1)
+    exact = [cell for cell in cells if _cell_row_matches(cell, row_index) and _cell_col_matches(cell, col_index)]
+    if exact:
+        return min(exact, key=_cell_span_score)
+    if col_index >= 0:
+        col_matches = [cell for cell in cells if _cell_col_matches(cell, col_index)]
+        if col_matches:
+            return min(col_matches, key=lambda cell: abs(_safe_int(cell.get("ysc", cell.get("row_start")), default=0) - max(row_index, 0)))
+    return cells[0] if cells else None
+
+
+def _compact_source_text(value: str) -> str:
+    return re.sub(r"\s+", "", str(value or ""))
+
+
+def _subtable_index(value: str) -> str:
+    match = re.search(r"sub(\d+)$", str(value or ""))
+    return match.group(1) if match else ""
+
+
 def load_mapping_review_items(job: JobRecord) -> list[dict[str, Any]]:
     state = load_simple_flow_state(job)
     standard_csv = Path(str(state.get("standardized_metrics_csv", "") or ""))
@@ -931,6 +1136,17 @@ def _enrich_mapping_review_items(job: JobRecord, rows: list[dict[str, Any]]) -> 
         raw_metric_id = str(item.get("raw_metric_id", "") or "")
         detailed = detailed_lookup.get(raw_metric_id, {})
         original_name = str(item.get("原始指标名") or item.get("original_metric_name") or detailed.get("row_label_clean") or detailed.get("metric_name") or "")
+        if is_invalid_metric_name(original_name):
+            continue
+        item_date = str(item.get("当前条目日期") or item.get("item_date") or detailed.get("item_date") or "").strip()
+        period_role = _display_period_role(item.get("期间类型") or item.get("period_role"), "") or _display_period_role(
+            detailed.get("period_role_norm", ""), detailed.get("period_role_raw", "")
+        )
+        temporal_review_required = not has_temporal_key(
+            item_date,
+            detailed.get("period_role_norm", "") or item.get("期间类型") or item.get("period_role"),
+            detailed.get("period_role_raw", ""),
+        )
         mapping_method = str(item.get("mapping_method") or item.get("映射方法") or "")
         mapping_status = str(item.get("mapping_status", "") or "")
         is_unmapped_without_suggestion = mapping_status == "unmapped" and mapping_method == "none"
@@ -939,7 +1155,9 @@ def _enrich_mapping_review_items(job: JobRecord, rows: list[dict[str, Any]]) -> 
         is_ai_suggestion = mapping_method == "llm_suggested" or bool(item.get("ai_suggestion_code"))
         mapping_status_code = "llm_suggested" if is_ai_suggestion else mapping_status
         mapping_confidence = "" if is_unmapped_without_suggestion else str(item.get("mapping_confidence") or item.get("candidate_score") or item.get("映射置信度") or "")
+        mapping_confidence_display = _format_confidence_label("词语映射", mapping_confidence)
         system_candidate_label = "" if is_unmapped_without_suggestion else _mapping_label(item.get("system_candidate_code", ""), item.get("system_candidate_name", ""))
+        ai_confidence_display = _format_confidence_label("AI建议", item.get("ai_confidence", ""))
         show_decision_actions, decision_note = _mapping_decision_action_state(item, mapping_status=mapping_status, mapping_method=mapping_method)
         source_page_no = str(item.get("source_page_no") or detailed.get("page_no") or "")
         source_pdf_path = resolve_source_pdf_for_job(
@@ -967,11 +1185,12 @@ def _enrich_mapping_review_items(job: JobRecord, rows: list[dict[str, Any]]) -> 
                 "mapping_status_code": mapping_status_code,
                 "mapping_status_label": _mapping_status_label(mapping_status, mapping_method=mapping_method, has_ai_suggestion=is_ai_suggestion),
                 "mapping_confidence": mapping_confidence,
+                "mapping_confidence_display": mapping_confidence_display,
                 "relation_type": str(item.get("relation_type") or item.get("口径关系") or ""),
                 "relation_note": str(item.get("issue_reason") or item.get("口径说明") or ""),
                 "system_candidate_label": system_candidate_label,
                 "ai_suggestion_label": _mapping_label(item.get("ai_suggestion_code", ""), item.get("ai_suggestion_name", "")),
-                "ai_confidence_display": _format_percent(item.get("ai_confidence", "")),
+                "ai_confidence_display": ai_confidence_display,
                 "ai_reason": str(item.get("ai_reason") or ""),
                 "ai_relation_type": str(item.get("ai_relation_type") or ""),
                 "ai_validation_status": str(item.get("ai_validation_status") or ""),
@@ -983,6 +1202,9 @@ def _enrich_mapping_review_items(job: JobRecord, rows: list[dict[str, Any]]) -> 
                 "source_term_bbox_json": display_bbox_json,
                 "source_value_bbox_json": value_bbox_json,
                 "bbox_state": "has-bbox" if display_bbox_json else "missing-bbox",
+                "item_date": item_date,
+                "period_role": period_role,
+                "temporal_review_required": temporal_review_required,
             }
         )
         enriched.append(item)
@@ -994,13 +1216,22 @@ def _mapping_label(code: Any, name: Any) -> str:
 
 
 def _format_percent(value: Any) -> str:
+    text = "" if value is None else str(value).strip()
+    has_percent_mark = text.endswith("%")
+    if has_percent_mark:
+        text = text[:-1].strip()
     try:
-        number = float(value)
+        number = float(text)
     except (TypeError, ValueError):
         return ""
-    if number <= 1:
+    if not has_percent_mark and number <= 1:
         number *= 100
     return f"{number:.0f}%" if abs(number - round(number)) < 0.01 else f"{number:.1f}%"
+
+
+def _format_confidence_label(label: str, value: Any) -> str:
+    percent = _format_percent(value)
+    return f"{label} 置信度{percent}" if percent else ""
 
 
 def _mapping_decision_action_state(item: dict[str, Any], *, mapping_status: str, mapping_method: str) -> tuple[bool, str]:
@@ -1489,8 +1720,15 @@ def save_mapping_review_action(
     if decision in {"accept_once", "accept_and_remember"} and not selected_code:
         selected_code = previous_code
         selected_name = selected_name or previous_name
-    if selected_code and not selected_name:
-        selected_name = previous_name
+    if decision in {"accept_once", "accept_and_remember"}:
+        normalized_code = normalize_standard_code(selected_code)
+        term = load_standard_registry().term_by_code.get(normalized_code)
+        if term is None:
+            raise ValueError(f"标准指标编码不存在: {selected_code}")
+        if selected_name and normalize_metric_name(selected_name) != normalize_metric_name(term.name):
+            raise ValueError(f"标准指标编码与名称不一致: {selected_code} / {selected_name}")
+        selected_code = term.code
+        selected_name = term.name
     raw_metric_name = str(item.get("原始指标名", "") or item.get("original_metric_name", ""))
     confidence = _safe_float(item.get("mapping_confidence") or item.get("candidate_score") or item.get("映射置信度"))
     relation_type = str(item.get("relation_type") or item.get("口径关系") or "")

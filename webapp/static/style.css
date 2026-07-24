@@ -942,6 +942,34 @@ td {
     width: 4.5rem;
 }
 
+.percent-input {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+}
+
+.percent-input input {
+    width: 4.5rem;
+    padding-right: 1.55rem;
+    appearance: textfield;
+    -moz-appearance: textfield;
+}
+
+.percent-input input::-webkit-outer-spin-button,
+.percent-input input::-webkit-inner-spin-button {
+    margin: 0;
+    appearance: none;
+    -webkit-appearance: none;
+}
+
+.percent-input span {
+    position: absolute;
+    right: 0.65rem;
+    color: var(--muted);
+    font-weight: 700;
+    pointer-events: none;
+}
+
 .mapping-suggestion-stack {
     display: grid;
     gap: 4px;
@@ -1079,6 +1107,10 @@ td {
     font: inherit;
 }
 
+.unified-filter-controls .percent-input input {
+    padding-right: 1.55rem;
+}
+
 .unified-search {
     display: grid;
     gap: 5px;
@@ -1155,13 +1187,20 @@ td {
 }
 
 .unified-review-table {
-    min-width: 1040px;
+    min-width: 1260px;
     table-layout: fixed;
 }
 
 .unified-review-table th,
 .unified-review-table td {
     min-width: 0;
+}
+
+.unified-review-table thead th,
+.unified-review-table thead .row-heading {
+    position: static;
+    inset: auto;
+    z-index: auto;
 }
 
 .unified-col-original-term {
@@ -1172,8 +1211,8 @@ td {
     width: 118px;
 }
 
-.unified-col-metric-value {
-    width: 270px;
+.unified-col-period-value {
+    width: 190px;
 }
 
 .unified-col-standard-term {
@@ -1206,11 +1245,21 @@ td {
 
 .table-section-row th {
     position: sticky;
-    left: 0;
-    z-index: 1;
+    top: 0;
+    z-index: 4;
     background: #e9e2d6;
     color: var(--brand-strong);
     font-weight: 700;
+}
+
+.table-section-row th:first-child {
+    left: 0;
+    z-index: 5;
+}
+
+.table-section-row .period-section-heading {
+    text-align: center;
+    color: var(--text);
 }
 
 .cell-edit-wrap {
@@ -1220,13 +1269,13 @@ td {
 }
 
 .metric-value-cell .cell-edit-wrap {
-    min-width: 22ch;
+    min-width: 16ch;
 }
 
 .metric-value-input {
-    flex: 1 1 18ch;
+    flex: 1 1 14ch;
     width: 100%;
-    min-width: 18ch;
+    min-width: 14ch;
     min-height: 34px;
     border: 1px solid var(--line);
     border-radius: 8px;
@@ -1253,6 +1302,16 @@ td {
 .metric-value-cell.metric-cell--dirty,
 .unified-standard-term-picker.mapping-row--dirty {
     background: rgba(168, 104, 10, 0.1);
+}
+
+.metric-value-cell--empty {
+    color: var(--muted);
+}
+
+.metric-value-empty {
+    display: inline-block;
+    min-height: 34px;
+    line-height: 34px;
 }
 
 .cell-reset {

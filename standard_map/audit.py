@@ -8,8 +8,12 @@ from project_paths import STANDARD_METRICS_GENERATED_ROOT
 from .models import MappingResult
 
 
-def validate_output_base(output_base: Path) -> None:
-    standard_root = STANDARD_METRICS_GENERATED_ROOT.resolve()
+def validate_output_base(
+    output_base: Path,
+    *,
+    standard_metrics_root: Path = STANDARD_METRICS_GENERATED_ROOT,
+) -> None:
+    standard_root = standard_metrics_root.resolve()
     try:
         output_base.resolve().relative_to(standard_root)
     except ValueError as exc:

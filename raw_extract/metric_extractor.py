@@ -116,6 +116,8 @@ def extract_raw_metric_candidates(
                     value_raw=cell.text_raw,
                     value_type=number_info.value_type,
                     unit_raw=subtable.statement_meta.unit_raw,
+                    statement_type=subtable.statement_meta.statement_type,
+                    statement_name_raw=subtable.statement_meta.statement_name_raw,
                     provider=subtable.provider,
                     doc_id=subtable.doc_id,
                     source_file=subtable.source_file,
@@ -161,6 +163,15 @@ def select_accepted_candidates(
         if not candidate.metric_name:
             candidate.selection_status = "rejected_missing_metric_name"
             continue
+        if "invalid_metric_name" in candidate.issue_flags or is_invalid_metric_name(candidate.metric_name):
+            candidate.selection_status = "rejected_invalid_metric_name"
+            issues.append(issue_from_candidate(candidate, "invalid_metric_name", "warning", "Numeric-only metric name rejected."))
+            continue
+        if not has_temporal_key(candidate):
+            # A missing temporal key is a review condition, not proof that the
+            # financial fact is invalid. Keep the value and its evidence so a
+            # reviewer can resolve the date instead of silently losing it.
+            candidate.issue_flags = dedupe_flags([*candidate.issue_flags, "missing_temporal_key"])
         if candidate.value_type == "ratio" and not include_ratios:
             candidate.selection_status = "rejected_ratio"
             issues.append(issue_from_candidate(candidate, "ratio_excluded", "info", "Ratio candidate excluded by --include-ratios false."))
@@ -179,7 +190,11 @@ def select_accepted_candidates(
         ordered = sorted(group, key=lambda item: (item.provider_rank, item.page_no, item.source_cell_ref, item.candidate_id))
         chosen = ordered[0]
         chosen.accepted = True
-        chosen.selection_status = "accepted"
+        chosen.selection_status = (
+            "accepted_needs_temporal_review"
+            if "missing_temporal_key" in chosen.issue_flags
+            else "accepted"
+        )
         accepted.append(chosen)
 
         if len(group) > 1:
@@ -212,7 +227,18 @@ def select_accepted_candidates(
             severity = "warning" if issue_flag not in {"missing_bbox", "duplicate_candidate"} else "info"
             issues.append(issue_from_candidate(candidate, issue_flag, severity, f"Candidate issue: {issue_flag}"))
 
-    return sorted(accepted, key=lambda item: (item.doc_id, item.page_no, item.table_id, item.row_index, item.col_index, item.provider_rank)), issues
+    return sorted(
+        accepted,
+        key=lambda item: (
+            item.doc_id,
+            item.page_no,
+            natural_sort_key(item.table_id),
+            natural_sort_key(item.logical_subtable_id),
+            item.row_index,
+            item.col_index,
+            item.provider_rank,
+        ),
+    ), issues
 
 
 def clean_metric_name(value: str) -> str:
@@ -231,6 +257,16 @@ def clean_metric_name(value: str) -> str:
     text = text.strip(" :：;；,，.。")
     text = re.sub(r"\s+", "", text)
     return text
+
+
+def is_invalid_metric_name(value: object) -> bool:
+    text = clean_text(value)
+    text = text.strip(" :：;；,，.。")
+    text = re.sub(r"\s+", "", text)
+    if not text:
+        return True
+    normalized = text.replace("，", ",")
+    return bool(re.fullmatch(r"[-+]?[\d,]+(?:\.\d+)?%?", normalized))
 
 
 def build_row_contexts(subtable: LogicalSubtable) -> Dict[int, str]:
@@ -281,6 +317,8 @@ def collect_candidate_issue_flags(
     flags: List[str] = []
     if not metric_name:
         flags.append("weak_metric_name")
+    elif is_invalid_metric_name(metric_name):
+        flags.append("invalid_metric_name")
     elif len(metric_name) <= 1 or metric_name.isdigit():
         flags.append("weak_metric_name")
     flags.extend(company.issue_flags)
@@ -304,7 +342,28 @@ def build_duplicate_key(candidate: RawMetricCandidate, subtable: LogicalSubtable
         candidate.item_date,
         candidate.period_role_norm,
     ]
+    if not has_temporal_key(candidate):
+        # Without a period/date we cannot prove that two values are the same
+        # business fact. Preserve each source slot for review rather than
+        # collapsing potentially distinct columns as duplicates.
+        parts.extend(
+            [
+                "unresolved_temporal_slot",
+                candidate.provider,
+                candidate.page_no,
+                candidate.table_id,
+                candidate.logical_subtable_id,
+                candidate.row_index,
+                candidate.col_index,
+            ]
+        )
     return "|".join(str(part or "") for part in parts)
+
+
+def has_temporal_key(candidate: RawMetricCandidate) -> bool:
+    if str(candidate.item_date or "").strip():
+        return True
+    return str(candidate.period_role_norm or "").strip().lower() not in {"", "unknown", "amount"}
 
 
 def numeric_values_by_provider(group: Sequence[RawMetricCandidate]) -> Dict[str, str]:
@@ -318,6 +377,16 @@ def numeric_values_by_provider(group: Sequence[RawMetricCandidate]) -> Dict[str,
 
 def numeric_signature(value: float) -> str:
     return f"{float(value):.8f}".rstrip("0").rstrip(".")
+
+
+def natural_sort_key(value: Any) -> Tuple[Any, ...]:
+    parts = re.split(r"(\d+)", str(value or ""))
+    key: List[Any] = []
+    for part in parts:
+        if not part:
+            continue
+        key.append((0, int(part)) if part.isdigit() else (1, part))
+    return tuple(key)
 
 
 def issue_from_candidate(

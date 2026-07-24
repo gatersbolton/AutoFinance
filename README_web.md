@@ -164,7 +164,7 @@ Value editing:
 Mapping editing:
 
 - The standard term cell is a direct autocomplete input.
-- It supports standard code (`ZT_002`), numeric code (`2` or `002`), Chinese substring (`短期` / `借款`), aliases, and pinyin initials such as `dqjk` when the term index supports them.
+- It supports standard code (`ZT_068`), numeric code (`68` or `068`), Chinese substring (`短期` / `借款`), aliases, and pinyin initials such as `dqjk` when the term index supports them.
 - Empty input does not show `没有找到标准术语`; no-results appears only after a non-empty query returns no matches.
 - Changed mapping cells are highlighted and show `重置`; reset restores the original system mapping.
 - The status column remains visible with Chinese labels such as `精确匹配`, `别名匹配`, `建议校对`, `未映射`, and `已修改`.
@@ -217,7 +217,7 @@ Selecting a row highlights the original metric term on the source page when a te
 
 The standard term field is an autocomplete search box. It supports:
 
-- standard code, for example `ZT_002`
+- standard code, for example `ZT_068`
 - numeric code, for example `002` or `2`
 - Chinese name or alias substring, for example `短期` or `借款`
 - pinyin initials, for example `dqjk`

@@ -34,6 +34,8 @@ UNPLACED_HEADERS = [
     "source_cell_ref",
 ]
 
+PLACEHOLDER_RESULT_HEADERS = {"示例", "金额", "当前金额", "期初", "期末", "上期/期初", "本期/期末"}
+
 
 def export_template(
     template_path: Path,
@@ -62,6 +64,7 @@ def export_template(
 
     workbook = load_workbook(template_path)
     worksheet = workbook[sheet_name]
+    template_cleanup = sanitize_template_output_sheet(worksheet, header_row)
 
     derived_facts = derived_facts or []
     export_facts = list(facts) + list(derived_facts)
@@ -101,6 +104,13 @@ def export_template(
         adjusted_value = float(fact.value_num) * float(fact.unit_multiplier or 1.0)
         worksheet.cell(row=row_idx, column=col_idx, value=adjusted_value)
         written += 1
+
+    template_output_validation = validate_template_output_sheet(worksheet, header_row, period_keys)
+    if not template_output_validation["pass"]:
+        raise ValueError(
+            "Refusing to export accounting workbook with template placeholder residue: "
+            + "; ".join(template_output_validation["errors"])
+        )
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     replace_sheet_with_key_values(workbook, "_meta_summary", run_summary or {})
@@ -148,6 +158,10 @@ def export_template(
         "source_facts": "facts_deduped",
         "unplaced_count": len(unplaced_rows),
         "unplaced_rows": unplaced_rows,
+        "template_values_cleared_total": template_cleanup["values_cleared_total"],
+        "template_columns_removed_total": template_cleanup["columns_removed_total"],
+        "template_output_validation_pass": template_output_validation["pass"],
+        "template_output_validation": template_output_validation,
     }
 
 
@@ -226,6 +240,48 @@ def ensure_period_columns(worksheet, header_row: int, period_keys: List[str]) ->
         worksheet.cell(row=header_row, column=next_col, value=period_key)
         next_col += 1
     return period_columns
+
+
+def sanitize_template_output_sheet(worksheet, header_row: int) -> Dict[str, int]:
+    original_max_column = worksheet.max_column
+    values_cleared_total = 0
+    if original_max_column >= 2:
+        for row in worksheet.iter_rows(min_row=1, max_row=worksheet.max_row, min_col=2, max_col=original_max_column):
+            values_cleared_total += sum(1 for cell in row if cell.value not in (None, ""))
+        worksheet.delete_cols(2, original_max_column - 1)
+    return {
+        "values_cleared_total": values_cleared_total,
+        "columns_removed_total": max(original_max_column - 1, 0),
+        "header_row": header_row,
+    }
+
+
+def validate_template_output_sheet(worksheet, header_row: int, period_keys: List[str]) -> Dict[str, Any]:
+    headers = [str(worksheet.cell(row=header_row, column=index).value or "").strip() for index in range(1, worksheet.max_column + 1)]
+    result_headers = headers[1:]
+    errors: List[str] = []
+    placeholder_headers = sorted({header for header in result_headers if header in PLACEHOLDER_RESULT_HEADERS})
+    if placeholder_headers:
+        errors.append(f"placeholder headers remain: {placeholder_headers}")
+    if result_headers != list(period_keys):
+        errors.append(f"period headers differ from export facts: expected={period_keys}, actual={result_headers}")
+    orphan_value_columns: List[int] = []
+    for column in range(2, worksheet.max_column + 1):
+        header = str(worksheet.cell(row=header_row, column=column).value or "").strip()
+        if header:
+            continue
+        if any(worksheet.cell(row=row, column=column).value not in (None, "") for row in range(header_row + 1, worksheet.max_row + 1)):
+            orphan_value_columns.append(column)
+    if orphan_value_columns:
+        errors.append(f"values remain under blank headers: {orphan_value_columns}")
+    return {
+        "pass": not errors,
+        "errors": errors,
+        "headers": headers,
+        "period_headers": result_headers,
+        "placeholder_headers": placeholder_headers,
+        "orphan_value_columns": orphan_value_columns,
+    }
 
 
 def unplaced_row(fact: FactRecord) -> Dict[str, Any]:

@@ -12,7 +12,9 @@ from project_paths import (
     DEFAULT_SECRET_PATH,
     DEEPSEEK_ENV_PATH,
     DEFAULT_TEMPLATE_PATH,
+    RAW_METRICS_GENERATED_ROOT,
     REPO_ROOT,
+    STANDARD_METRICS_GENERATED_ROOT,
     WEB_DB_PATH,
     WEB_DELETIONS_ROOT,
     WEB_GENERATED_ROOT,
@@ -72,6 +74,8 @@ class WebAppSettings:
     results_root: Path = WEB_RESULTS_ROOT
     logs_root: Path = WEB_LOGS_ROOT
     deletions_root: Path = WEB_DELETIONS_ROOT
+    raw_metrics_root: Path = RAW_METRICS_GENERATED_ROOT
+    standard_metrics_root: Path = STANDARD_METRICS_GENERATED_ROOT
     db_path: Path = WEB_DB_PATH
     corpus_root: Path = CORPUS_ROOT
     library_root: Path = CORPUS_LIBRARY_ROOT
@@ -161,6 +165,8 @@ class WebAppSettings:
             self.results_root,
             self.logs_root,
             self.deletions_root,
+            self.raw_metrics_root,
+            self.standard_metrics_root,
             self.mapping_store_root,
             self.library_root,
         ):
@@ -274,6 +280,8 @@ def load_settings() -> WebAppSettings:
     results_root = _resolve_env_path("WEBAPP_RESULTS_ROOT", runtime_root / "results")
     logs_root = _resolve_env_path("WEBAPP_LOGS_ROOT", runtime_root / "logs")
     deletions_root = _resolve_env_path("WEBAPP_DELETIONS_ROOT", runtime_root / "deletions")
+    raw_metrics_root = _resolve_env_path("WEBAPP_RAW_METRICS_ROOT", RAW_METRICS_GENERATED_ROOT)
+    standard_metrics_root = _resolve_env_path("WEBAPP_STANDARD_METRICS_ROOT", STANDARD_METRICS_GENERATED_ROOT)
     db_path = _resolve_env_path("WEBAPP_DB_PATH", runtime_root / "webapp.sqlite3")
     corpus_root = _resolve_env_path("WEBAPP_CORPUS_ROOT", CORPUS_ROOT)
 
@@ -286,6 +294,8 @@ def load_settings() -> WebAppSettings:
         results_root=results_root,
         logs_root=logs_root,
         deletions_root=deletions_root,
+        raw_metrics_root=raw_metrics_root,
+        standard_metrics_root=standard_metrics_root,
         db_path=db_path,
         corpus_root=corpus_root,
         library_root=_resolve_env_path("WEBAPP_LIBRARY_ROOT", corpus_root / "library"),

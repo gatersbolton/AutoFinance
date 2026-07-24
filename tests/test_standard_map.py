@@ -6,7 +6,6 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from project_paths import RAW_METRICS_GENERATED_ROOT, STANDARD_METRICS_GENERATED_ROOT, WEB_MAPPING_STORE_ROOT
 from standard_map.cli import main as standard_map_main
 from standard_map.confidence import apply_confidence_bulk_accept, build_confidence_bulk_accept_preview, eligible_for_accept_once_by_confidence
 from standard_map.decisions import append_mapping_decision_file, apply_mapping_decision_to_output
@@ -29,17 +28,25 @@ from standard_map.store import LocalMappingStore
 
 class StandardMapTests(unittest.TestCase):
     def setUp(self) -> None:
-        RAW_METRICS_GENERATED_ROOT.mkdir(parents=True, exist_ok=True)
-        STANDARD_METRICS_GENERATED_ROOT.mkdir(parents=True, exist_ok=True)
-        WEB_MAPPING_STORE_ROOT.mkdir(parents=True, exist_ok=True)
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.temp_path = Path(self.tempdir.name)
+        self.raw_metrics_root = self.temp_path / "raw_metrics"
+        self.standard_metrics_root = self.temp_path / "standard_metrics"
+        self.mapping_store_root = self.temp_path / "mapping_store"
+        self.raw_metrics_root.mkdir(parents=True, exist_ok=True)
+        self.standard_metrics_root.mkdir(parents=True, exist_ok=True)
+        self.mapping_store_root.mkdir(parents=True, exist_ok=True)
+
+    def tearDown(self) -> None:
+        self.tempdir.cleanup()
 
     def _write_raw_metrics(self, rows: list[dict[str, object]]) -> tuple[tempfile.TemporaryDirectory, Path]:
-        tempdir = tempfile.TemporaryDirectory(dir=RAW_METRICS_GENERATED_ROOT)
+        tempdir = tempfile.TemporaryDirectory(dir=self.raw_metrics_root)
         run_dir = Path(tempdir.name) / "RUN_TEST"
         run_dir.mkdir(parents=True, exist_ok=True)
         path = run_dir / "raw_metrics.csv"
         with path.open("w", encoding="utf-8-sig", newline="") as handle:
-            writer = csv.DictWriter(handle, fieldnames=["填表日期", "当前条目日期", "公司名", "指标名", "指标数值"])
+            writer = csv.DictWriter(handle, fieldnames=["填表日期", "当前条目日期", "期间类型", "公司名", "指标名", "指标数值"])
             writer.writeheader()
             for row in rows:
                 writer.writerow(row)
@@ -65,7 +72,7 @@ class StandardMapTests(unittest.TestCase):
         return tempdir, path
 
     def _new_store_path(self) -> Path:
-        tempdir = tempfile.TemporaryDirectory(dir=WEB_MAPPING_STORE_ROOT)
+        tempdir = tempfile.TemporaryDirectory(dir=self.mapping_store_root)
         self.addCleanup(tempdir.cleanup)
         return Path(tempdir.name) / "local_mappings.sqlite"
 
@@ -80,7 +87,7 @@ class StandardMapTests(unittest.TestCase):
         disable_llm_cache: bool = False,
     ):
         raw_temp, input_path = self._write_raw_metrics(rows)
-        output_temp = tempfile.TemporaryDirectory(dir=STANDARD_METRICS_GENERATED_ROOT)
+        output_temp = tempfile.TemporaryDirectory(dir=self.standard_metrics_root)
         mapping_store_path = mapping_store_path or self._new_store_path()
         args = argparse.Namespace(
             input=str(input_path),
@@ -94,6 +101,8 @@ class StandardMapTests(unittest.TestCase):
             llm_mock=llm_mock,
             disable_llm_cache=disable_llm_cache,
             debug=False,
+            raw_metrics_root=str(self.raw_metrics_root),
+            standard_metrics_root=str(self.standard_metrics_root),
         )
         result = run_standard_mapping(args=args, cli_args=["--input", str(input_path), "--output-dir", output_temp.name])
         return raw_temp, output_temp, result
@@ -113,6 +122,45 @@ class StandardMapTests(unittest.TestCase):
             raw_temp.cleanup()
             output_temp.cleanup()
 
+    def test_template_registry_uses_canonical_194_codes(self):
+        registry = load_standard_registry()
+        template_terms = [term for term in registry.terms if term.code.startswith("ZT_")]
+        self.assertEqual(len(template_terms), 194)
+        self.assertEqual(registry.term_by_code["ZT_002"].name, "结算备付金")
+        self.assertEqual(registry.term_by_code["ZT_068"].name, "短期借款")
+        self.assertEqual(registry.term_by_code["ZT_138"].name, "营业收入")
+        self.assertEqual(registry.term_by_code["ZT_182"].name, "净利润")
+
+    def test_store_migrates_conflicting_legacy_codes_by_standard_name(self):
+        store = LocalMappingStore(self._new_store_path())
+        store.add_alias(
+            alias="旧短借名称",
+            standard_code="ZT_002",
+            standard_name="短期借款",
+            approved_by="tester",
+        )
+        store.record_decision(
+            job_id="JOB_OLD_NAMESPACE",
+            raw_metric_name="旧短借名称",
+            suggested_code="ZT_002",
+            suggested_name="短期借款",
+            decision="accept_once",
+            final_code="ZT_002",
+            final_name="短期借款",
+            decided_by="tester",
+        )
+
+        registry = load_standard_registry()
+        store.sync_registry(registry)
+
+        alias = next(row for row in store.alias_rows(include_base=False) if row["alias"] == "旧短借名称")
+        decision = next(row for row in store.decision_rows() if row["job_id"] == "JOB_OLD_NAMESPACE")
+        self.assertEqual(alias["standard_code"], "ZT_068")
+        self.assertEqual(alias["standard_name"], "短期借款")
+        self.assertEqual(decision["suggested_code"], "ZT_068")
+        self.assertEqual(decision["final_code"], "ZT_068")
+        self.assertGreaterEqual(store.count("namespace_migrations"), 3)
+
     def test_exact_standard_term_mapping(self):
         raw_temp, output_temp, result = self._run_mapping([self._row("货币资金", "100")])
         try:
@@ -121,6 +169,21 @@ class StandardMapTests(unittest.TestCase):
             self.assertEqual(mapped.mapping_method, "exact")
             self.assertEqual(mapped.confidence, 1.0)
             self.assertEqual(mapped.standard_code, "ZT_001")
+        finally:
+            raw_temp.cleanup()
+            output_temp.cleanup()
+
+    def test_exact_mapping_without_temporal_key_requires_review(self):
+        row = self._row("货币资金", "100")
+        row["当前条目日期"] = ""
+        row["期间类型"] = "金额"
+        raw_temp, output_temp, result = self._run_mapping([row])
+        try:
+            mapped = result.rows[0]
+            self.assertEqual(mapped.standard_code, "ZT_001")
+            self.assertEqual(mapped.mapping_status, "review_required")
+            self.assertTrue(mapped.review_required)
+            self.assertIn("missing_temporal_key", mapped.issue_reason)
         finally:
             raw_temp.cleanup()
             output_temp.cleanup()
@@ -266,6 +329,16 @@ class StandardMapTests(unittest.TestCase):
             raw_temp.cleanup()
             output_temp.cleanup()
 
+    def test_store_default_exports_follow_sqlite_directory(self):
+        store_path = self._new_store_path()
+        store = LocalMappingStore(store_path)
+        aliases_path = store.export_aliases()
+        decisions_path = store.export_decision_audit()
+        self.assertEqual(aliases_path, store_path.parent / "local_aliases_export.yml")
+        self.assertEqual(decisions_path, store_path.parent / "mapping_decisions_audit.csv")
+        self.assertTrue(aliases_path.exists())
+        self.assertTrue(decisions_path.exists())
+
     def test_accept_and_remember_writes_local_alias_and_reuses_it(self):
         store_path = self._new_store_path()
         raw_temp, output_temp, result = self._run_mapping([self._row("测试记忆术语", "100")], mapping_store_path=store_path)
@@ -277,10 +350,10 @@ class StandardMapTests(unittest.TestCase):
                 doc_id="DTEST",
                 raw_metric_id=raw.raw_metric_id,
                 raw_metric_name=raw.metric_name,
-                suggested_code="ZT_002",
+                suggested_code="ZT_068",
                 suggested_name="短期借款",
                 decision="accept_and_remember",
-                final_code="ZT_002",
+                final_code="ZT_068",
                 final_name="短期借款",
                 relation_type="exact_alias",
                 confidence=1.0,
@@ -301,7 +374,7 @@ class StandardMapTests(unittest.TestCase):
             mapped = result2.rows[0]
             self.assertEqual(mapped.mapping_status, "mapped")
             self.assertEqual(mapped.mapping_method, "local_alias")
-            self.assertEqual(mapped.standard_code, "ZT_002")
+            self.assertEqual(mapped.standard_code, "ZT_068")
         finally:
             raw_temp2.cleanup()
             output_temp2.cleanup()
@@ -346,6 +419,26 @@ class StandardMapTests(unittest.TestCase):
         self.assertIn("ST_001", response)
         self.assertNotIn("[请输入你的api]", repr(config))
 
+    def test_live_deepseek_requires_explicit_opt_in(self):
+        key_only = load_deepseek_config(env={"DEEPSEEK_API_KEY": "sk-valid-test-key"})
+        env_enabled = load_deepseek_config(
+            env={"DEEPSEEK_API_KEY": "sk-valid-test-key", "DEEPSEEK_ENABLED": "true"}
+        )
+        env_disabled = load_deepseek_config(
+            env={"DEEPSEEK_API_KEY": "sk-valid-test-key", "DEEPSEEK_ENABLED": "false"}
+        )
+        cli_enabled = load_deepseek_config(
+            env={"DEEPSEEK_API_KEY": "sk-valid-test-key", "DEEPSEEK_ENABLED": "false"},
+            enabled_override=True,
+        )
+
+        self.assertFalse(key_only.enabled)
+        self.assertEqual(key_only.disabled_reason, "not_explicitly_enabled")
+        self.assertTrue(env_enabled.enabled)
+        self.assertFalse(env_disabled.enabled)
+        self.assertEqual(env_disabled.disabled_reason, "explicitly_disabled")
+        self.assertTrue(cli_enabled.enabled)
+
     def test_llm_prompt_response_validation(self):
         registry = load_standard_registry()
         raw = self._raw_row("总收入")
@@ -354,7 +447,7 @@ class StandardMapTests(unittest.TestCase):
             for candidate in [
                 # The mapper will pass MappingCandidate objects; reuse a real run's candidate shape.
                 self._llm_candidate("ST_001", "总营业额", 1),
-                self._llm_candidate("ZT_009", "营业收入", 2),
+                self._llm_candidate("ZT_138", "营业收入", 2),
             ]
         ]
         system_prompt, user_prompt = build_llm_mapping_prompts(raw, candidates, registry)
@@ -406,14 +499,14 @@ class StandardMapTests(unittest.TestCase):
             key1 = build_llm_cache_key(
                 raw_metric_name=raw.metric_name,
                 context=context,
-                candidate_codes=["ST_001", "ZT_009"],
+                candidate_codes=["ST_001", "ZT_138"],
                 policy_version="stage15_2_candidate_constrained_v1",
                 model_name="deepseek-v4-flash",
             )
             key2 = build_llm_cache_key(
                 raw_metric_name=raw.metric_name,
                 context=context,
-                candidate_codes=["ZT_009", "ST_001"],
+                candidate_codes=["ZT_138", "ST_001"],
                 policy_version="stage15_2_candidate_constrained_v1",
                 model_name="deepseek-v4-flash",
             )
@@ -533,6 +626,7 @@ class StandardMapTests(unittest.TestCase):
                 mapped = next(csv.DictReader(handle))
             self.assertEqual(mapped["填表日期"], "2022-12-31")
             self.assertEqual(mapped["当前条目日期"], "2022-01-01")
+            self.assertEqual(mapped["期间类型"], "期末数")
             self.assertEqual(mapped["指标数值"], "00123.4500")
         finally:
             raw_temp.cleanup()
@@ -540,7 +634,7 @@ class StandardMapTests(unittest.TestCase):
 
     def test_cli_runs(self):
         raw_temp, input_path = self._write_raw_metrics([self._row("货币资金", "100")])
-        output_temp = tempfile.TemporaryDirectory(dir=STANDARD_METRICS_GENERATED_ROOT)
+        output_temp = tempfile.TemporaryDirectory(dir=self.standard_metrics_root)
         try:
             exit_code = standard_map_main(
                 [
@@ -552,6 +646,10 @@ class StandardMapTests(unittest.TestCase):
                     "config/standard_terms.yml",
                     "--doc-id",
                     "DTEST",
+                    "--raw-metrics-root",
+                    str(self.raw_metrics_root),
+                    "--standard-metrics-root",
+                    str(self.standard_metrics_root),
                     "--disable-llm-mapping",
                 ]
             )
@@ -565,6 +663,7 @@ class StandardMapTests(unittest.TestCase):
         return {
             "填表日期": "2022-12-31",
             "当前条目日期": "2022-12-31",
+            "期间类型": "期末数",
             "公司名": "AAA有限公司",
             "指标名": metric_name,
             "指标数值": metric_value,
