@@ -13,14 +13,37 @@
 {% endif %}
 
 <section class="card">
-    <form class="form-stack" action="{{ url_prefix }}/documents/upload" method="post" enctype="multipart/form-data">
+    <form
+        class="form-stack"
+        action="{{ url_prefix }}/documents/upload"
+        method="post"
+        enctype="multipart/form-data"
+        data-document-batch-upload
+        data-create-batch-url="{{ url_prefix }}/api/document-batches"
+        data-max-files="{{ max_batch_files }}"
+        data-max-bytes="{{ settings.max_upload_bytes }}"
+    >
         <div class="field">
             <label class="label" for="uploaded_files">PDF 文件</label>
             <input id="uploaded_files" name="uploaded_files" type="file" accept="application/pdf,.pdf" multiple required>
-            <p class="field-help">可以一次选择一个或多个 PDF。</p>
+            <p class="field-help">
+                每批最多 {{ max_batch_files }} 份，每份不超过 {{ max_upload_mb }} MB。
+                浏览器会逐份上传，上传完成后自动排队处理。
+            </p>
+        </div>
+        <div class="notice notice--error" data-batch-upload-error hidden></div>
+        <div class="batch-upload-progress" data-batch-upload-progress hidden>
+            <div class="batch-upload-progress__heading">
+                <strong data-batch-upload-summary>准备上传</strong>
+                <span data-batch-upload-percent>0%</span>
+            </div>
+            <div class="batch-progress-track" aria-hidden="true">
+                <span data-batch-upload-bar></span>
+            </div>
+            <ol class="batch-upload-file-list" data-batch-upload-files></ol>
         </div>
         <div class="actions">
-            <button class="button button--primary" type="submit">保存 PDF</button>
+            <button class="button button--primary" type="submit" data-batch-upload-submit>上传并开始处理</button>
             <a class="button button--secondary" href="{{ url_prefix }}/">取消</a>
         </div>
     </form>

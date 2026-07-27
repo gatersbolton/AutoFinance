@@ -12,9 +12,24 @@ from project_paths import REPO_ROOT
 
 from .config import WebAppSettings, load_settings
 from .deployment import queue_available, write_worker_heartbeat
-from .db import claim_next_queued_job, get_job, init_db, update_job, utc_now_iso
+from .db import (
+    claim_next_queued_job,
+    get_job,
+    init_db,
+    recover_abandoned_running_jobs,
+    update_job,
+    utc_now_iso,
+)
 from .jobs import discover_output_files, ensure_job_workspace, write_output_manifest
-from .models import JOB_MODE_UPLOAD, JOB_STATUS_FAILED, SUCCESS_LIKE_JOB_STATUSES, JobRecord
+from .models import (
+    JOB_MODE_DOCUMENT_PIPELINE,
+    JOB_MODE_UPLOAD,
+    JOB_STATUS_FAILED,
+    JOB_STATUS_NEEDS_REVIEW,
+    JOB_STATUS_SUCCEEDED,
+    SUCCESS_LIKE_JOB_STATUSES,
+    JobRecord,
+)
 from .ocr_runtime import build_upload_ocr_command, execute_mock_ocr, upload_provider_runtime_ready
 from .operations import run_review_operation_once, run_rq_worker_forever
 from .quality import build_job_quality_summary, load_json
@@ -280,11 +295,223 @@ def _mark_failed(
     return job
 
 
+def _mark_document_pipeline_failed(
+    settings: WebAppSettings,
+    job: JobRecord,
+    *,
+    stage: str,
+    error_message: str,
+    commands: list[str],
+    started_at_monotonic: float,
+) -> JobRecord:
+    from .document_library import update_document_status
+    from .document_models import STATUS_FAILED
+
+    status_fields: dict[str, str] = {"error_message": error_message}
+    if stage == "ocr":
+        status_fields["ocr_status"] = STATUS_FAILED
+    elif stage == "raw_metrics":
+        status_fields["raw_metrics_status"] = STATUS_FAILED
+    else:
+        status_fields["standard_metrics_status"] = STATUS_FAILED
+    update_document_status(settings, job.job_id, **status_fields)
+    failed = update_job(
+        settings,
+        job.job_id,
+        status=JOB_STATUS_FAILED,
+        current_stage=stage,
+        finished_at=utc_now_iso(),
+        error_message=error_message,
+        raw_error_message=error_message,
+        user_friendly_error=error_message,
+        recommended_action="检查该文件的处理日志后重新入队。",
+        command_executed="\n".join(commands),
+        exit_code=-1,
+        progress_summary=f"{stage} 阶段处理失败。",
+    )
+    summary = {
+        "job_id": failed.job_id,
+        "pipeline": JOB_MODE_DOCUMENT_PIPELINE,
+        "pass": False,
+        "failed_stage": stage,
+        "error_message": error_message,
+        "duration_seconds": round(time.perf_counter() - started_at_monotonic, 3),
+        "commands_executed": commands,
+    }
+    _write_json(Path(failed.result_dir) / "document_pipeline_summary.json", summary)
+    _write_log_bundle(failed)
+    _write_job_summary(
+        failed,
+        commands_executed=commands,
+        exit_code=-1,
+        duration_seconds=time.perf_counter() - started_at_monotonic,
+        error_message=error_message,
+        quality_summary=summary,
+    )
+    write_output_manifest(failed)
+    return failed
+
+
+def _execute_document_pipeline(
+    settings: WebAppSettings,
+    job: JobRecord,
+) -> JobRecord:
+    from .document_library import (
+        document_to_job,
+        load_document,
+        run_document_ocr,
+        update_document_status,
+    )
+    from .document_models import STATUS_COMPLETED, STATUS_RUNNING
+    from .simple_flow import run_raw_metrics_step, run_standard_metrics_step
+
+    started_at_monotonic = time.perf_counter()
+    commands: list[str] = []
+    stage = "ocr"
+    try:
+        document = load_document(settings, job.job_id, refresh=False)
+        update_job(
+            settings,
+            job.job_id,
+            current_stage="ocr",
+            progress_summary="正在执行云 OCR。",
+        )
+        has_existing_ocr = Path(document.ocr_output_dir).exists() and any(
+            path.is_file() for path in Path(document.ocr_output_dir).rglob("*")
+        )
+        ocr_summary = run_document_ocr(
+            settings,
+            document.doc_id,
+            rerun=has_existing_ocr,
+        )
+        commands.append(
+            str(ocr_summary.get("command_executed", "") or "document_pipeline:ocr")
+        )
+        if not bool(ocr_summary.get("pass")):
+            raise RuntimeError(str(ocr_summary.get("error_message", "") or "OCR 执行失败。"))
+
+        stage = "raw_metrics"
+        document = update_document_status(
+            settings,
+            document.doc_id,
+            raw_metrics_status=STATUS_RUNNING,
+            error_message="",
+        )
+        update_job(
+            settings,
+            job.job_id,
+            current_stage=stage,
+            progress_summary="正在提取原始结构化指标。",
+            command_executed="\n".join(commands),
+        )
+        document_job = document_to_job(settings, document)
+        raw_summary = run_raw_metrics_step(settings, document_job)
+        commands.append("document_pipeline:raw_metrics")
+        if not bool(raw_summary.get("pass")):
+            raise RuntimeError("原始结构化指标提取未通过完整性检查。")
+        document = update_document_status(
+            settings,
+            document.doc_id,
+            raw_metrics_status=STATUS_COMPLETED,
+            error_message="",
+        )
+
+        stage = "standard_metrics"
+        update_document_status(
+            settings,
+            document.doc_id,
+            standard_metrics_status=STATUS_RUNNING,
+            error_message="",
+        )
+        update_job(
+            settings,
+            job.job_id,
+            current_stage=stage,
+            progress_summary="正在执行标准科目映射并生成下载数据。",
+            command_executed="\n".join(commands),
+        )
+        standard_summary = run_standard_metrics_step(
+            settings,
+            document_to_job(settings, load_document(settings, document.doc_id)),
+        )
+        commands.append("document_pipeline:standard_metrics")
+        if not bool(standard_summary.get("pass")):
+            raise RuntimeError("标准科目映射未通过完整性检查。")
+        update_document_status(
+            settings,
+            document.doc_id,
+            standard_metrics_status=STATUS_COMPLETED,
+            error_message="",
+        )
+    except Exception as exc:
+        return _mark_document_pipeline_failed(
+            settings,
+            job,
+            stage=stage,
+            error_message=str(exc),
+            commands=commands,
+            started_at_monotonic=started_at_monotonic,
+        )
+
+    review_total = int(standard_summary.get("review_required_total", 0) or 0)
+    unmapped_total = int(standard_summary.get("unmapped_total", 0) or 0)
+    final_status = (
+        JOB_STATUS_NEEDS_REVIEW
+        if review_total or unmapped_total
+        else JOB_STATUS_SUCCEEDED
+    )
+    progress_summary = (
+        f"处理完成，有 {review_total + unmapped_total} 项需要校对。"
+        if final_status == JOB_STATUS_NEEDS_REVIEW
+        else "处理完成，可下载结构化数据。"
+    )
+    completed = update_job(
+        settings,
+        job.job_id,
+        status=final_status,
+        current_stage="needs_review" if final_status == JOB_STATUS_NEEDS_REVIEW else "generated",
+        finished_at=utc_now_iso(),
+        error_message="",
+        raw_error_message="",
+        user_friendly_error="",
+        recommended_action="进入校对页面确认待处理项目。" if final_status == JOB_STATUS_NEEDS_REVIEW else "",
+        command_executed="\n".join(commands),
+        exit_code=0,
+        progress_summary=progress_summary,
+    )
+    summary = {
+        "job_id": completed.job_id,
+        "pipeline": JOB_MODE_DOCUMENT_PIPELINE,
+        "pass": True,
+        "final_job_status": final_status,
+        "review_required_total": review_total,
+        "unmapped_total": unmapped_total,
+        "raw_summary": raw_summary,
+        "standard_summary": standard_summary,
+        "duration_seconds": round(time.perf_counter() - started_at_monotonic, 3),
+        "commands_executed": commands,
+    }
+    _write_json(Path(completed.result_dir) / "document_pipeline_summary.json", summary)
+    _write_log_bundle(completed)
+    _write_job_summary(
+        completed,
+        commands_executed=commands,
+        exit_code=0,
+        duration_seconds=time.perf_counter() - started_at_monotonic,
+        quality_summary=summary,
+    )
+    write_output_manifest(completed)
+    return completed
+
+
 def execute_job(settings: WebAppSettings, job_id: str) -> JobRecord:
     job = get_job(settings, job_id)
     if job is None:
         raise KeyError(job_id)
     ensure_job_workspace(settings, job.job_id)
+
+    if job.mode == JOB_MODE_DOCUMENT_PIPELINE:
+        return _execute_document_pipeline(settings, job)
 
     started_at_monotonic = time.perf_counter()
     commands: list[str] = []
@@ -420,6 +647,25 @@ def execute_job(settings: WebAppSettings, job_id: str) -> JobRecord:
 
 def run_worker_once(settings: WebAppSettings) -> JobRecord | None:
     init_db(settings)
+    recovered = recover_abandoned_running_jobs(settings)
+    for abandoned in recovered:
+        if abandoned.mode != JOB_MODE_DOCUMENT_PIPELINE:
+            continue
+        try:
+            from .document_library import load_document, update_document_status
+            from .document_models import STATUS_COMPLETED, STATUS_FAILED
+
+            document = load_document(settings, abandoned.job_id, refresh=False)
+            fields: dict[str, str] = {"error_message": abandoned.error_message}
+            if document.ocr_status != STATUS_COMPLETED:
+                fields["ocr_status"] = STATUS_FAILED
+            elif document.raw_metrics_status != STATUS_COMPLETED:
+                fields["raw_metrics_status"] = STATUS_FAILED
+            else:
+                fields["standard_metrics_status"] = STATUS_FAILED
+            update_document_status(settings, abandoned.job_id, **fields)
+        except KeyError:
+            pass
     if settings.queue_backend != "rq":
         operation = run_review_operation_once(settings)
         if operation is not None:

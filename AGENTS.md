@@ -65,6 +65,22 @@ Read-only SSH inspection on 2026-07-23 found:
 - Public SSH currently permits root password authentication; UFW is active and fail2ban is inactive.
 - The deployed Git worktree contains local modifications and backup files. Do not overwrite it or infer that a checkout/rebuild is reproducible without first inventorying and preserving those changes.
 
+## Web Batch Queue Implementation Contract
+
+- The normal new-upload path is a logical document batch, even when it contains one PDF. The expected business batch remains two to five PDFs.
+- `POST /api/document-batches` creates the logical batch. Each PDF is then sent separately to `POST /api/document-batches/{batch_id}/files`, and `POST /api/document-batches/{batch_id}/queue` activates processing only after every expected position is present.
+- `document_batches` and `document_batch_items` in the web SQLite database are durable batch state. The existing `jobs` table is the durable processing queue.
+- New library documents use job mode `document_pipeline`. Its worker stages are cloud OCR, raw fact extraction, standard-term mapping, and combined download generation.
+- Batch job upserts and the transition from uploading to queued must remain one `BEGIN IMMEDIATE` SQLite transaction. Do not replace `queue_jobs_atomically` with a check-then-update sequence; that can turn an already running job back into a queued job or partially enqueue a batch.
+- SQLite connections opened by `webapp.db` must be explicitly closed on both success and exception paths. This is required for predictable Windows tests and bounded long-running server resources.
+- `claim_next_queued_job` enforces at most one globally running document job. Keep document processing serialized unless the product and server constraints explicitly change.
+- A document's queued/running metadata must not be automatically rewritten to completed merely because outputs from an older run still exist. Reprocessing preserves older files but the current run state remains authoritative.
+- The browser's batch upload state permits idempotent retry of an already accepted upload position. Keep the one-file-per-request behavior and do not replace it with one large multipart body.
+- Batch status polling uses a server-generated state token that changes with job status and processing stage, so long OCR/extraction runs remain visible without high-frequency server work.
+- A stale running job is failed after its own `timeout_seconds` plus `WEBAPP_WORKER_STALE_JOB_GRACE_SECONDS`. Recovery must release the serialized queue and mark the corresponding document stage failed without deleting completed artifacts.
+- Current safety defaults are 50 MB, 300 pages, and five PDFs per batch. Validate both browser input and server-side content; browser validation alone is not a security or resource boundary.
+- Primary regression coverage is in `tests/test_webapp.py`. Before changing this flow, run its batch/queue tests and then `python -m pytest -q`.
+
 ## Terminology Namespace Contract
 
 - `config/standard_terms.yml` is synchronized from the 194 `ZT_*` subjects in `data/templates/会计报表.xlsx`; non-template terms use a separate non-`ZT_*` namespace.
@@ -226,6 +242,22 @@ Each entry defines:
 
 ## Docker / Server Upload Notes
 
+- The production Nginx also carries the `/codex/` relay used to control this
+  project. A task launched from that relay must never synchronously stop or
+  force-recreate the Nginx service that carries its own connection.
+- Never include `nginx` in the same `docker compose up --force-recreate`
+  command as `web` or `worker`. Deploy only the application services that
+  changed, wait for them to become healthy, and verify them before touching
+  Nginx.
+- Prefer `nginx -t` followed by a reload for Nginx-only configuration changes.
+  If a real Nginx recreate is unavoidable, submit the complete validate,
+  recreate, and health-check operation to a detached server-side systemd
+  service before the old Nginx is stopped. Do not leave that operation owned by
+  the browser, Codex process tree, or its SSH session.
+- The server watchdog can recover a stopped/`Created` Nginx entry after a grace
+  period, but it is a last-resort availability guard, not a deployment method.
+  Docker's restart policy does not start a replacement container that never
+  reached the running state.
 - Use `Dockerfile`, `docker-compose.yml`, and optionally `docker-compose.aliyun.yml` for server deployment.
 - For sub-path deployment at `http://ip/AutoFinance/`, set `WEBAPP_BASE_PATH=/AutoFinance` and keep the Nginx proxy under `/AutoFinance/`.
 - Runtime state is mounted through `./data:/app/data`; do not bake corpus PDFs, OCR outputs, secrets, generated files, or Playwright captures into the image.

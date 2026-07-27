@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import sqlite3
-from datetime import datetime, timezone
-from typing import Iterable
+from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
+from typing import Iterable, Iterator
 
 from .config import WebAppSettings
+from .document_models import DocumentBatchItemRecord, DocumentBatchRecord
 from .models import (
     ACTIVE_OPERATION_STATUSES,
     OPERATION_STATUS_CANCELLED,
@@ -92,6 +94,29 @@ CREATE TABLE IF NOT EXISTS review_operations (
 );
 CREATE INDEX IF NOT EXISTS idx_review_operations_job_created_at ON review_operations(job_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_review_operations_status_created_at ON review_operations(status, created_at);
+CREATE TABLE IF NOT EXISTS document_batches (
+    batch_id TEXT PRIMARY KEY,
+    status TEXT NOT NULL,
+    expected_files INTEGER NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    queued_at TEXT NOT NULL DEFAULT '',
+    finished_at TEXT NOT NULL DEFAULT '',
+    error_message TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_document_batches_created_at ON document_batches(created_at DESC);
+CREATE TABLE IF NOT EXISTS document_batch_items (
+    batch_id TEXT NOT NULL,
+    doc_id TEXT NOT NULL,
+    upload_index INTEGER NOT NULL,
+    original_filename TEXT NOT NULL,
+    job_id TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (batch_id, doc_id),
+    UNIQUE (batch_id, upload_index)
+);
+CREATE INDEX IF NOT EXISTS idx_document_batch_items_batch_index
+ON document_batch_items(batch_id, upload_index);
 """
 
 
@@ -99,13 +124,17 @@ def utc_now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
 
-def _connect(settings: WebAppSettings) -> sqlite3.Connection:
+@contextmanager
+def _connect(settings: WebAppSettings) -> Iterator[sqlite3.Connection]:
     settings.ensure_directories()
     conn = sqlite3.connect(str(settings.db_path), timeout=30, isolation_level=None)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=5000")
-    return conn
+    try:
+        yield conn
+    finally:
+        conn.close()
 
 
 def init_db(settings: WebAppSettings) -> None:
@@ -142,25 +171,160 @@ def init_db(settings: WebAppSettings) -> None:
 
 def create_job(settings: WebAppSettings, job: JobRecord) -> JobRecord:
     with _connect(settings) as conn:
-        conn.execute(
-            """
-            INSERT INTO jobs (
-                job_id, display_name, mode, provider_mode, input_path, source_image_dir,
-                upload_dir, ocr_output_dir, template_path, output_dir, result_dir, log_dir,
-                provider_priority, status, current_stage, progress_summary, created_at, updated_at,
-                started_at, finished_at, error_message, raw_error_message, user_friendly_error,
-                recommended_action, run_id, command_executed, exit_code, timeout_seconds
-            ) VALUES (
-                :job_id, :display_name, :mode, :provider_mode, :input_path, :source_image_dir,
-                :upload_dir, :ocr_output_dir, :template_path, :output_dir, :result_dir, :log_dir,
-                :provider_priority, :status, :current_stage, :progress_summary, :created_at, :updated_at,
-                :started_at, :finished_at, :error_message, :raw_error_message, :user_friendly_error,
-                :recommended_action, :run_id, :command_executed, :exit_code, :timeout_seconds
-            )
-            """,
-            job.as_dict(),
-        )
+        _insert_job(conn, job)
     return job
+
+
+_JOB_COLUMNS = (
+    "job_id",
+    "display_name",
+    "mode",
+    "provider_mode",
+    "input_path",
+    "source_image_dir",
+    "upload_dir",
+    "ocr_output_dir",
+    "template_path",
+    "output_dir",
+    "result_dir",
+    "log_dir",
+    "provider_priority",
+    "status",
+    "current_stage",
+    "progress_summary",
+    "created_at",
+    "updated_at",
+    "started_at",
+    "finished_at",
+    "error_message",
+    "raw_error_message",
+    "user_friendly_error",
+    "recommended_action",
+    "run_id",
+    "command_executed",
+    "exit_code",
+    "timeout_seconds",
+)
+
+
+def _insert_job(conn: sqlite3.Connection, job: JobRecord) -> None:
+    columns = ", ".join(_JOB_COLUMNS)
+    placeholders = ", ".join(f":{column}" for column in _JOB_COLUMNS)
+    conn.execute(
+        f"INSERT INTO jobs ({columns}) VALUES ({placeholders})",
+        job.as_dict(),
+    )
+
+
+def queue_jobs_atomically(
+    settings: WebAppSettings,
+    jobs: Iterable[JobRecord],
+    *,
+    batch_id: str = "",
+) -> list[JobRecord]:
+    queued_jobs = list(jobs)
+    if not queued_jobs:
+        return []
+    job_ids = [job.job_id for job in queued_jobs]
+    if len(set(job_ids)) != len(job_ids):
+        raise ValueError("待入队任务中存在重复文件。")
+    if any(job.status != "queued" for job in queued_jobs):
+        raise ValueError("只能原子写入 queued 状态的任务。")
+
+    with _connect(settings) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            if batch_id:
+                batch = conn.execute(
+                    "SELECT * FROM document_batches WHERE batch_id = ?",
+                    (batch_id,),
+                ).fetchone()
+                if batch is None:
+                    raise KeyError(batch_id)
+                if str(batch["status"]) != "uploading":
+                    raise ValueError("该批次已结束上传，不能重复入队。")
+                items = conn.execute(
+                    """
+                    SELECT doc_id FROM document_batch_items
+                    WHERE batch_id = ?
+                    ORDER BY upload_index ASC
+                    """,
+                    (batch_id,),
+                ).fetchall()
+                item_doc_ids = [str(item["doc_id"]) for item in items]
+                if len(item_doc_ids) != int(batch["expected_files"]):
+                    raise ValueError(
+                        f"批次计划上传 {int(batch['expected_files'])} 个文件，"
+                        f"当前仅收到 {len(item_doc_ids)} 个。"
+                    )
+                if set(item_doc_ids) != set(job_ids):
+                    raise ValueError("批次文件与待入队任务不一致。")
+
+            placeholders = ", ".join("?" for _ in job_ids)
+            running = conn.execute(
+                f"""
+                SELECT job_id FROM jobs
+                WHERE status = 'running' AND job_id IN ({placeholders})
+                LIMIT 1
+                """,
+                job_ids,
+            ).fetchone()
+            if running is not None:
+                raise ValueError("该文件正在处理中，不能重复入队。")
+
+            assignments = ", ".join(
+                f"{column} = :{column}"
+                for column in _JOB_COLUMNS
+                if column != "job_id"
+            )
+            for job in queued_jobs:
+                exists = conn.execute(
+                    "SELECT 1 FROM jobs WHERE job_id = ?",
+                    (job.job_id,),
+                ).fetchone()
+                if exists is None:
+                    _insert_job(conn, job)
+                else:
+                    conn.execute(
+                        f"UPDATE jobs SET {assignments} WHERE job_id = :job_id",
+                        job.as_dict(),
+                    )
+
+            if batch_id:
+                for job in queued_jobs:
+                    updated = conn.execute(
+                        """
+                        UPDATE document_batch_items
+                        SET job_id = ?
+                        WHERE batch_id = ? AND doc_id = ?
+                        """,
+                        (job.job_id, batch_id, job.job_id),
+                    ).rowcount
+                    if updated != 1:
+                        raise KeyError((batch_id, job.job_id))
+                now = utc_now_iso()
+                conn.execute(
+                    """
+                    UPDATE document_batches
+                    SET status = 'queued',
+                        queued_at = ?,
+                        finished_at = '',
+                        error_message = '',
+                        updated_at = ?
+                    WHERE batch_id = ?
+                    """,
+                    (now, now, batch_id),
+                )
+            conn.execute("COMMIT")
+        except Exception:
+            if conn.in_transaction:
+                conn.execute("ROLLBACK")
+            raise
+    return [
+        persisted
+        for job_id in job_ids
+        if (persisted := get_job(settings, job_id)) is not None
+    ]
 
 
 def get_job(settings: WebAppSettings, job_id: str) -> JobRecord | None:
@@ -197,8 +361,14 @@ def update_job(settings: WebAppSettings, job_id: str, **fields: object) -> JobRe
 def claim_next_queued_job(settings: WebAppSettings) -> JobRecord | None:
     with _connect(settings) as conn:
         conn.execute("BEGIN IMMEDIATE")
+        running = conn.execute(
+            "SELECT job_id FROM jobs WHERE status = 'running' LIMIT 1"
+        ).fetchone()
+        if running is not None:
+            conn.execute("COMMIT")
+            return None
         row = conn.execute(
-            "SELECT * FROM jobs WHERE status = 'queued' ORDER BY created_at ASC LIMIT 1"
+            "SELECT * FROM jobs WHERE status = 'queued' ORDER BY created_at ASC, rowid ASC LIMIT 1"
         ).fetchone()
         if row is None:
             conn.execute("COMMIT")
@@ -216,6 +386,71 @@ def claim_next_queued_job(settings: WebAppSettings) -> JobRecord | None:
         if not updated:
             return None
     return get_job(settings, str(row["job_id"]))
+
+
+def recover_abandoned_running_jobs(
+    settings: WebAppSettings,
+    *,
+    now: datetime | None = None,
+) -> list[JobRecord]:
+    current = now or datetime.now(timezone.utc)
+    recovered_ids: list[str] = []
+    with _connect(settings) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        rows = conn.execute(
+            "SELECT * FROM jobs WHERE status = 'running' ORDER BY updated_at ASC"
+        ).fetchall()
+        for row in rows:
+            try:
+                updated_at = datetime.fromisoformat(
+                    str(row["updated_at"]).replace("Z", "+00:00")
+                )
+            except ValueError:
+                updated_at = current - timedelta(days=1)
+            if updated_at.tzinfo is None:
+                updated_at = updated_at.replace(tzinfo=timezone.utc)
+            stale_after = timedelta(
+                seconds=max(
+                    int(row["timeout_seconds"]),
+                    1,
+                )
+                + max(settings.worker_stale_job_grace_seconds, 0)
+            )
+            if current - updated_at <= stale_after:
+                continue
+            message = "Worker 在任务时限内未完成，系统已将遗留运行任务标记为失败，可重新入队。"
+            conn.execute(
+                """
+                UPDATE jobs
+                SET status = 'failed',
+                    progress_summary = ?,
+                    finished_at = ?,
+                    error_message = ?,
+                    raw_error_message = ?,
+                    user_friendly_error = ?,
+                    recommended_action = ?,
+                    exit_code = -1,
+                    updated_at = ?
+                WHERE job_id = ? AND status = 'running'
+                """,
+                (
+                    message,
+                    current.isoformat(),
+                    message,
+                    message,
+                    message,
+                    "确认服务器 Worker 正常后重新入队。",
+                    current.isoformat(),
+                    row["job_id"],
+                ),
+            )
+            recovered_ids.append(str(row["job_id"]))
+        conn.execute("COMMIT")
+    return [
+        job
+        for job_id in recovered_ids
+        if (job := get_job(settings, job_id)) is not None
+    ]
 
 
 def cancel_job(settings: WebAppSettings, job_id: str) -> JobRecord | None:
@@ -258,6 +493,157 @@ def requeue_job(settings: WebAppSettings, job_id: str) -> JobRecord | None:
 
 def iter_jobs(settings: WebAppSettings) -> Iterable[JobRecord]:
     return list_jobs(settings, limit=1000)
+
+
+def create_document_batch(
+    settings: WebAppSettings,
+    batch: DocumentBatchRecord,
+) -> DocumentBatchRecord:
+    with _connect(settings) as conn:
+        conn.execute(
+            """
+            INSERT INTO document_batches (
+                batch_id, status, expected_files, created_at, updated_at,
+                queued_at, finished_at, error_message
+            ) VALUES (
+                :batch_id, :status, :expected_files, :created_at, :updated_at,
+                :queued_at, :finished_at, :error_message
+            )
+            """,
+            batch.as_dict(),
+        )
+    return batch
+
+
+def get_document_batch(
+    settings: WebAppSettings,
+    batch_id: str,
+) -> DocumentBatchRecord | None:
+    with _connect(settings) as conn:
+        row = conn.execute(
+            "SELECT * FROM document_batches WHERE batch_id = ?",
+            (batch_id,),
+        ).fetchone()
+    return DocumentBatchRecord.from_row(row) if row else None
+
+
+def list_document_batches(
+    settings: WebAppSettings,
+    *,
+    limit: int = 50,
+) -> list[DocumentBatchRecord]:
+    with _connect(settings) as conn:
+        rows = conn.execute(
+            "SELECT * FROM document_batches ORDER BY created_at DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+    return [DocumentBatchRecord.from_row(row) for row in rows]
+
+
+def update_document_batch(
+    settings: WebAppSettings,
+    batch_id: str,
+    **fields: object,
+) -> DocumentBatchRecord:
+    allowed = {
+        "status",
+        "expected_files",
+        "queued_at",
+        "finished_at",
+        "error_message",
+    }
+    unknown = set(fields) - allowed
+    if unknown:
+        raise ValueError(f"Unsupported document batch fields: {sorted(unknown)}")
+    if fields:
+        payload = dict(fields)
+        payload["updated_at"] = utc_now_iso()
+        payload["batch_id"] = batch_id
+        assignments = ", ".join(f"{key} = :{key}" for key in payload if key != "batch_id")
+        with _connect(settings) as conn:
+            conn.execute(
+                f"UPDATE document_batches SET {assignments} WHERE batch_id = :batch_id",
+                payload,
+            )
+    batch = get_document_batch(settings, batch_id)
+    if batch is None:
+        raise KeyError(batch_id)
+    return batch
+
+
+def get_document_batch_item_by_index(
+    settings: WebAppSettings,
+    batch_id: str,
+    upload_index: int,
+) -> DocumentBatchItemRecord | None:
+    with _connect(settings) as conn:
+        row = conn.execute(
+            """
+            SELECT * FROM document_batch_items
+            WHERE batch_id = ? AND upload_index = ?
+            """,
+            (batch_id, upload_index),
+        ).fetchone()
+    return DocumentBatchItemRecord.from_row(row) if row else None
+
+
+def list_document_batch_items(
+    settings: WebAppSettings,
+    batch_id: str,
+) -> list[DocumentBatchItemRecord]:
+    with _connect(settings) as conn:
+        rows = conn.execute(
+            """
+            SELECT * FROM document_batch_items
+            WHERE batch_id = ?
+            ORDER BY upload_index ASC
+            """,
+            (batch_id,),
+        ).fetchall()
+    return [DocumentBatchItemRecord.from_row(row) for row in rows]
+
+
+def add_document_batch_item(
+    settings: WebAppSettings,
+    item: DocumentBatchItemRecord,
+) -> DocumentBatchItemRecord:
+    with _connect(settings) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        batch = conn.execute(
+            "SELECT * FROM document_batches WHERE batch_id = ?",
+            (item.batch_id,),
+        ).fetchone()
+        if batch is None:
+            conn.execute("ROLLBACK")
+            raise KeyError(item.batch_id)
+        if str(batch["status"]) != "uploading":
+            conn.execute("ROLLBACK")
+            raise ValueError("该批次已结束上传，不能再添加文件。")
+        count = int(
+            conn.execute(
+                "SELECT COUNT(*) FROM document_batch_items WHERE batch_id = ?",
+                (item.batch_id,),
+            ).fetchone()[0]
+        )
+        if count >= int(batch["expected_files"]):
+            conn.execute("ROLLBACK")
+            raise ValueError("该批次文件数量已达到预期值。")
+        conn.execute(
+            """
+            INSERT INTO document_batch_items (
+                batch_id, doc_id, upload_index, original_filename, job_id, created_at
+            ) VALUES (
+                :batch_id, :doc_id, :upload_index, :original_filename, :job_id, :created_at
+            )
+            """,
+            item.as_dict(),
+        )
+        conn.execute(
+            "UPDATE document_batches SET updated_at = ? WHERE batch_id = ?",
+            (utc_now_iso(), item.batch_id),
+        )
+        conn.execute("COMMIT")
+    return item
 
 
 def upsert_review_action(settings: WebAppSettings, action: ReviewActionRecord) -> ReviewActionRecord:

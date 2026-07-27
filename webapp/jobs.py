@@ -17,6 +17,7 @@ from .deployment import build_system_status
 from .db import create_job, get_job, utc_now_iso
 from .labels import provider_mode_label_zh
 from .models import (
+    JOB_MODE_DOCUMENT_PIPELINE,
     JOB_MODE_EXISTING,
     JOB_MODE_UPLOAD,
     JOB_STATUS_CREATED,
@@ -71,6 +72,8 @@ JOB_STAGE_LABELS_ZH = {
     "ocr_pending": "已上传",
     "ocr": "正在 OCR",
     "worker_claimed": "处理中",
+    "raw_metrics": "正在提取原始数据",
+    "standard_metrics": "正在映射标准科目",
     "standardize": "正在标准化",
     "generated": "已生成结果",
     "needs_review": "需要复核",
@@ -205,7 +208,11 @@ def _default_display_name(mode: str, source_name: str) -> str:
     base = source_name.strip() if source_name else ""
     if base:
         return base[:120]
-    return "标准化任务" if mode == JOB_MODE_EXISTING else "上传 OCR 任务"
+    if mode == JOB_MODE_EXISTING:
+        return "标准化任务"
+    if mode == JOB_MODE_DOCUMENT_PIPELINE:
+        return "文档处理任务"
+    return "上传 OCR 任务"
 
 
 def generate_job_id() -> str:
@@ -537,11 +544,12 @@ def job_stage_label_zh(job: JobRecord) -> str:
 def build_job_stage_flow(job: JobRecord) -> list[dict[str, object]]:
     result_versions = list_result_versions(job)
     has_rerun = any(str(item.get("version_id")) != "original" for item in result_versions)
+    is_pdf_pipeline = job.mode in {JOB_MODE_UPLOAD, JOB_MODE_DOCUMENT_PIPELINE}
     stages = [
         {
             "slug": "upload",
-            "label_zh": "上传" if job.mode == JOB_MODE_UPLOAD else "已有 OCR",
-            "state": "done" if job.mode == JOB_MODE_UPLOAD or job.mode == JOB_MODE_EXISTING else "pending",
+            "label_zh": "上传" if is_pdf_pipeline else "已有 OCR",
+            "state": "done",
             "status_label_zh": "已准备",
         },
         {
@@ -569,28 +577,41 @@ def build_job_stage_flow(job: JobRecord) -> list[dict[str, object]]:
             "status_label_zh": "已生成新版本" if has_rerun else "尚未执行",
         },
     ]
-    if job.mode == JOB_MODE_UPLOAD:
+    if is_pdf_pipeline:
         if job.current_stage in {"uploaded", "queued", "worker_claimed"} and job.status in {"created", "queued", "running"}:
             stages[0]["state"] = "current"
-            stages[0]["status_label_zh"] = "已上传"
+            stages[0]["status_label_zh"] = "已上传并排队" if job.status == "queued" else "已上传"
         if job.current_stage == "ocr":
+            stages[0]["state"] = "done"
             stages[1]["state"] = "current"
             stages[1]["status_label_zh"] = "正在 OCR"
-        elif any(Path(job.ocr_output_dir).iterdir()) if Path(job.ocr_output_dir).exists() else False:
+        elif job.current_stage in {
+            "raw_metrics",
+            "standard_metrics",
+            "standardize",
+            "generated",
+            "needs_review",
+        } or job.status in SUCCESS_LIKE_JOB_STATUSES:
             stages[1]["state"] = "done"
             stages[1]["status_label_zh"] = "已完成"
     else:
         stages[0]["status_label_zh"] = "使用已有 OCR 输出"
 
-    if job.current_stage == "standardize":
+    if job.current_stage in {"raw_metrics", "standard_metrics", "standardize"}:
         stages[2]["state"] = "current"
-        stages[2]["status_label_zh"] = "正在标准化"
-        if job.mode == JOB_MODE_UPLOAD:
+        stages[2]["status_label_zh"] = (
+            "正在提取原始数据"
+            if job.current_stage == "raw_metrics"
+            else "正在映射标准科目"
+            if job.current_stage == "standard_metrics"
+            else "正在标准化"
+        )
+        if is_pdf_pipeline:
             stages[1]["state"] = "done"
             stages[1]["status_label_zh"] = "已完成"
-    elif job.status in SUCCESS_LIKE_JOB_STATUSES or job.status == "failed":
-        stages[2]["state"] = "done" if job.status in SUCCESS_LIKE_JOB_STATUSES else "current"
-        stages[2]["status_label_zh"] = "已完成" if job.status in SUCCESS_LIKE_JOB_STATUSES else "处理中断"
+    elif job.status in SUCCESS_LIKE_JOB_STATUSES:
+        stages[2]["state"] = "done"
+        stages[2]["status_label_zh"] = "已完成"
 
     if job.status == "needs_review":
         stages[3]["state"] = "current"
@@ -599,12 +620,18 @@ def build_job_stage_flow(job: JobRecord) -> list[dict[str, object]]:
         stages[3]["state"] = "done"
         stages[3]["status_label_zh"] = "可进入复核"
     elif job.status == "failed":
+        failed_stage_index = (
+            1
+            if job.current_stage in {"uploaded", "queued", "worker_claimed", "ocr"}
+            else 2
+        )
+        stages[failed_stage_index]["state"] = "current"
+        stages[failed_stage_index]["status_label_zh"] = "失败"
         for item in stages:
+            if item["state"] == "current" and item is not stages[failed_stage_index]:
+                item["state"] = "done" if item["slug"] == "upload" else "pending"
             if item["state"] == "current":
                 item["status_label_zh"] = "失败"
-        if not any(item["state"] == "current" for item in stages):
-            stages[2]["state"] = "current"
-            stages[2]["status_label_zh"] = "失败"
     return stages
 
 

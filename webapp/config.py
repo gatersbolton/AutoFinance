@@ -84,7 +84,9 @@ class WebAppSettings:
     deepseek_env_path: Path = DEEPSEEK_ENV_PATH
     enable_local_worker: bool = True
     worker_poll_seconds: int = 2
-    max_upload_bytes: int = 25 * 1024 * 1024
+    max_upload_bytes: int = 50 * 1024 * 1024
+    max_upload_batch_files: int = 5
+    max_pdf_pages: int = 300
     job_timeout_seconds: int = 3600
     operation_timeout_seconds: int = 3600
     auto_run_upload_ocr: bool = False
@@ -97,6 +99,7 @@ class WebAppSettings:
     redis_url: str = ""
     operation_log_tail_chars: int = 4000
     worker_heartbeat_stale_seconds: int = 90
+    worker_stale_job_grace_seconds: int = 300
     standardize_flags: tuple[str, ...] = field(
         default_factory=lambda: (
             "--enable-conflict-merge",
@@ -260,8 +263,20 @@ class WebAppSettings:
             )
         if normalized_queue_backend == "rq" and not self.redis_url.strip():
             raise RuntimeError("REDIS_URL is required when WEBAPP_QUEUE_BACKEND=rq.")
+        if self.worker_poll_seconds <= 0:
+            raise RuntimeError("WEBAPP_WORKER_POLL_SECONDS must be greater than 0.")
+        if self.max_upload_bytes <= 0:
+            raise RuntimeError("WEBAPP_MAX_UPLOAD_BYTES must be greater than 0.")
+        if self.job_timeout_seconds <= 0:
+            raise RuntimeError("WEBAPP_JOB_TIMEOUT_SECONDS must be greater than 0.")
         if self.operation_timeout_seconds <= 0:
             raise RuntimeError("WEBAPP_OPERATION_TIMEOUT_SECONDS must be greater than 0.")
+        if self.max_upload_batch_files < 1:
+            raise RuntimeError("WEBAPP_MAX_UPLOAD_BATCH_FILES must be at least 1.")
+        if self.max_pdf_pages < 1:
+            raise RuntimeError("WEBAPP_MAX_PDF_PAGES must be at least 1.")
+        if self.worker_stale_job_grace_seconds < 0:
+            raise RuntimeError("WEBAPP_WORKER_STALE_JOB_GRACE_SECONDS cannot be negative.")
 
 
 def load_settings() -> WebAppSettings:
@@ -304,7 +319,9 @@ def load_settings() -> WebAppSettings:
         deepseek_env_path=_resolve_env_path("WEBAPP_DEEPSEEK_ENV_PATH", DEEPSEEK_ENV_PATH),
         enable_local_worker=_env_bool("WEBAPP_ENABLE_LOCAL_WORKER", True),
         worker_poll_seconds=_env_int("WEBAPP_WORKER_POLL_SECONDS", 2),
-        max_upload_bytes=_env_int("WEBAPP_MAX_UPLOAD_BYTES", 25 * 1024 * 1024),
+        max_upload_bytes=_env_int("WEBAPP_MAX_UPLOAD_BYTES", 50 * 1024 * 1024),
+        max_upload_batch_files=_env_int("WEBAPP_MAX_UPLOAD_BATCH_FILES", 5),
+        max_pdf_pages=_env_int("WEBAPP_MAX_PDF_PAGES", 300),
         job_timeout_seconds=_env_int("WEBAPP_JOB_TIMEOUT_SECONDS", 3600),
         operation_timeout_seconds=_env_int("WEBAPP_OPERATION_TIMEOUT_SECONDS", 3600),
         auto_run_upload_ocr=_env_bool("WEBAPP_AUTO_RUN_UPLOAD_OCR", False),
@@ -317,6 +334,7 @@ def load_settings() -> WebAppSettings:
         redis_url=os.environ.get("REDIS_URL", ""),
         operation_log_tail_chars=_env_int("WEBAPP_OPERATION_LOG_TAIL_CHARS", 4000),
         worker_heartbeat_stale_seconds=_env_int("WEBAPP_WORKER_HEARTBEAT_STALE_SECONDS", 90),
+        worker_stale_job_grace_seconds=_env_int("WEBAPP_WORKER_STALE_JOB_GRACE_SECONDS", 300),
     )
 
 

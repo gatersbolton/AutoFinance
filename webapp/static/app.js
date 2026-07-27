@@ -1421,6 +1421,204 @@ function initWorkbookPreview() {
     });
 }
 
+function batchUploadErrorMessage(payload, fallback) {
+    if (payload && typeof payload.detail === "string") {
+        return payload.detail;
+    }
+    if (payload && typeof payload.message === "string") {
+        return payload.message;
+    }
+    return fallback;
+}
+
+async function postBatchForm(url, formData, retryCount = 0) {
+    let lastError = null;
+    for (let attempt = 0; attempt <= retryCount; attempt += 1) {
+        try {
+            const response = await fetch(url, {
+                method: "POST",
+                body: formData,
+                credentials: "same-origin",
+            });
+            let payload = {};
+            try {
+                payload = await response.json();
+            } catch (error) {
+                payload = {};
+            }
+            if (!response.ok) {
+                throw new Error(batchUploadErrorMessage(payload, `请求失败（${response.status}）`));
+            }
+            return payload;
+        } catch (error) {
+            lastError = error;
+            if (attempt < retryCount) {
+                await new Promise((resolve) => window.setTimeout(resolve, 700));
+            }
+        }
+    }
+    throw lastError || new Error("上传失败");
+}
+
+function initDocumentBatchUpload() {
+    const form = document.querySelector("[data-document-batch-upload]");
+    if (!form || !window.fetch || !window.FormData) {
+        return;
+    }
+    const input = form.querySelector('input[type="file"]');
+    const submit = form.querySelector("[data-batch-upload-submit]");
+    const errorPanel = form.querySelector("[data-batch-upload-error]");
+    const progress = form.querySelector("[data-batch-upload-progress]");
+    const summary = form.querySelector("[data-batch-upload-summary]");
+    const percent = form.querySelector("[data-batch-upload-percent]");
+    const bar = form.querySelector("[data-batch-upload-bar]");
+    const list = form.querySelector("[data-batch-upload-files]");
+    const maxFiles = Number(form.dataset.maxFiles || "5");
+    const maxBytes = Number(form.dataset.maxBytes || "0");
+    let activeBatch = null;
+    let activeFileSignature = "";
+    const uploadedIndexes = new Set();
+
+    function showError(message) {
+        if (errorPanel) {
+            errorPanel.textContent = message;
+            errorPanel.hidden = false;
+        }
+    }
+
+    function setProgress(done, total, label) {
+        const value = total ? Math.round((done / total) * 100) : 0;
+        if (summary) {
+            summary.textContent = label;
+        }
+        if (percent) {
+            percent.textContent = `${value}%`;
+        }
+        if (bar) {
+            bar.style.width = `${value}%`;
+        }
+    }
+
+    form.addEventListener("submit", async (event) => {
+        const files = Array.from(input?.files || []);
+        const fileSignature = files.map((file) => `${file.name}:${file.size}`).join("|");
+        if (!files.length) {
+            return;
+        }
+        event.preventDefault();
+        if (activeBatch && activeFileSignature && fileSignature !== activeFileSignature) {
+            showError("当前批次已有文件上传成功，请恢复原文件选择后重试。");
+            return;
+        }
+        if (files.length > maxFiles) {
+            showError(`每批最多上传 ${maxFiles} 个 PDF 文件。`);
+            return;
+        }
+        const invalidExtension = files.find((file) => !file.name.toLowerCase().endsWith(".pdf"));
+        if (invalidExtension) {
+            showError(`只支持 PDF 文件：${invalidExtension.name}`);
+            return;
+        }
+        const oversized = maxBytes > 0 ? files.find((file) => file.size > maxBytes) : null;
+        if (oversized) {
+            showError(`${oversized.name} 超过单文件大小限制。`);
+            return;
+        }
+
+        if (errorPanel) {
+            errorPanel.hidden = true;
+            errorPanel.textContent = "";
+        }
+        if (progress) {
+            progress.hidden = false;
+        }
+        if (submit) {
+            submit.disabled = true;
+            submit.textContent = "正在上传…";
+        }
+        if (list) {
+            list.replaceChildren();
+            files.forEach((file) => {
+                const item = document.createElement("li");
+                item.textContent = `${file.name} — 等待上传`;
+                list.appendChild(item);
+            });
+        }
+
+        try {
+            if (!activeBatch) {
+                const createData = new FormData();
+                createData.append("expected_files", String(files.length));
+                activeBatch = await postBatchForm(form.dataset.createBatchUrl, createData);
+                activeFileSignature = fileSignature;
+            }
+            for (let index = 0; index < files.length; index += 1) {
+                const file = files[index];
+                const row = list?.children[index];
+                if (uploadedIndexes.has(index)) {
+                    if (row) {
+                        row.textContent = `${file.name} — 已上传`;
+                    }
+                    continue;
+                }
+                if (row) {
+                    row.textContent = `${file.name} — 正在上传`;
+                }
+                setProgress(index, files.length + 1, `正在上传第 ${index + 1}/${files.length} 份`);
+                const uploadData = new FormData();
+                uploadData.append("upload_index", String(index));
+                uploadData.append("uploaded_file", file, file.name);
+                await postBatchForm(activeBatch.upload_url, uploadData, 1);
+                uploadedIndexes.add(index);
+                if (row) {
+                    row.textContent = `${file.name} — 已上传`;
+                }
+            }
+            setProgress(files.length, files.length + 1, "正在加入处理队列");
+            await postBatchForm(activeBatch.queue_url, new FormData());
+            setProgress(files.length + 1, files.length + 1, "上传完成，正在打开批次状态");
+            window.location.assign(activeBatch.detail_url);
+        } catch (error) {
+            showError(error instanceof Error ? error.message : "上传失败，请重试。");
+            if (submit) {
+                submit.disabled = false;
+                submit.textContent = "重试上传";
+            }
+        }
+    });
+}
+
+function initDocumentBatchStatus() {
+    const root = document.querySelector("[data-document-batch-status]");
+    if (!root || root.dataset.active !== "true") {
+        return;
+    }
+    const poll = async () => {
+        try {
+            const response = await fetch(root.dataset.statusUrl, {
+                credentials: "same-origin",
+                cache: "no-store",
+            });
+            if (response.ok) {
+                const payload = await response.json();
+                const token = payload.state_token || "";
+                if (token !== root.dataset.stateToken) {
+                    window.location.reload();
+                    return;
+                }
+                if (payload.active) {
+                    window.setTimeout(poll, 2500);
+                }
+                return;
+            }
+        } catch (error) {
+            // A temporary network failure should not turn a running batch into an error.
+        }
+        window.setTimeout(poll, 4000);
+    };
+    window.setTimeout(poll, 1800);
+}
+
 window.formatMetricNumber = formatMetricNumber;
 window.parseMetricNumberInput = parseMetricNumberInput;
 
@@ -1433,4 +1631,6 @@ document.addEventListener("DOMContentLoaded", () => {
     initMappingReviewSheet();
     initUnifiedProofreadWorkbench();
     initWorkbookPreview();
+    initDocumentBatchUpload();
+    initDocumentBatchStatus();
 });

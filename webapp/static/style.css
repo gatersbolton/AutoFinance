@@ -35,6 +35,96 @@ pre {
     font-family: "Cascadia Code", "Consolas", monospace;
 }
 
+.batch-upload-progress {
+    display: grid;
+    gap: 12px;
+    padding: 16px;
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    background: var(--paper);
+}
+
+.batch-upload-progress__heading {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+}
+
+.batch-progress-track {
+    height: 9px;
+    overflow: hidden;
+    border-radius: 999px;
+    background: var(--line);
+}
+
+.batch-progress-track span {
+    display: block;
+    width: 0;
+    height: 100%;
+    border-radius: inherit;
+    background: var(--brand);
+    transition: width 180ms ease;
+}
+
+.batch-upload-file-list {
+    margin: 0;
+    padding-left: 22px;
+    display: grid;
+    gap: 6px;
+}
+
+.batch-summary-grid {
+    display: grid;
+    grid-template-columns: repeat(5, minmax(90px, 1fr));
+    gap: 12px;
+    margin-bottom: 18px;
+}
+
+.batch-summary-grid div {
+    display: grid;
+    gap: 4px;
+    padding: 14px;
+    border-radius: 12px;
+    background: var(--paper);
+    text-align: center;
+}
+
+.batch-summary-grid strong {
+    font-size: 1.5rem;
+}
+
+.batch-summary-grid span,
+.batch-card small,
+.muted {
+    color: var(--muted);
+}
+
+.batch-card-list {
+    display: grid;
+    gap: 10px;
+}
+
+.batch-card {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 14px 16px;
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    color: inherit;
+    text-decoration: none;
+}
+
+.batch-card:hover {
+    border-color: var(--brand);
+}
+
+.batch-card span:first-child {
+    display: grid;
+    gap: 3px;
+}
+
 .shell {
     width: min(1800px, calc(100vw - 24px));
     margin: 0 auto;
@@ -1561,6 +1651,10 @@ pre {
 
     .source-zoom-card {
         flex-basis: 180px;
+    }
+
+    .batch-summary-grid {
+        grid-template-columns: repeat(2, minmax(100px, 1fr));
     }
 
     .pdf-frame {

@@ -1,16 +1,16 @@
 # AutoFinance Web
 
-The ordinary web flow starts from a local PDF library.
+The ordinary web flow starts with a logical upload batch and finishes in the
+reviewable local PDF library.
 
 ```text
 1. 打开首页看到已保存 PDF
-2. 上传新的 PDF
-3. 对未识别文件点击开始识别
-4. 对已识别文件点击继续处理
-5. 提取原始数据
-6. 生成标准化数据
-7. 下载数据表
-8. 删除文件及相关结果
+2. 选择 1–5 份 PDF（通常 2–5 份）
+3. 浏览器逐份上传并自动加入队列
+4. 单 Worker 依次完成 OCR、原始数据提取和标准化映射
+5. 在批次状态页查看进度
+6. 打开文件进行校对并下载 Excel/CSV
+7. 按需重新处理或删除文件及相关结果
 ```
 
 The normal home page shows:
@@ -24,9 +24,72 @@ The normal home page shows:
 Each PDF shows a simple status and actions:
 
 - 未识别: 开始识别, 删除
+- 已排队或处理中: 处理中, 删除
 - 已识别或已有结果: 重新识别, 继续处理, 删除
 
-Advanced/admin pages still exist, but they are not the normal workflow.
+The upload page automatically starts the full background pipeline. The
+per-document buttons and advanced/admin pages remain available for previously
+saved documents and diagnostics, but they are not the normal new-upload path.
+
+## Batch Upload and Durable Queue
+
+The browser never sends all selected PDFs in one large multipart request. It
+creates one logical batch, uploads each file sequentially, and queues the batch
+only after every expected upload position is present:
+
+```text
+POST /api/document-batches
+POST /api/document-batches/{batch_id}/files
+POST /api/document-batches/{batch_id}/queue
+GET  /api/document-batches/{batch_id}
+GET  /document-batches/{batch_id}
+```
+
+An individual file upload is retry-safe for the same batch position and
+filename. Successfully accepted positions are skipped when the user clicks
+`重试上传` in the same browser session.
+
+Batch and queue state is durable in:
+
+```text
+data/generated/web/webapp.sqlite3
+
+document_batches
+document_batch_items
+jobs
+```
+
+All jobs in a completed upload batch are enqueued in one SQLite transaction.
+The same transaction refuses the entire batch when one of its documents is
+already running, preventing partial queuing and duplicate processing.
+
+The worker claims no more than one document globally. A `document_pipeline` job
+runs:
+
+```text
+云 OCR
+  -> 原始结构化指标
+  -> 标准科目映射
+  -> 数据表.xlsx / CSV
+  -> 浏览器校对
+```
+
+The upload HTTP request performs no OCR or mapping. A job that remains running
+longer than `WEBAPP_JOB_TIMEOUT_SECONDS` plus
+`WEBAPP_WORKER_STALE_JOB_GRACE_SECONDS` is marked failed on the next worker
+cycle, allowing later queued documents to proceed. It can then be explicitly
+re-enqueued from the file list.
+
+Default limits are 50 MB and 300 pages per PDF, with five PDFs per batch. They
+are configured by:
+
+```text
+WEBAPP_MAX_UPLOAD_BYTES
+WEBAPP_MAX_UPLOAD_BATCH_FILES
+WEBAPP_MAX_PDF_PAGES
+WEBAPP_JOB_TIMEOUT_SECONDS
+WEBAPP_WORKER_STALE_JOB_GRACE_SECONDS
+```
 
 ## Runtime Paths
 
@@ -47,6 +110,7 @@ data/generated/web/results/
 data/generated/web/logs/
 data/generated/web/deletions/
 data/generated/web/mapping_store/
+data/generated/web/webapp.sqlite3
 data/generated/raw_metrics/<doc_id>/<run_id>/
 data/generated/standard_metrics/<doc_id>/<run_id>/
 ```
@@ -71,7 +135,13 @@ Real OCR requires cloud OCR credentials. If credentials are missing, the user se
 
 Existing OCR outputs can be copied into `data/corpus/library/<doc_id>/ocr_outputs/` for demos or tests. Re-OCR archives previous OCR outputs under `ocr_outputs_archive/<timestamp>/` before writing new outputs.
 
-## Step 1: 原始数据
+## Manual Compatibility Flow
+
+The following Step 1 and Step 2 actions remain available for existing documents,
+testing, and recovery. A normal batch upload already runs both steps in the
+background worker.
+
+### Step 1: 原始数据
 
 The document page button is:
 
@@ -98,7 +168,7 @@ After Step 1, the page shows:
 At this point `数据表.xlsx` may contain only `数据总表`, `原始数据`, and `说明`.
 Raw CSV/XLSX files remain available under `高级下载`.
 
-## Step 2: 标准化数据
+### Step 2: 标准化数据
 
 The document page button is:
 
@@ -295,6 +365,10 @@ $env:WEBAPP_AUTH_REQUIRED="0"
 $env:WEBAPP_ENABLE_LOCAL_WORKER="1"
 uvicorn webapp.main:app --reload
 ```
+
+`WEBAPP_ENABLE_LOCAL_WORKER=1` starts one in-process development worker. In a
+Docker deployment, the web process should use `WEBAPP_ENABLE_LOCAL_WORKER=0`
+and the separate `worker` service should be the only document worker.
 
 For demos without real OCR credentials, use existing OCR outputs or the test-only mock OCR environment variables. PaddleOCR remains pilot-only.
 

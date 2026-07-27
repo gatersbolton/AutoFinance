@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Annotated
 from urllib.parse import urlencode
 
-from fastapi import APIRouter, Depends, File, HTTPException, Request, Response, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Response, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 
 from standard_map.confidence import apply_confidence_bulk_accept, build_confidence_bulk_accept_preview
@@ -20,9 +20,17 @@ from .document_library import (
     execute_delete,
     list_documents,
     load_document,
-    run_document_ocr,
     save_uploaded_documents,
     update_document_status,
+)
+from .document_batches import (
+    add_uploaded_file_to_batch,
+    build_document_batch_summary,
+    create_new_document_batch,
+    enqueue_document_pipeline,
+    ensure_document_pipeline_ready,
+    list_recent_document_batch_summaries,
+    queue_document_batch,
 )
 from .document_models import STATUS_COMPLETED, STATUS_FAILED, STATUS_RUNNING
 from .jobs import resolve_download_artifact
@@ -81,7 +89,16 @@ def _home_redirect(message: str = "", error: str = "") -> RedirectResponse:
 
 @document_router.get("/documents/upload", response_class=HTMLResponse, dependencies=[Depends(password_gate)])
 def upload_page(request: Request) -> HTMLResponse:
-    return _render(request, "document_upload.html", {"error_message": ""})
+    settings = get_settings(request)
+    return _render(
+        request,
+        "document_upload.html",
+        {
+            "error_message": "",
+            "max_batch_files": settings.max_upload_batch_files,
+            "max_upload_mb": settings.max_upload_bytes // (1024 * 1024),
+        },
+    )
 
 
 @document_router.post("/documents/upload", dependencies=[Depends(password_gate)], response_model=None)
@@ -92,32 +109,151 @@ async def upload_documents(
     try:
         await save_uploaded_documents(get_settings(request), uploaded_files or [])
     except ValueError as exc:
-        return _render(request, "document_upload.html", {"error_message": str(exc)}, status_code=400)
+        settings = get_settings(request)
+        return _render(
+            request,
+            "document_upload.html",
+            {
+                "error_message": str(exc),
+                "max_batch_files": settings.max_upload_batch_files,
+                "max_upload_mb": settings.max_upload_bytes // (1024 * 1024),
+            },
+            status_code=400,
+        )
     return _home_redirect("文件已保存，可以点击“开始识别”。")
+
+
+@document_router.post(
+    "/api/document-batches",
+    response_class=JSONResponse,
+    dependencies=[Depends(password_gate)],
+)
+def create_document_batch_api(
+    request: Request,
+    expected_files: Annotated[int, Form(...)],
+) -> JSONResponse:
+    try:
+        batch = create_new_document_batch(
+            get_settings(request),
+            expected_files=expected_files,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return JSONResponse(
+        {
+            **batch.as_dict(),
+            "upload_url": _app_url(request, f"/api/document-batches/{batch.batch_id}/files"),
+            "queue_url": _app_url(request, f"/api/document-batches/{batch.batch_id}/queue"),
+            "status_url": _app_url(request, f"/api/document-batches/{batch.batch_id}"),
+            "detail_url": _app_url(request, f"/document-batches/{batch.batch_id}"),
+        },
+        status_code=201,
+    )
+
+
+@document_router.post(
+    "/api/document-batches/{batch_id}/files",
+    response_class=JSONResponse,
+    dependencies=[Depends(password_gate)],
+)
+async def upload_document_batch_file_api(
+    request: Request,
+    batch_id: str,
+    upload_index: Annotated[int, Form(...)],
+    uploaded_file: Annotated[UploadFile, File(...)],
+) -> JSONResponse:
+    try:
+        item, created = await add_uploaded_file_to_batch(
+            get_settings(request),
+            batch_id=batch_id,
+            upload_index=upload_index,
+            upload=uploaded_file,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="上传批次不存在。") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return JSONResponse(
+        {
+            **item.as_dict(),
+            "created": created,
+        },
+        status_code=201 if created else 200,
+    )
+
+
+@document_router.post(
+    "/api/document-batches/{batch_id}/queue",
+    response_class=JSONResponse,
+    dependencies=[Depends(password_gate)],
+)
+def queue_document_batch_api(request: Request, batch_id: str) -> JSONResponse:
+    try:
+        summary = queue_document_batch(get_settings(request), batch_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="上传批次不存在。") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return JSONResponse(summary)
+
+
+@document_router.get(
+    "/api/document-batches/{batch_id}",
+    response_class=JSONResponse,
+    dependencies=[Depends(password_gate)],
+)
+def document_batch_status_api(request: Request, batch_id: str) -> JSONResponse:
+    try:
+        return JSONResponse(
+            build_document_batch_summary(get_settings(request), batch_id)
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="上传批次不存在。") from exc
+
+
+@document_router.get(
+    "/document-batches/{batch_id}",
+    response_class=HTMLResponse,
+    dependencies=[Depends(password_gate)],
+)
+def document_batch_detail(request: Request, batch_id: str) -> HTMLResponse:
+    try:
+        summary = build_document_batch_summary(get_settings(request), batch_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="上传批次不存在。") from exc
+    return _render(
+        request,
+        "document_batch_detail.html",
+        {"batch": summary},
+    )
 
 
 @document_router.post("/documents/{doc_id}/start-ocr", dependencies=[Depends(password_gate)])
 def start_ocr(request: Request, doc_id: str) -> RedirectResponse:
     try:
-        run_document_ocr(get_settings(request), doc_id, rerun=False)
+        settings = get_settings(request)
+        ensure_document_pipeline_ready(settings)
+        enqueue_document_pipeline(settings, doc_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="文件不存在。") from exc
     except ValueError as exc:
         message = MISSING_OCR_CREDENTIALS_MESSAGE if str(exc) == MISSING_OCR_CREDENTIALS_MESSAGE else str(exc)
         return _home_redirect(error=message)
-    return _home_redirect("识别完成，可以点击“继续处理”。")
+    return _home_redirect("文件已进入队列，将依次完成识别和数据生成。")
 
 
 @document_router.post("/documents/{doc_id}/rerun-ocr", dependencies=[Depends(password_gate)])
 def rerun_ocr(request: Request, doc_id: str) -> RedirectResponse:
     try:
-        run_document_ocr(get_settings(request), doc_id, rerun=True)
+        settings = get_settings(request)
+        ensure_document_pipeline_ready(settings)
+        enqueue_document_pipeline(settings, doc_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="文件不存在。") from exc
     except ValueError as exc:
         message = MISSING_OCR_CREDENTIALS_MESSAGE if str(exc) == MISSING_OCR_CREDENTIALS_MESSAGE else str(exc)
         return _home_redirect(error=message)
-    return _home_redirect("重新识别完成，可以继续处理。")
+    return _home_redirect("文件已重新进入队列。")
 
 
 @document_router.get("/documents/{doc_id}/continue", response_class=HTMLResponse, dependencies=[Depends(password_gate)])
@@ -723,6 +859,7 @@ def build_home_context(request: Request, *, message: str = "", error: str = "") 
     settings = get_settings(request)
     return {
         "documents": list_documents(settings),
+        "recent_batches": list_recent_document_batch_summaries(settings, limit=5),
         "message": message,
         "error": error,
     }

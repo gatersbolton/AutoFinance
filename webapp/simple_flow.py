@@ -24,7 +24,7 @@ from standard_map.store import LocalMappingStore
 
 from .combined_downloads import COMBINED_WORKBOOK_DOWNLOAD_NAME, build_combined_metrics_workbook
 from .config import WebAppSettings
-from .models import JOB_MODE_UPLOAD, JobRecord
+from .models import JOB_MODE_DOCUMENT_PIPELINE, JOB_MODE_UPLOAD, JobRecord
 from .review_quality import display_period_role, has_temporal_key, is_invalid_metric_name
 
 
@@ -178,7 +178,12 @@ def _portable_summary_file(raw_path: object, fallback_root: Path, filename: str)
 
 
 def run_raw_metrics_step(settings: WebAppSettings, job: JobRecord) -> dict[str, Any]:
-    input_dir = Path(job.ocr_output_dir).resolve() if job.mode == JOB_MODE_UPLOAD and job.ocr_output_dir else Path(job.input_path).resolve()
+    uses_uploaded_pdf = job.mode in {JOB_MODE_UPLOAD, JOB_MODE_DOCUMENT_PIPELINE}
+    input_dir = (
+        Path(job.ocr_output_dir).resolve()
+        if uses_uploaded_pdf and job.ocr_output_dir
+        else Path(job.input_path).resolve()
+    )
     if not input_dir.exists():
         raise ValueError(f"OCR 输出目录不存在: {input_dir}")
     source_image_dir = Path(job.source_image_dir).resolve() if job.source_image_dir and Path(job.source_image_dir).exists() else None

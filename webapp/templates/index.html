@@ -12,6 +12,24 @@
 <section class="notice notice--error">{{ error }}</section>
 {% endif %}
 
+{% if recent_batches %}
+<section class="card">
+    <div class="panel-heading">
+        <div>
+            <h2>最近上传批次</h2>
+        </div>
+    </div>
+    <div class="batch-card-list">
+        {% for batch in recent_batches %}
+        <a class="batch-card" href="{{ url_prefix }}/document-batches/{{ batch.batch_id }}">
+            <span><strong>{{ batch.expected_files }} 份 PDF</strong><small>{{ batch.status_label_zh }}</small></span>
+            <span>{{ batch.counts.completed }}/{{ batch.expected_files }} 已完成</span>
+        </a>
+        {% endfor %}
+    </div>
+</section>
+{% endif %}
+
 <section class="card library-card">
     <div class="panel-heading">
         <div>
@@ -49,9 +67,13 @@
                             <form action="{{ url_prefix }}/documents/{{ document.doc_id }}/continue" method="get">
                                 <button class="button button--primary" type="submit">继续处理</button>
                             </form>
+                            {% elif document.ocr_status in ["queued", "running"] %}
+                            <button class="button button--secondary" type="button" disabled>处理中</button>
                             {% else %}
                             <form action="{{ url_prefix }}/documents/{{ document.doc_id }}/start-ocr" method="post">
-                                <button class="button button--primary" type="submit">开始识别</button>
+                                <button class="button button--primary" type="submit">
+                                    {{ "重新处理" if document.ocr_status == "failed" else "开始识别" }}
+                                </button>
                             </form>
                             {% endif %}
                             <a class="button button--danger" href="{{ url_prefix }}/documents/{{ document.doc_id }}/delete-confirm">删除</a>

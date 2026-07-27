@@ -8,6 +8,7 @@ import subprocess
 import tempfile
 import time
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -28,18 +29,20 @@ from webapp.document_library import (
     update_document_status,
     write_document,
 )
-from webapp.document_models import STATUS_COMPLETED
+from webapp.document_models import STATUS_COMPLETED, STATUS_QUEUED
 from webapp.db import (
+    claim_next_queued_job,
     get_job,
     get_review_operation,
     init_db,
     list_review_actions,
+    recover_abandoned_running_jobs,
     update_job,
     update_review_operation,
 )
-from webapp.jobs import discover_output_files
+from webapp.jobs import build_job_stage_flow, discover_output_files
 from webapp.main import create_app
-from webapp.models import JobRecord
+from webapp.models import JOB_MODE_DOCUMENT_PIPELINE, JobRecord
 from webapp.review import export_review_actions, get_review_dir, load_review_items, filter_review_items
 from webapp.runner import run_worker_once
 from webapp.simple_flow import (
@@ -870,7 +873,7 @@ class WebAppTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn("上传新的 PDF", response.text)
         self.assertIn("已保存 PDF", response.text)
-        for text in ("新建任务", "待复核项目", "operation", "provider conflict", "raw JSON", "task id", "queue", "batch", "debug"):
+        for text in ("新建任务", "待复核项目", "operation", "provider conflict", "raw JSON", "task id", "queue", "debug"):
             self.assertNotIn(text, response.text)
 
     def test_new_job_page_returns_200(self):
@@ -890,6 +893,319 @@ class WebAppTests(unittest.TestCase):
         self.assertTrue(str(Path(document.pdf_path).resolve()).startswith(str((self.corpus_root / "library" / doc_id / "input").resolve())))
         self.assertEqual(document.original_filename, "B公司审计报告.pdf")
         self.assertTrue(Path(document.metadata_path).exists())
+
+    def test_document_batch_uploads_each_pdf_separately_and_queues_individual_jobs(self):
+        self._write_secret_file(aliyun=True)
+        created = self.client.post(
+            "/api/document-batches",
+            data={"expected_files": "2"},
+        )
+        self.assertEqual(created.status_code, 201)
+        batch = created.json()
+        for index, filename in enumerate(("甲公司年报.pdf", "乙公司年报.pdf")):
+            uploaded = self.client.post(
+                batch["upload_url"],
+                data={"upload_index": str(index)},
+                files={
+                    "uploaded_file": (
+                        filename,
+                        b"%PDF-1.4\n%mock\n%%EOF\n",
+                        "application/pdf",
+                    )
+                },
+            )
+            self.assertEqual(uploaded.status_code, 201)
+
+        queued = self.client.post(batch["queue_url"])
+        self.assertEqual(queued.status_code, 200)
+        summary = queued.json()
+        self.assertEqual(summary["counts"]["uploaded"], 2)
+        self.assertEqual(summary["counts"]["queued"], 2)
+        self.assertEqual([item["upload_index"] for item in summary["items"]], [0, 1])
+        doc_ids = [item["doc_id"] for item in summary["items"]]
+        self.assertEqual(len(set(doc_ids)), 2)
+        for item in summary["items"]:
+            job = get_job(self.settings, item["job_id"])
+            self.assertIsNotNone(job)
+            self.assertEqual(job.mode, JOB_MODE_DOCUMENT_PIPELINE)
+            self.assertEqual(job.status, "queued")
+            document = load_document(self.settings, item["doc_id"], refresh=False)
+            self.assertEqual(document.ocr_status, STATUS_QUEUED)
+            self.assertTrue(Path(document.pdf_path).exists())
+
+        detail = self.client.get(batch["detail_url"])
+        self.assertEqual(detail.status_code, 200)
+        self.assertIn("低配服务器一次只处理一份文件", detail.text)
+        self.assertIn("甲公司年报.pdf", detail.text)
+        self.assertIn("乙公司年报.pdf", detail.text)
+
+    def test_document_batch_upload_index_is_idempotent(self):
+        created = self.client.post(
+            "/api/document-batches",
+            data={"expected_files": "1"},
+        ).json()
+        request_kwargs = {
+            "data": {"upload_index": "0"},
+            "files": {
+                "uploaded_file": (
+                    "同一文件.pdf",
+                    b"%PDF-1.4\n%mock\n%%EOF\n",
+                    "application/pdf",
+                )
+            },
+        }
+        first = self.client.post(created["upload_url"], **request_kwargs)
+        second = self.client.post(created["upload_url"], **request_kwargs)
+        self.assertEqual(first.status_code, 201)
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(first.json()["doc_id"], second.json()["doc_id"])
+        self.assertFalse(second.json()["created"])
+        self.assertEqual(
+            len(list((self.corpus_root / "library").glob("doc_*"))),
+            1,
+        )
+
+    def test_document_batch_limits_and_incomplete_queue_are_rejected(self):
+        too_many = self.client.post(
+            "/api/document-batches",
+            data={"expected_files": str(self.settings.max_upload_batch_files + 1)},
+        )
+        self.assertEqual(too_many.status_code, 400)
+        created = self.client.post(
+            "/api/document-batches",
+            data={"expected_files": "2"},
+        ).json()
+        uploaded = self.client.post(
+            created["upload_url"],
+            data={"upload_index": "0"},
+            files={
+                "uploaded_file": (
+                    "only-one.pdf",
+                    b"%PDF-1.4\n%mock\n%%EOF\n",
+                    "application/pdf",
+                )
+            },
+        )
+        self.assertEqual(uploaded.status_code, 201)
+        queued = self.client.post(created["queue_url"])
+        self.assertEqual(queued.status_code, 400)
+        self.assertIn("当前仅收到 1 个", queued.json()["detail"])
+
+    def test_document_batch_queue_is_atomic_when_one_file_is_running(self):
+        self._write_secret_file(aliyun=True)
+        created = self.client.post(
+            "/api/document-batches",
+            data={"expected_files": "2"},
+        ).json()
+        uploaded_items = []
+        for index in range(2):
+            uploaded_items.append(
+                self.client.post(
+                    created["upload_url"],
+                    data={"upload_index": str(index)},
+                    files={
+                        "uploaded_file": (
+                            f"atomic-{index}.pdf",
+                            b"%PDF-1.4\n%mock\n%%EOF\n",
+                            "application/pdf",
+                        )
+                    },
+                ).json()
+            )
+
+        first_doc_id = uploaded_items[0]["doc_id"]
+        second_doc_id = uploaded_items[1]["doc_id"]
+        self.client.post(
+            f"/documents/{first_doc_id}/start-ocr",
+            follow_redirects=False,
+        )
+        running = claim_next_queued_job(self.settings)
+        self.assertEqual(running.job_id, first_doc_id)
+
+        response = self.client.post(created["queue_url"])
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("正在处理中", response.json()["detail"])
+        self.assertIsNone(get_job(self.settings, second_doc_id))
+        batch = self.client.get(created["status_url"]).json()
+        self.assertEqual(batch["status"], "uploading")
+
+    def test_document_upload_rejects_pdf_over_page_limit(self):
+        import fitz
+
+        pdf = fitz.open()
+        pdf.new_page()
+        pdf.new_page()
+        payload = pdf.tobytes()
+        pdf.close()
+        settings = self.make_settings(max_pdf_pages=1)
+        settings.ensure_directories()
+        init_db(settings)
+        with TestClient(create_app(settings)) as client:
+            response = client.post(
+                "/documents/upload",
+                files={
+                    "uploaded_files": (
+                        "two-pages.pdf",
+                        payload,
+                        "application/pdf",
+                    )
+                },
+            )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("超过 1 页限制", response.text)
+
+    def test_document_start_route_only_enqueues_work(self):
+        self._write_secret_file(aliyun=True)
+        doc_id = self._upload_library_pdf()
+        with mock.patch("webapp.document_library.run_document_ocr") as run_ocr:
+            response = self.client.post(
+                f"/documents/{doc_id}/start-ocr",
+                follow_redirects=False,
+            )
+        self.assertEqual(response.status_code, 303)
+        run_ocr.assert_not_called()
+        document = load_document(self.settings, doc_id, refresh=False)
+        self.assertEqual(document.ocr_status, STATUS_QUEUED)
+        job = get_job(self.settings, doc_id)
+        self.assertEqual(job.status, "queued")
+        home = self.client.get("/")
+        self.assertIn("处理中", home.text)
+
+    def test_document_with_existing_results_stays_queued_when_reenqueued(self):
+        self._write_secret_file(aliyun=True)
+        doc_id = self._upload_library_pdf()
+        self._write_tiny_library_ocr(doc_id)
+        update_document_status(
+            self.settings,
+            doc_id,
+            ocr_status=STATUS_COMPLETED,
+            raw_metrics_status=STATUS_COMPLETED,
+            standard_metrics_status=STATUS_COMPLETED,
+        )
+
+        response = self.client.post(
+            f"/documents/{doc_id}/rerun-ocr",
+            follow_redirects=False,
+        )
+
+        self.assertEqual(response.status_code, 303)
+        document = load_document(self.settings, doc_id)
+        self.assertEqual(document.ocr_status, STATUS_QUEUED)
+        self.assertEqual(document.raw_metrics_status, STATUS_QUEUED)
+        self.assertEqual(document.standard_metrics_status, STATUS_QUEUED)
+        job = get_job(self.settings, doc_id)
+        self.assertEqual(job.status, "queued")
+        stage_flow = build_job_stage_flow(job)
+        self.assertEqual(stage_flow[0]["label_zh"], "上传")
+        self.assertEqual(stage_flow[0]["state"], "current")
+        self.assertEqual(stage_flow[1]["state"], "pending")
+
+    def test_sqlite_queue_allows_only_one_running_document(self):
+        self._write_secret_file(aliyun=True)
+        created = self.client.post(
+            "/api/document-batches",
+            data={"expected_files": "2"},
+        ).json()
+        for index in range(2):
+            self.client.post(
+                created["upload_url"],
+                data={"upload_index": str(index)},
+                files={
+                    "uploaded_file": (
+                        f"serial-{index}.pdf",
+                        b"%PDF-1.4\n%mock\n%%EOF\n",
+                        "application/pdf",
+                    )
+                },
+            )
+        self.client.post(created["queue_url"])
+        first = claim_next_queued_job(self.settings)
+        second = claim_next_queued_job(self.settings)
+        self.assertIsNotNone(first)
+        self.assertEqual(first.status, "running")
+        self.assertIsNone(second)
+
+    def test_stale_running_job_is_failed_before_queue_continues(self):
+        self._write_secret_file(aliyun=True)
+        created = self.client.post(
+            "/api/document-batches",
+            data={"expected_files": "2"},
+        ).json()
+        for index in range(2):
+            self.client.post(
+                created["upload_url"],
+                data={"upload_index": str(index)},
+                files={
+                    "uploaded_file": (
+                        f"recover-{index}.pdf",
+                        b"%PDF-1.4\n%mock\n%%EOF\n",
+                        "application/pdf",
+                    )
+                },
+            )
+        self.client.post(created["queue_url"])
+        first = claim_next_queued_job(self.settings)
+        future = datetime.now(timezone.utc) + timedelta(
+            seconds=first.timeout_seconds
+            + self.settings.worker_stale_job_grace_seconds
+            + 5
+        )
+        recovered = recover_abandoned_running_jobs(self.settings, now=future)
+        self.assertEqual([job.job_id for job in recovered], [first.job_id])
+        self.assertEqual(get_job(self.settings, first.job_id).status, "failed")
+        second = claim_next_queued_job(self.settings)
+        self.assertIsNotNone(second)
+        self.assertNotEqual(second.job_id, first.job_id)
+        self.assertEqual(second.status, "running")
+
+    def test_worker_runs_document_pipeline_to_structured_outputs(self):
+        self._write_secret_file(aliyun=True)
+        created = self.client.post(
+            "/api/document-batches",
+            data={"expected_files": "1"},
+        ).json()
+        uploaded = self.client.post(
+            created["upload_url"],
+            data={"upload_index": "0"},
+            files={
+                "uploaded_file": (
+                    "pipeline.pdf",
+                    b"%PDF-1.4\n%mock\n%%EOF\n",
+                    "application/pdf",
+                )
+            },
+        ).json()
+        self.client.post(created["queue_url"])
+        doc_id = uploaded["doc_id"]
+
+        def fake_ocr(settings, target_doc_id, *, rerun):
+            self._write_tiny_library_ocr(target_doc_id)
+            update_document_status(settings, target_doc_id, ocr_status=STATUS_COMPLETED)
+            return {
+                "pass": True,
+                "command_executed": "mock-document-ocr",
+                "error_message": "",
+            }
+
+        with mock.patch(
+            "webapp.document_library.run_document_ocr",
+            side_effect=fake_ocr,
+        ):
+            result = run_worker_once(self.settings)
+        self.assertIsNotNone(result)
+        self.assertIn(result.status, {"succeeded", "needs_review"})
+        document = load_document(self.settings, doc_id)
+        self.assertEqual(document.ocr_status, STATUS_COMPLETED)
+        self.assertEqual(document.raw_metrics_status, STATUS_COMPLETED)
+        self.assertEqual(document.standard_metrics_status, STATUS_COMPLETED)
+        state = load_simple_flow_state(document_to_job(self.settings, document), self.settings)
+        self.assertTrue(state["raw_ready"])
+        self.assertTrue(state["standard_ready"])
+        self.assertTrue(state["combined_ready"])
+        pipeline_summary = self.settings.results_root / doc_id / "document_pipeline_summary.json"
+        self.assertTrue(pipeline_summary.exists())
+        self.assertTrue(json.loads(pipeline_summary.read_text(encoding="utf-8"))["pass"])
 
     def test_document_home_no_ocr_button_state(self):
         doc_id = self._upload_library_pdf()
@@ -1461,7 +1777,7 @@ class WebAppTests(unittest.TestCase):
         response = self.client.get(f"/jobs/{job_id}/proofread")
         self.assertEqual(response.status_code, 200)
         self.assertIn("data-unified-proofread-workbench", response.text)
-        self.assertIn("/static/app.js?v=proofread-period-columns-20260616-4", response.text)
+        self.assertIn("/static/app.js?v=document-batches-20260727-1", response.text)
         self.assertIn("source-panel", response.text)
         self.assertIn("sheet-panel", response.text)
         self.assertIn("data-page-image-key=", response.text)

@@ -42,6 +42,45 @@ The current users work in desktop Chrome. Responsive mobile workflows and extern
 
 The observed production server baseline on 2026-07-23 is 2 vCPU, about 1.6 GB RAM with no swap, and a 40 GB root disk with about 17 GB free. This is a binding design constraint, not a performance-test target.
 
+## Current Web Processing Architecture
+
+The ordinary web upload flow now implements the low-specification deployment model:
+
+```text
+create logical batch
+  -> upload each PDF in a separate request
+  -> atomically enqueue all documents in SQLite
+  -> one worker processes one document at a time
+  -> OCR -> raw facts -> standard mapping -> combined Excel download
+  -> review in the browser
+```
+
+A logical batch accepts one to five PDFs; two to five is the expected normal usage. The browser retries an interrupted individual upload without duplicating a file that was already accepted at the same batch position. After every file is present, all jobs and the batch status are committed in one SQLite transaction. If any document is already running, no additional job from that batch is partially queued.
+
+The durable queue uses `data/generated/web/webapp.sqlite3`. `document_batches` and `document_batch_items` retain logical upload state, while the existing `jobs` table is the processing queue. SQLite claiming is serialized and refuses to claim another job while any job is running. A running job that remains unchanged beyond its configured task timeout plus grace period is marked failed so the queue can continue; completed outputs are not deleted.
+
+The document pipeline job mode is `document_pipeline`. It runs cloud OCR, raw fact extraction, deterministic standard-term mapping, and the combined finance-facing workbook in the worker rather than in the upload HTTP request. Existing manual raw-extraction and mapping routes remain for compatibility and diagnostics, but they are not the normal batch path.
+
+The batch status page polls durable server state and refreshes when a file changes stage. The principal API endpoints are:
+
+```text
+POST /api/document-batches
+POST /api/document-batches/{batch_id}/files
+POST /api/document-batches/{batch_id}/queue
+GET  /api/document-batches/{batch_id}
+GET  /document-batches/{batch_id}
+```
+
+Relevant safety settings are:
+
+```text
+WEBAPP_MAX_UPLOAD_BYTES=52428800
+WEBAPP_MAX_UPLOAD_BATCH_FILES=5
+WEBAPP_MAX_PDF_PAGES=300
+WEBAPP_JOB_TIMEOUT_SECONDS=3600
+WEBAPP_WORKER_STALE_JOB_GRACE_SECONDS=300
+```
+
 ## Quickstart
 
 ```bash
@@ -80,6 +119,7 @@ data/
       jobs/
       results/
       logs/
+      webapp.sqlite3
 ```
 
 The workbook exporter treats the template as layout only: it clears demonstration/result columns before writing actual dynamic periods and rejects outputs that retain placeholder headers or example amounts.

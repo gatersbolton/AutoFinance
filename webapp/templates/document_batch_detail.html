@@ -1,0 +1,65 @@
+{% extends "base.html" %}
+{% block title %}批次处理状态 | {{ settings.app_name }}{% endblock %}
+{% block content %}
+<section class="page-heading">
+    <div>
+        <h1>批次处理状态</h1>
+        <p>{{ batch.expected_files }} 份 PDF · {{ batch.status_label_zh }}</p>
+    </div>
+    <a class="button button--secondary" href="{{ url_prefix }}/">返回首页</a>
+</section>
+
+{% if batch.error_message %}
+<section class="notice notice--error">{{ batch.error_message }}</section>
+{% endif %}
+
+<section
+    class="card"
+    data-document-batch-status
+    data-status-url="{{ url_prefix }}/api/document-batches/{{ batch.batch_id }}"
+    data-active="{{ 'true' if batch.active else 'false' }}"
+    data-state-token="{{ batch.state_token }}"
+>
+    <div class="batch-summary-grid">
+        <div><strong>{{ batch.counts.uploaded }}</strong><span>已上传</span></div>
+        <div><strong>{{ batch.counts.queued }}</strong><span>排队中</span></div>
+        <div><strong>{{ batch.counts.running }}</strong><span>处理中</span></div>
+        <div><strong>{{ batch.counts.completed }}</strong><span>已完成</span></div>
+        <div><strong>{{ batch.counts.failed }}</strong><span>失败</span></div>
+    </div>
+    {% if batch.active %}
+    <p class="field-help">页面会自动更新。低配服务器一次只处理一份文件。</p>
+    {% endif %}
+
+    <div class="table-wrap">
+        <table class="document-table">
+            <thead>
+                <tr>
+                    <th>文件</th>
+                    <th>任务状态</th>
+                    <th>当前进度</th>
+                    <th>操作</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for item in batch["items"] %}
+                <tr>
+                    <td><strong>{{ item.display_name }}</strong><span class="file-subtitle">{{ item.original_filename }}</span></td>
+                    <td><span class="status status--document">{{ item.job_status_label_zh }}</span></td>
+                    <td>{{ item.progress_summary }}</td>
+                    <td>
+                        {% if item.document_exists and item.job_status in ["succeeded", "succeeded_with_warnings", "needs_review"] %}
+                        <a class="button button--primary" href="{{ url_prefix }}{{ item.continue_url }}">查看和校对</a>
+                        {% elif item.job_status in ["failed", "cancelled"] %}
+                        <a class="button button--secondary" href="{{ url_prefix }}/">返回文件列表</a>
+                        {% else %}
+                        <span class="muted">等待处理</span>
+                        {% endif %}
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</section>
+{% endblock %}

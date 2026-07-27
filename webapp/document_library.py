@@ -18,10 +18,11 @@ from .document_models import (
     STATUS_COMPLETED,
     STATUS_FAILED,
     STATUS_NOT_STARTED,
+    STATUS_QUEUED,
     STATUS_RUNNING,
     DocumentRecord,
 )
-from .models import JOB_MODE_UPLOAD, JobRecord
+from .models import JOB_MODE_DOCUMENT_PIPELINE, JobRecord
 from .ocr_runtime import build_upload_ocr_command, execute_mock_ocr, upload_provider_runtime_ready
 
 
@@ -132,63 +133,102 @@ async def save_uploaded_documents(settings: WebAppSettings, files: Sequence[Uplo
     ensure_document_library(settings)
     if not files:
         raise ValueError("请至少上传一个 PDF 文件。")
+    if len(files) > settings.max_upload_batch_files:
+        raise ValueError(f"每批最多上传 {settings.max_upload_batch_files} 个 PDF 文件。")
     documents: list[DocumentRecord] = []
     for index, upload in enumerate(files, start=1):
-        original_filename = upload.filename or f"upload_{index}.pdf"
-        if Path(original_filename).suffix.lower() not in settings.allowed_upload_extensions:
-            raise ValueError(f"只支持 PDF 文件: {original_filename}")
-        sanitized = sanitize_filename(original_filename)
+        if not upload.filename:
+            upload.filename = f"upload_{index}.pdf"
+        documents.append(await save_uploaded_document(settings, upload))
+    return documents
 
-        doc_id = generate_doc_id()
-        root = document_root(settings, doc_id)
-        input_dir = root / "input"
-        ocr_output_dir = root / "ocr_outputs"
-        input_dir.mkdir(parents=True, exist_ok=True)
-        ocr_output_dir.mkdir(parents=True, exist_ok=True)
-        target_path = input_dir / sanitized
 
-        total_bytes = 0
+async def save_uploaded_document(
+    settings: WebAppSettings,
+    upload: UploadFile,
+) -> DocumentRecord:
+    ensure_document_library(settings)
+    original_filename = upload.filename or "upload.pdf"
+    if Path(original_filename).suffix.lower() not in settings.allowed_upload_extensions:
+        raise ValueError(f"只支持 PDF 文件: {original_filename}")
+    sanitized = sanitize_filename(original_filename)
+
+    doc_id = generate_doc_id()
+    root = document_root(settings, doc_id)
+    input_dir = root / "input"
+    ocr_output_dir = root / "ocr_outputs"
+    input_dir.mkdir(parents=True, exist_ok=True)
+    ocr_output_dir.mkdir(parents=True, exist_ok=True)
+    target_path = input_dir / sanitized
+
+    total_bytes = 0
+    signature_sample = bytearray()
+    try:
         with target_path.open("wb") as handle:
             while True:
                 chunk = await upload.read(1024 * 1024)
                 if not chunk:
                     break
+                if len(signature_sample) < 1024:
+                    signature_sample.extend(chunk[: 1024 - len(signature_sample)])
                 total_bytes += len(chunk)
                 if total_bytes > settings.max_upload_bytes:
-                    handle.close()
-                    shutil.rmtree(root, ignore_errors=True)
-                    raise ValueError(f"{original_filename} 超过上传大小限制 {settings.max_upload_bytes} 字节。")
+                    raise ValueError(
+                        f"{original_filename} 超过上传大小限制 {settings.max_upload_bytes} 字节。"
+                    )
                 handle.write(chunk)
+    except Exception:
+        shutil.rmtree(root, ignore_errors=True)
+        raise
+    finally:
         await upload.close()
 
-        now = utc_now_iso()
-        document = DocumentRecord(
-            doc_id=doc_id,
-            display_name=Path(original_filename).stem or sanitized,
-            original_filename=original_filename,
-            pdf_path=str(target_path),
-            input_dir=str(input_dir),
-            ocr_output_dir=str(ocr_output_dir),
-            latest_job_id="",
-            ocr_status=STATUS_NOT_STARTED,
-            raw_metrics_status=STATUS_NOT_STARTED,
-            standard_metrics_status=STATUS_NOT_STARTED,
-            created_at=now,
-            updated_at=now,
-            deleted_at="",
-            metadata_path=str(root / "metadata.json"),
-            error_message="",
+    if total_bytes == 0 or b"%PDF-" not in bytes(signature_sample):
+        shutil.rmtree(root, ignore_errors=True)
+        raise ValueError(f"文件内容不是有效的 PDF: {original_filename}")
+    try:
+        import fitz
+
+        with fitz.open(target_path) as pdf:
+            page_count = int(pdf.page_count)
+    except Exception as exc:
+        if settings.env_mode == "prod":
+            shutil.rmtree(root, ignore_errors=True)
+            raise ValueError(f"无法读取 PDF 页数: {original_filename}") from exc
+        page_count = 0
+    if page_count > settings.max_pdf_pages:
+        shutil.rmtree(root, ignore_errors=True)
+        raise ValueError(
+            f"{original_filename} 共 {page_count} 页，超过 {settings.max_pdf_pages} 页限制。"
         )
-        write_document(settings, document)
-        documents.append(load_document(settings, doc_id))
-    return documents
+
+    now = utc_now_iso()
+    document = DocumentRecord(
+        doc_id=doc_id,
+        display_name=Path(original_filename).stem or sanitized,
+        original_filename=original_filename,
+        pdf_path=str(target_path),
+        input_dir=str(input_dir),
+        ocr_output_dir=str(ocr_output_dir),
+        latest_job_id="",
+        ocr_status=STATUS_NOT_STARTED,
+        raw_metrics_status=STATUS_NOT_STARTED,
+        standard_metrics_status=STATUS_NOT_STARTED,
+        created_at=now,
+        updated_at=now,
+        deleted_at="",
+        metadata_path=str(root / "metadata.json"),
+        error_message="",
+    )
+    write_document(settings, document)
+    return load_document(settings, doc_id)
 
 
 def refresh_document_status(settings: WebAppSettings, document: DocumentRecord, *, persist: bool) -> DocumentRecord:
     changed = False
     if _normalize_document_storage_paths(settings, document):
         changed = True
-    if document.ocr_status != STATUS_RUNNING and _ocr_outputs_exist(Path(document.ocr_output_dir)):
+    if document.ocr_status not in {STATUS_RUNNING, STATUS_QUEUED} and _ocr_outputs_exist(Path(document.ocr_output_dir)):
         if document.ocr_status != STATUS_COMPLETED:
             document.ocr_status = STATUS_COMPLETED
             changed = True
@@ -197,7 +237,11 @@ def refresh_document_status(settings: WebAppSettings, document: DocumentRecord, 
     raw_path = Path(str(raw_summary.get("raw_metrics_csv", "") or ""))
     if not raw_path.exists():
         raw_path = _latest_file(settings.raw_metrics_root / document.doc_id, "raw_metrics.csv")
-    if raw_path.exists() and document.raw_metrics_status != STATUS_COMPLETED:
+    if raw_path.exists() and document.raw_metrics_status not in {
+        STATUS_COMPLETED,
+        STATUS_QUEUED,
+        STATUS_RUNNING,
+    }:
         document.raw_metrics_status = STATUS_COMPLETED
         changed = True
 
@@ -205,7 +249,11 @@ def refresh_document_status(settings: WebAppSettings, document: DocumentRecord, 
     standard_path = Path(str(standard_summary.get("standardized_metrics_csv", "") or ""))
     if not standard_path.exists():
         standard_path = _latest_file(settings.standard_metrics_root / document.doc_id, "standardized_metrics.csv")
-    if standard_path.exists() and document.standard_metrics_status != STATUS_COMPLETED:
+    if standard_path.exists() and document.standard_metrics_status not in {
+        STATUS_COMPLETED,
+        STATUS_QUEUED,
+        STATUS_RUNNING,
+    }:
         document.standard_metrics_status = STATUS_COMPLETED
         changed = True
 
@@ -244,12 +292,30 @@ def document_to_job(settings: WebAppSettings, document: DocumentRecord) -> JobRe
     log_dir = settings.logs_root / document.doc_id
     for path in (root, output_dir, result_dir, log_dir):
         path.mkdir(parents=True, exist_ok=True)
-    status = "succeeded" if document.standard_metrics_status == STATUS_COMPLETED else "created"
-    stage = "generated" if document.standard_metrics_status == STATUS_COMPLETED else "uploaded"
+    if document.standard_metrics_status == STATUS_COMPLETED:
+        status = "succeeded"
+        stage = "generated"
+    elif STATUS_RUNNING in {
+        document.ocr_status,
+        document.raw_metrics_status,
+        document.standard_metrics_status,
+    }:
+        status = "running"
+        stage = "processing"
+    elif STATUS_QUEUED in {
+        document.ocr_status,
+        document.raw_metrics_status,
+        document.standard_metrics_status,
+    }:
+        status = "queued"
+        stage = "queued"
+    else:
+        status = "created"
+        stage = "uploaded"
     return JobRecord(
         job_id=document.doc_id,
         display_name=document.display_name,
-        mode=JOB_MODE_UPLOAD,
+        mode=JOB_MODE_DOCUMENT_PIPELINE,
         provider_mode="cloud_first",
         input_path=document.ocr_output_dir,
         source_image_dir=document.input_dir,
