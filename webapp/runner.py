@@ -22,6 +22,10 @@ from .db import (
 )
 from .jobs import discover_output_files, ensure_job_workspace, write_output_manifest
 from .models import (
+    DOCUMENT_PIPELINE_STAGE_OCR,
+    DOCUMENT_PIPELINE_STAGE_RAW_METRICS,
+    DOCUMENT_PIPELINE_STAGE_STANDARD_METRICS,
+    DOCUMENT_PIPELINE_STAGES,
     JOB_MODE_DOCUMENT_PIPELINE,
     JOB_MODE_UPLOAD,
     JOB_STATUS_FAILED,
@@ -305,13 +309,16 @@ def _mark_document_pipeline_failed(
     started_at_monotonic: float,
 ) -> JobRecord:
     from .document_library import update_document_status
-    from .document_models import STATUS_FAILED
+    from .document_models import STATUS_FAILED, STATUS_NOT_STARTED
 
     status_fields: dict[str, str] = {"error_message": error_message}
-    if stage == "ocr":
+    if stage == DOCUMENT_PIPELINE_STAGE_OCR:
         status_fields["ocr_status"] = STATUS_FAILED
-    elif stage == "raw_metrics":
+        status_fields["raw_metrics_status"] = STATUS_NOT_STARTED
+        status_fields["standard_metrics_status"] = STATUS_NOT_STARTED
+    elif stage == DOCUMENT_PIPELINE_STAGE_RAW_METRICS:
         status_fields["raw_metrics_status"] = STATUS_FAILED
+        status_fields["standard_metrics_status"] = STATUS_NOT_STARTED
     else:
         status_fields["standard_metrics_status"] = STATUS_FAILED
     update_document_status(settings, job.job_id, **status_fields)
@@ -332,6 +339,7 @@ def _mark_document_pipeline_failed(
     summary = {
         "job_id": failed.job_id,
         "pipeline": JOB_MODE_DOCUMENT_PIPELINE,
+        "requested_stage": job.requested_stage or DOCUMENT_PIPELINE_STAGE_OCR,
         "pass": False,
         "failed_stage": stage,
         "error_message": error_message,
@@ -363,60 +371,98 @@ def _execute_document_pipeline(
         update_document_status,
     )
     from .document_models import STATUS_COMPLETED, STATUS_RUNNING
-    from .simple_flow import run_raw_metrics_step, run_standard_metrics_step
+    from .simple_flow import (
+        load_simple_flow_state,
+        run_raw_metrics_step,
+        run_standard_metrics_step,
+    )
 
     started_at_monotonic = time.perf_counter()
     commands: list[str] = []
-    stage = "ocr"
+    start_stage = job.requested_stage or DOCUMENT_PIPELINE_STAGE_OCR
+    stage = (
+        start_stage
+        if start_stage in DOCUMENT_PIPELINE_STAGES
+        else DOCUMENT_PIPELINE_STAGE_STANDARD_METRICS
+    )
+    raw_summary: dict[str, object] = {}
+    standard_summary: dict[str, object] = {}
     try:
+        if start_stage not in DOCUMENT_PIPELINE_STAGES:
+            raise ValueError(f"不支持的文档处理起始阶段: {start_stage}")
         document = load_document(settings, job.job_id, refresh=False)
-        update_job(
-            settings,
-            job.job_id,
-            current_stage="ocr",
-            progress_summary="正在执行云 OCR。",
-        )
-        has_existing_ocr = Path(document.ocr_output_dir).exists() and any(
-            path.is_file() for path in Path(document.ocr_output_dir).rglob("*")
-        )
-        ocr_summary = run_document_ocr(
-            settings,
-            document.doc_id,
-            rerun=has_existing_ocr,
-        )
-        commands.append(
-            str(ocr_summary.get("command_executed", "") or "document_pipeline:ocr")
-        )
-        if not bool(ocr_summary.get("pass")):
-            raise RuntimeError(str(ocr_summary.get("error_message", "") or "OCR 执行失败。"))
+        if start_stage == DOCUMENT_PIPELINE_STAGE_OCR:
+            stage = DOCUMENT_PIPELINE_STAGE_OCR
+            update_job(
+                settings,
+                job.job_id,
+                current_stage=stage,
+                progress_summary="正在执行云 OCR。",
+            )
+            has_existing_ocr = Path(document.ocr_output_dir).exists() and any(
+                path.is_file() for path in Path(document.ocr_output_dir).rglob("*")
+            )
+            ocr_summary = run_document_ocr(
+                settings,
+                document.doc_id,
+                rerun=has_existing_ocr,
+            )
+            commands.append(
+                str(ocr_summary.get("command_executed", "") or "document_pipeline:ocr")
+            )
+            if not bool(ocr_summary.get("pass")):
+                raise RuntimeError(str(ocr_summary.get("error_message", "") or "OCR 执行失败。"))
+        elif document.ocr_status != STATUS_COMPLETED:
+            raise ValueError("OCR 尚未完成，不能从结构化数据阶段开始处理。")
+        else:
+            commands.append("document_pipeline:reuse_ocr")
 
-        stage = "raw_metrics"
-        document = update_document_status(
-            settings,
-            document.doc_id,
-            raw_metrics_status=STATUS_RUNNING,
-            error_message="",
-        )
-        update_job(
-            settings,
-            job.job_id,
-            current_stage=stage,
-            progress_summary="正在提取原始结构化指标。",
-            command_executed="\n".join(commands),
-        )
-        document_job = document_to_job(settings, document)
-        raw_summary = run_raw_metrics_step(settings, document_job)
-        commands.append("document_pipeline:raw_metrics")
-        if not bool(raw_summary.get("pass")):
-            raise RuntimeError("原始结构化指标提取未通过完整性检查。")
-        document = update_document_status(
-            settings,
-            document.doc_id,
-            raw_metrics_status=STATUS_COMPLETED,
-            error_message="",
-        )
+        if start_stage in {
+            DOCUMENT_PIPELINE_STAGE_OCR,
+            DOCUMENT_PIPELINE_STAGE_RAW_METRICS,
+        }:
+            stage = DOCUMENT_PIPELINE_STAGE_RAW_METRICS
+            document = update_document_status(
+                settings,
+                document.doc_id,
+                raw_metrics_status=STATUS_RUNNING,
+                error_message="",
+            )
+            update_job(
+                settings,
+                job.job_id,
+                current_stage=stage,
+                progress_summary="正在提取原始结构化指标。",
+                command_executed="\n".join(commands),
+            )
+            document_job = document_to_job(settings, document)
+            raw_summary = run_raw_metrics_step(settings, document_job)
+            commands.append("document_pipeline:raw_metrics")
+            if not bool(raw_summary.get("pass")):
+                raise RuntimeError("原始结构化指标提取未通过完整性检查。")
+            document = update_document_status(
+                settings,
+                document.doc_id,
+                raw_metrics_status=STATUS_COMPLETED,
+                error_message="",
+            )
+        else:
+            existing_state = load_simple_flow_state(
+                document_to_job(settings, document),
+                settings,
+            )
+            if not bool(existing_state.get("raw_ready")):
+                raise ValueError("原始数据尚未生成，不能直接执行标准映射。")
+            previous_raw_summary = existing_state.get("raw_summary")
+            raw_summary = (
+                dict(previous_raw_summary)
+                if isinstance(previous_raw_summary, dict)
+                else {}
+            )
+            raw_summary["reused"] = True
+            commands.append("document_pipeline:reuse_raw_metrics")
 
-        stage = "standard_metrics"
+        stage = DOCUMENT_PIPELINE_STAGE_STANDARD_METRICS
         update_document_status(
             settings,
             document.doc_id,
@@ -482,6 +528,7 @@ def _execute_document_pipeline(
     summary = {
         "job_id": completed.job_id,
         "pipeline": JOB_MODE_DOCUMENT_PIPELINE,
+        "requested_stage": start_stage,
         "pass": True,
         "final_job_status": final_status,
         "review_required_total": review_total,
@@ -653,14 +700,17 @@ def run_worker_once(settings: WebAppSettings) -> JobRecord | None:
             continue
         try:
             from .document_library import load_document, update_document_status
-            from .document_models import STATUS_COMPLETED, STATUS_FAILED
+            from .document_models import STATUS_COMPLETED, STATUS_FAILED, STATUS_NOT_STARTED
 
             document = load_document(settings, abandoned.job_id, refresh=False)
             fields: dict[str, str] = {"error_message": abandoned.error_message}
             if document.ocr_status != STATUS_COMPLETED:
                 fields["ocr_status"] = STATUS_FAILED
+                fields["raw_metrics_status"] = STATUS_NOT_STARTED
+                fields["standard_metrics_status"] = STATUS_NOT_STARTED
             elif document.raw_metrics_status != STATUS_COMPLETED:
                 fields["raw_metrics_status"] = STATUS_FAILED
+                fields["standard_metrics_status"] = STATUS_NOT_STARTED
             else:
                 fields["standard_metrics_status"] = STATUS_FAILED
             update_document_status(settings, abandoned.job_id, **fields)

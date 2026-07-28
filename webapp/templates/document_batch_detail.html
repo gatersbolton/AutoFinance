@@ -6,7 +6,12 @@
         <h1>批次处理状态</h1>
         <p>{{ batch.expected_files }} 份 PDF · {{ batch.status_label_zh }}</p>
     </div>
-    <a class="button button--secondary" href="{{ url_prefix }}/">返回首页</a>
+    <div class="actions">
+        {% if batch.status == "uploading" %}
+        <a class="button button--primary" href="{{ url_prefix }}/documents/upload?resume_batch_id={{ batch.batch_id }}">继续上传</a>
+        {% endif %}
+        <a class="button button--secondary" href="{{ url_prefix }}/">返回首页</a>
+    </div>
 </section>
 
 {% if batch.error_message %}
@@ -27,7 +32,9 @@
         <div><strong>{{ batch.counts.completed }}</strong><span>已完成</span></div>
         <div><strong>{{ batch.counts.failed }}</strong><span>失败</span></div>
     </div>
-    {% if batch.active %}
+    {% if batch.status == "uploading" %}
+    <p class="field-help">上传尚未完成。点击“继续上传”，重新选择原批次全部文件即可恢复。</p>
+    {% elif batch.active %}
     <p class="field-help">页面会自动更新。低配服务器一次只处理一份文件。</p>
     {% endif %}
 

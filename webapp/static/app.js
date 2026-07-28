@@ -1467,6 +1467,7 @@ function initDocumentBatchUpload() {
     }
     const input = form.querySelector('input[type="file"]');
     const submit = form.querySelector("[data-batch-upload-submit]");
+    const reset = form.querySelector("[data-batch-upload-reset]");
     const errorPanel = form.querySelector("[data-batch-upload-error]");
     const progress = form.querySelector("[data-batch-upload-progress]");
     const summary = form.querySelector("[data-batch-upload-summary]");
@@ -1475,9 +1476,13 @@ function initDocumentBatchUpload() {
     const list = form.querySelector("[data-batch-upload-files]");
     const maxFiles = Number(form.dataset.maxFiles || "5");
     const maxBytes = Number(form.dataset.maxBytes || "0");
+    const createBatchUrl = String(form.dataset.createBatchUrl || "").replace(/\/+$/, "");
+    const detailBase = String(form.dataset.batchDetailBase || "").replace(/\/+$/, "");
+    const storageKey = `autofinance:document-batch-upload:${createBatchUrl}`;
     let activeBatch = null;
     let activeFileSignature = "";
     const uploadedIndexes = new Set();
+    const uploadedNames = new Map();
 
     function showError(message) {
         if (errorPanel) {
@@ -1499,15 +1504,140 @@ function initDocumentBatchUpload() {
         }
     }
 
+    function batchDescriptor(batchId, expectedFiles) {
+        const encodedId = window.encodeURIComponent(String(batchId || ""));
+        return {
+            batch_id: String(batchId || ""),
+            expected_files: Number(expectedFiles || 0),
+            upload_url: `${createBatchUrl}/${encodedId}/files`,
+            queue_url: `${createBatchUrl}/${encodedId}/queue`,
+            status_url: `${createBatchUrl}/${encodedId}`,
+            detail_url: `${detailBase}/${encodedId}`,
+        };
+    }
+
+    function readStoredRecovery() {
+        try {
+            const parsed = JSON.parse(window.localStorage.getItem(storageKey) || "{}");
+            return parsed && typeof parsed === "object" ? parsed : {};
+        } catch (error) {
+            return {};
+        }
+    }
+
+    function persistRecovery() {
+        if (!activeBatch?.batch_id) {
+            return;
+        }
+        try {
+            window.localStorage.setItem(storageKey, JSON.stringify({
+                batch_id: activeBatch.batch_id,
+                expected_files: activeBatch.expected_files,
+                file_signature: activeFileSignature,
+            }));
+        } catch (error) {
+            // Server-side batch state still allows recovery from the batch detail page.
+        }
+    }
+
+    function clearRecovery() {
+        try {
+            window.localStorage.removeItem(storageKey);
+        } catch (error) {
+            // Ignore unavailable browser storage.
+        }
+    }
+
+    async function restoreBatch() {
+        const stored = readStoredRecovery();
+        const requestedBatchId = String(form.dataset.resumeBatchId || stored.batch_id || "").trim();
+        const requestedExpectedFiles = Number(
+            form.dataset.resumeExpectedFiles || stored.expected_files || 0
+        );
+        if (!requestedBatchId) {
+            return;
+        }
+        const candidate = batchDescriptor(requestedBatchId, requestedExpectedFiles);
+        try {
+            const response = await fetch(candidate.status_url, {
+                credentials: "same-origin",
+                cache: "no-store",
+            });
+            if (!response.ok) {
+                if (response.status === 404) {
+                    clearRecovery();
+                }
+                return;
+            }
+            const payload = await response.json();
+            if (payload.status !== "uploading") {
+                clearRecovery();
+                return;
+            }
+            activeBatch = batchDescriptor(payload.batch_id, payload.expected_files);
+            activeFileSignature = (
+                stored.batch_id === payload.batch_id
+                    ? String(stored.file_signature || "")
+                    : ""
+            );
+            uploadedIndexes.clear();
+            uploadedNames.clear();
+            (payload.items || []).forEach((item) => {
+                const index = Number(item.upload_index);
+                if (Number.isInteger(index)) {
+                    uploadedIndexes.add(index);
+                    uploadedNames.set(index, String(item.original_filename || ""));
+                }
+            });
+            persistRecovery();
+            if (progress) {
+                progress.hidden = false;
+            }
+            setProgress(
+                uploadedIndexes.size,
+                activeBatch.expected_files + 1,
+                `已恢复批次，已上传 ${uploadedIndexes.size}/${activeBatch.expected_files} 份`
+            );
+            if (submit) {
+                submit.textContent = "继续上传并开始处理";
+            }
+            if (reset) {
+                reset.hidden = false;
+            }
+        } catch (error) {
+            showError("暂时无法读取未完成批次，请稍后重试。");
+        }
+    }
+
+    const restorePromise = restoreBatch();
+
+    reset?.addEventListener("click", () => {
+        clearRecovery();
+        window.location.assign(form.getAttribute("action") || window.location.pathname);
+    });
+
     form.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        await restorePromise;
         const files = Array.from(input?.files || []);
         const fileSignature = files.map((file) => `${file.name}:${file.size}`).join("|");
         if (!files.length) {
+            showError("请选择 PDF 文件。");
             return;
         }
-        event.preventDefault();
+        if (activeBatch && files.length !== activeBatch.expected_files) {
+            showError(`恢复该批次时，请重新选择原来的 ${activeBatch.expected_files} 份文件。`);
+            return;
+        }
         if (activeBatch && activeFileSignature && fileSignature !== activeFileSignature) {
             showError("当前批次已有文件上传成功，请恢复原文件选择后重试。");
+            return;
+        }
+        const mismatchedUploadedFile = files.find((file, index) => (
+            uploadedNames.has(index) && uploadedNames.get(index) !== file.name
+        ));
+        if (mismatchedUploadedFile) {
+            showError("所选文件与已上传批次的文件名或顺序不一致。");
             return;
         }
         if (files.length > maxFiles) {
@@ -1549,9 +1679,14 @@ function initDocumentBatchUpload() {
             if (!activeBatch) {
                 const createData = new FormData();
                 createData.append("expected_files", String(files.length));
-                activeBatch = await postBatchForm(form.dataset.createBatchUrl, createData);
-                activeFileSignature = fileSignature;
+                const createdBatch = await postBatchForm(createBatchUrl, createData);
+                activeBatch = batchDescriptor(
+                    createdBatch.batch_id,
+                    createdBatch.expected_files
+                );
             }
+            activeFileSignature = activeFileSignature || fileSignature;
+            persistRecovery();
             for (let index = 0; index < files.length; index += 1) {
                 const file = files[index];
                 const row = list?.children[index];
@@ -1564,12 +1699,18 @@ function initDocumentBatchUpload() {
                 if (row) {
                     row.textContent = `${file.name} — 正在上传`;
                 }
-                setProgress(index, files.length + 1, `正在上传第 ${index + 1}/${files.length} 份`);
+                setProgress(
+                    uploadedIndexes.size,
+                    files.length + 1,
+                    `正在上传第 ${index + 1}/${files.length} 份`
+                );
                 const uploadData = new FormData();
                 uploadData.append("upload_index", String(index));
                 uploadData.append("uploaded_file", file, file.name);
                 await postBatchForm(activeBatch.upload_url, uploadData, 1);
                 uploadedIndexes.add(index);
+                uploadedNames.set(index, file.name);
+                persistRecovery();
                 if (row) {
                     row.textContent = `${file.name} — 已上传`;
                 }
@@ -1577,6 +1718,7 @@ function initDocumentBatchUpload() {
             setProgress(files.length, files.length + 1, "正在加入处理队列");
             await postBatchForm(activeBatch.queue_url, new FormData());
             setProgress(files.length + 1, files.length + 1, "上传完成，正在打开批次状态");
+            clearRecovery();
             window.location.assign(activeBatch.detail_url);
         } catch (error) {
             showError(error instanceof Error ? error.message : "上传失败，请重试。");

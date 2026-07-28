@@ -47,7 +47,8 @@ CREATE TABLE IF NOT EXISTS jobs (
     run_id TEXT NOT NULL DEFAULT '',
     command_executed TEXT NOT NULL DEFAULT '',
     exit_code INTEGER,
-    timeout_seconds INTEGER NOT NULL
+    timeout_seconds INTEGER NOT NULL,
+    requested_stage TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_jobs_status_created_at ON jobs(status, created_at);
 CREATE TABLE IF NOT EXISTS review_actions (
@@ -143,6 +144,7 @@ def init_db(settings: WebAppSettings) -> None:
         _ensure_column(conn, "jobs", "raw_error_message", "TEXT NOT NULL DEFAULT ''")
         _ensure_column(conn, "jobs", "user_friendly_error", "TEXT NOT NULL DEFAULT ''")
         _ensure_column(conn, "jobs", "recommended_action", "TEXT NOT NULL DEFAULT ''")
+        _ensure_column(conn, "jobs", "requested_stage", "TEXT NOT NULL DEFAULT ''")
         _ensure_column(conn, "review_actions", "reviewer_note", "TEXT NOT NULL DEFAULT ''")
         _ensure_column(conn, "review_actions", "reviewer_name", "TEXT NOT NULL DEFAULT ''")
         _ensure_column(conn, "review_actions", "review_status", "TEXT NOT NULL DEFAULT ''")
@@ -204,6 +206,7 @@ _JOB_COLUMNS = (
     "command_executed",
     "exit_code",
     "timeout_seconds",
+    "requested_stage",
 )
 
 

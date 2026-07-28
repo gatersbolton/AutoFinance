@@ -55,11 +55,15 @@ create logical batch
   -> review in the browser
 ```
 
-A logical batch accepts one to five PDFs; two to five is the expected normal usage. The browser retries an interrupted individual upload without duplicating a file that was already accepted at the same batch position. After every file is present, all jobs and the batch status are committed in one SQLite transaction. If any document is already running, no additional job from that batch is partially queued.
+A logical batch accepts one to five PDFs; two to five is the expected normal usage. The browser retries an interrupted individual upload without duplicating a file that was already accepted at the same batch position. An unfinished batch can also be recovered after a refresh or browser restart: the upload page remembers the batch id and selected-file signature, while the durable server record remains the source of truth. The user reselects the original complete file set in the same order, and the browser skips positions already accepted by the server. The batch detail page provides an explicit `继续上传` entry point; `开始新批次` clears the browser-side recovery pointer without deleting the unfinished server record.
+
+After every file is present, all jobs and the batch status are committed in one SQLite transaction. If any document is already running, no additional job from that batch is partially queued.
 
 The durable queue uses `data/generated/web/webapp.sqlite3`. `document_batches` and `document_batch_items` retain logical upload state, while the existing `jobs` table is the processing queue. SQLite claiming is serialized and refuses to claim another job while any job is running. A running job that remains unchanged beyond its configured task timeout plus grace period is marked failed so the queue can continue; completed outputs are not deleted.
 
-The document pipeline job mode is `document_pipeline`. It runs cloud OCR, raw fact extraction, deterministic standard-term mapping, and the combined finance-facing workbook in the worker rather than in the upload HTTP request. Existing manual raw-extraction and mapping routes remain for compatibility and diagnostics, but they are not the normal batch path.
+The document pipeline job mode is `document_pipeline`. It runs cloud OCR, raw fact extraction, deterministic standard-term mapping, and the combined finance-facing workbook in the worker rather than in the upload HTTP request. Existing per-document raw-extraction and mapping actions use the same durable queue: raw extraction resumes after OCR and continues through mapping, while mapping-only regeneration reuses both OCR and raw facts. No OCR, extraction, or mapping step runs inside those HTTP requests.
+
+While any stage is queued or running, the file list and continue page show a processing state, the continue page refreshes every three seconds, and deletion is rejected. Queue displays distinguish a full OCR run from a raw-fact resume or mapping-only resume.
 
 The batch status page polls durable server state and refreshes when a file changes stage. The principal API endpoints are:
 
@@ -69,6 +73,7 @@ POST /api/document-batches/{batch_id}/files
 POST /api/document-batches/{batch_id}/queue
 GET  /api/document-batches/{batch_id}
 GET  /document-batches/{batch_id}
+GET  /documents/upload?resume_batch_id={batch_id}
 ```
 
 Relevant safety settings are:

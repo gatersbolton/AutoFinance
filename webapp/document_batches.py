@@ -43,6 +43,10 @@ from .document_models import (
     DocumentBatchRecord,
 )
 from .models import (
+    DOCUMENT_PIPELINE_STAGE_OCR,
+    DOCUMENT_PIPELINE_STAGE_RAW_METRICS,
+    DOCUMENT_PIPELINE_STAGE_STANDARD_METRICS,
+    DOCUMENT_PIPELINE_STAGES,
     JOB_MODE_DOCUMENT_PIPELINE,
     JOB_STATUS_CANCELLED,
     JOB_STATUS_FAILED,
@@ -129,27 +133,47 @@ def ensure_document_pipeline_ready(settings: WebAppSettings) -> None:
 def enqueue_document_pipeline(
     settings: WebAppSettings,
     doc_id: str,
+    *,
+    start_stage: str = DOCUMENT_PIPELINE_STAGE_OCR,
 ) -> JobRecord:
-    queued_job = _build_queued_document_job(settings, doc_id)
+    queued_job = _build_queued_document_job(
+        settings,
+        doc_id,
+        start_stage=start_stage,
+    )
     persisted = queue_jobs_atomically(settings, [queued_job])[0]
-    _mark_document_pipeline_queued(settings, doc_id, persisted.job_id)
+    _mark_document_pipeline_queued(
+        settings,
+        doc_id,
+        persisted.job_id,
+        start_stage=start_stage,
+    )
     return persisted
 
 
 def _build_queued_document_job(
     settings: WebAppSettings,
     doc_id: str,
+    *,
+    start_stage: str = DOCUMENT_PIPELINE_STAGE_OCR,
 ) -> JobRecord:
+    if start_stage not in DOCUMENT_PIPELINE_STAGES:
+        raise ValueError(f"不支持的文档处理起始阶段: {start_stage}")
     document = load_document(settings, doc_id, refresh=False)
     base_job = document_to_job(settings, document)
     now = utc_now_iso()
+    progress_summary = {
+        DOCUMENT_PIPELINE_STAGE_OCR: "已进入处理队列，等待执行 OCR 和数据生成。",
+        DOCUMENT_PIPELINE_STAGE_RAW_METRICS: "已进入处理队列，将复用 OCR 并生成结构化数据。",
+        DOCUMENT_PIPELINE_STAGE_STANDARD_METRICS: "已进入处理队列，将复用原始数据并重新生成标准映射。",
+    }[start_stage]
     return replace(
         base_job,
         mode=JOB_MODE_DOCUMENT_PIPELINE,
         provider_mode="cloud_first",
         status=JOB_STATUS_QUEUED,
         current_stage="queued",
-        progress_summary="已进入处理队列，等待单 Worker 串行处理。",
+        progress_summary=progress_summary,
         updated_at=now,
         started_at="",
         finished_at="",
@@ -159,6 +183,7 @@ def _build_queued_document_job(
         recommended_action="",
         command_executed="",
         exit_code=None,
+        requested_stage=start_stage,
     )
 
 
@@ -166,16 +191,23 @@ def _mark_document_pipeline_queued(
     settings: WebAppSettings,
     doc_id: str,
     job_id: str,
+    *,
+    start_stage: str,
 ) -> None:
-    update_document_status(
-        settings,
-        doc_id,
-        ocr_status=STATUS_QUEUED,
-        raw_metrics_status=STATUS_QUEUED,
-        standard_metrics_status=STATUS_QUEUED,
-        latest_job_id=job_id,
-        error_message="",
-    )
+    fields: dict[str, str] = {
+        "latest_job_id": job_id,
+        "error_message": "",
+    }
+    if start_stage == DOCUMENT_PIPELINE_STAGE_OCR:
+        fields["ocr_status"] = STATUS_QUEUED
+        fields["raw_metrics_status"] = STATUS_QUEUED
+        fields["standard_metrics_status"] = STATUS_QUEUED
+    elif start_stage == DOCUMENT_PIPELINE_STAGE_RAW_METRICS:
+        fields["raw_metrics_status"] = STATUS_QUEUED
+        fields["standard_metrics_status"] = STATUS_QUEUED
+    else:
+        fields["standard_metrics_status"] = STATUS_QUEUED
+    update_document_status(settings, doc_id, **fields)
 
 
 def queue_document_batch(
@@ -194,7 +226,11 @@ def queue_document_batch(
         )
     ensure_document_pipeline_ready(settings)
     queued_jobs = [
-        _build_queued_document_job(settings, item.doc_id)
+        _build_queued_document_job(
+            settings,
+            item.doc_id,
+            start_stage=DOCUMENT_PIPELINE_STAGE_OCR,
+        )
         for item in items
     ]
     persisted_jobs = queue_jobs_atomically(
@@ -203,7 +239,12 @@ def queue_document_batch(
         batch_id=batch_id,
     )
     for job in persisted_jobs:
-        _mark_document_pipeline_queued(settings, job.job_id, job.job_id)
+        _mark_document_pipeline_queued(
+            settings,
+            job.job_id,
+            job.job_id,
+            start_stage=DOCUMENT_PIPELINE_STAGE_OCR,
+        )
     return build_document_batch_summary(settings, batch_id)
 
 

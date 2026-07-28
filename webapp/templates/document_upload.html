@@ -12,6 +12,14 @@
 <section class="notice notice--error">{{ error_message }}</section>
 {% endif %}
 
+{% if resume_batch %}
+<section class="notice">
+    已恢复未完成批次：计划 {{ resume_batch.expected_files }} 份，已收到
+    {{ resume_batch.counts.uploaded }} 份。请重新选择原批次的全部文件并保持原顺序，
+    浏览器会跳过已经上传成功的文件。
+</section>
+{% endif %}
+
 <section class="card">
     <form
         class="form-stack"
@@ -20,8 +28,11 @@
         enctype="multipart/form-data"
         data-document-batch-upload
         data-create-batch-url="{{ url_prefix }}/api/document-batches"
+        data-batch-detail-base="{{ url_prefix }}/document-batches"
         data-max-files="{{ max_batch_files }}"
         data-max-bytes="{{ settings.max_upload_bytes }}"
+        data-resume-batch-id="{{ resume_batch.batch_id if resume_batch else '' }}"
+        data-resume-expected-files="{{ resume_batch.expected_files if resume_batch else '' }}"
     >
         <div class="field">
             <label class="label" for="uploaded_files">PDF 文件</label>
@@ -43,7 +54,15 @@
             <ol class="batch-upload-file-list" data-batch-upload-files></ol>
         </div>
         <div class="actions">
-            <button class="button button--primary" type="submit" data-batch-upload-submit>上传并开始处理</button>
+            <button class="button button--primary" type="submit" data-batch-upload-submit>
+                {{ "继续上传并开始处理" if resume_batch else "上传并开始处理" }}
+            </button>
+            <button
+                class="button button--secondary"
+                type="button"
+                data-batch-upload-reset
+                {% if not resume_batch %}hidden{% endif %}
+            >开始新批次</button>
             <a class="button button--secondary" href="{{ url_prefix }}/">取消</a>
         </div>
     </form>

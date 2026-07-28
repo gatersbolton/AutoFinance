@@ -17,6 +17,8 @@ from .deployment import build_system_status
 from .db import create_job, get_job, utc_now_iso
 from .labels import provider_mode_label_zh
 from .models import (
+    DOCUMENT_PIPELINE_STAGE_RAW_METRICS,
+    DOCUMENT_PIPELINE_STAGE_STANDARD_METRICS,
     JOB_MODE_DOCUMENT_PIPELINE,
     JOB_MODE_EXISTING,
     JOB_MODE_UPLOAD,
@@ -538,6 +540,11 @@ def job_stage_label_zh(job: JobRecord) -> str:
         return JOB_STAGE_LABELS_ZH["needs_review"]
     if job.status in SUCCESS_LIKE_JOB_STATUSES:
         return JOB_STAGE_LABELS_ZH["generated"]
+    if job.current_stage in {"queued", "worker_claimed"}:
+        if job.requested_stage == DOCUMENT_PIPELINE_STAGE_RAW_METRICS:
+            return "等待提取原始数据（复用已有 OCR）"
+        if job.requested_stage == DOCUMENT_PIPELINE_STAGE_STANDARD_METRICS:
+            return "等待重新映射标准科目（复用已有原始数据）"
     return JOB_STAGE_LABELS_ZH.get(job.current_stage, job.current_stage or describe_job_status(job.status))
 
 
@@ -578,7 +585,26 @@ def build_job_stage_flow(job: JobRecord) -> list[dict[str, object]]:
         },
     ]
     if is_pdf_pipeline:
-        if job.current_stage in {"uploaded", "queued", "worker_claimed"} and job.status in {"created", "queued", "running"}:
+        resumes_after_ocr = job.requested_stage in {
+            DOCUMENT_PIPELINE_STAGE_RAW_METRICS,
+            DOCUMENT_PIPELINE_STAGE_STANDARD_METRICS,
+        }
+        if (
+            job.current_stage in {"queued", "worker_claimed"}
+            and job.status in {"queued", "running"}
+            and resumes_after_ocr
+        ):
+            stages[0]["state"] = "done"
+            stages[0]["status_label_zh"] = "已上传"
+            stages[1]["state"] = "done"
+            stages[1]["status_label_zh"] = "复用已有 OCR"
+            stages[2]["state"] = "current"
+            stages[2]["status_label_zh"] = (
+                "排队等待提取原始数据"
+                if job.requested_stage == DOCUMENT_PIPELINE_STAGE_RAW_METRICS
+                else "排队等待重新映射（复用原始数据）"
+            )
+        elif job.current_stage in {"uploaded", "queued", "worker_claimed"} and job.status in {"created", "queued", "running"}:
             stages[0]["state"] = "current"
             stages[0]["status_label_zh"] = "已上传并排队" if job.status == "queued" else "已上传"
         if job.current_stage == "ocr":

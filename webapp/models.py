@@ -17,6 +17,15 @@ JOB_MODE_EXISTING = "existing_ocr_outputs"
 JOB_MODE_UPLOAD = "upload_pdf"
 JOB_MODE_DOCUMENT_PIPELINE = "document_pipeline"
 
+DOCUMENT_PIPELINE_STAGE_OCR = "ocr"
+DOCUMENT_PIPELINE_STAGE_RAW_METRICS = "raw_metrics"
+DOCUMENT_PIPELINE_STAGE_STANDARD_METRICS = "standard_metrics"
+DOCUMENT_PIPELINE_STAGES = {
+    DOCUMENT_PIPELINE_STAGE_OCR,
+    DOCUMENT_PIPELINE_STAGE_RAW_METRICS,
+    DOCUMENT_PIPELINE_STAGE_STANDARD_METRICS,
+}
+
 ACTIVE_JOB_STATUSES = {JOB_STATUS_QUEUED, JOB_STATUS_RUNNING}
 WARNING_JOB_STATUSES = {JOB_STATUS_SUCCEEDED_WITH_WARNINGS, JOB_STATUS_NEEDS_REVIEW}
 SUCCESS_LIKE_JOB_STATUSES = {JOB_STATUS_SUCCEEDED, *WARNING_JOB_STATUSES}
@@ -80,6 +89,7 @@ class JobRecord:
     command_executed: str
     exit_code: int | None
     timeout_seconds: int
+    requested_stage: str = ""
 
     @classmethod
     def from_row(cls, row: Mapping[str, object]) -> "JobRecord":
@@ -112,6 +122,7 @@ class JobRecord:
             command_executed=str(row["command_executed"] or ""),
             exit_code=int(row["exit_code"]) if row["exit_code"] is not None else None,
             timeout_seconds=int(row["timeout_seconds"]),
+            requested_stage=str(row["requested_stage"] or ""),
         )
 
     def as_dict(self) -> dict[str, object]:

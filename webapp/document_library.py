@@ -579,6 +579,13 @@ def build_delete_plan(settings: WebAppSettings, document: DocumentRecord) -> dic
 
 def execute_delete(settings: WebAppSettings, doc_id: str) -> dict[str, Any]:
     document = load_document(settings, doc_id, refresh=False)
+    from .db import get_job
+
+    active_job = get_job(settings, doc_id)
+    if document.is_processing or (
+        active_job is not None and active_job.status in {"queued", "running"}
+    ):
+        raise ValueError("文件正在后台处理中，完成或失败后才能删除。")
     plan = build_delete_plan(settings, document)
     if plan["unsafe_paths"]:
         summary = _delete_summary(settings, document, plan=plan, deleted_paths=[], status="rejected")

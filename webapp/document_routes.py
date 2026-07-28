@@ -21,7 +21,6 @@ from .document_library import (
     list_documents,
     load_document,
     save_uploaded_documents,
-    update_document_status,
 )
 from .document_batches import (
     add_uploaded_file_to_batch,
@@ -32,8 +31,12 @@ from .document_batches import (
     list_recent_document_batch_summaries,
     queue_document_batch,
 )
-from .document_models import STATUS_COMPLETED, STATUS_FAILED, STATUS_RUNNING
+from .document_models import STATUS_COMPLETED
 from .jobs import resolve_download_artifact
+from .models import (
+    DOCUMENT_PIPELINE_STAGE_RAW_METRICS,
+    DOCUMENT_PIPELINE_STAGE_STANDARD_METRICS,
+)
 from .routes import get_settings, password_gate
 from .simple_flow import (
     build_mapping_review_sheet,
@@ -46,8 +49,6 @@ from .simple_flow import (
     mapping_review_dir,
     resolve_safe_source_file,
     refresh_combined_metrics_workbook,
-    run_raw_metrics_step,
-    run_standard_metrics_step,
     save_mapping_review_action,
     save_raw_review_action,
     source_preview_rotation_degrees,
@@ -79,6 +80,15 @@ def _app_url(request: Request, path: str) -> str:
     return app_path(get_settings(request).base_path, path)
 
 
+def _document_batch_urls(request: Request, batch_id: str) -> dict[str, str]:
+    return {
+        "upload_url": _app_url(request, f"/api/document-batches/{batch_id}/files"),
+        "queue_url": _app_url(request, f"/api/document-batches/{batch_id}/queue"),
+        "status_url": _app_url(request, f"/api/document-batches/{batch_id}"),
+        "detail_url": _app_url(request, f"/document-batches/{batch_id}"),
+    }
+
+
 def _home_redirect(message: str = "", error: str = "") -> RedirectResponse:
     if error:
         return RedirectResponse(url=f"/?{urlencode({'error': error})}", status_code=303)
@@ -88,15 +98,31 @@ def _home_redirect(message: str = "", error: str = "") -> RedirectResponse:
 
 
 @document_router.get("/documents/upload", response_class=HTMLResponse, dependencies=[Depends(password_gate)])
-def upload_page(request: Request) -> HTMLResponse:
+def upload_page(request: Request, resume_batch_id: str = "") -> HTMLResponse:
     settings = get_settings(request)
+    resume_batch: dict[str, object] | None = None
+    error_message = ""
+    if resume_batch_id:
+        try:
+            summary = build_document_batch_summary(settings, resume_batch_id)
+        except KeyError:
+            error_message = "要恢复的上传批次不存在。"
+        else:
+            if summary["status"] == "uploading":
+                resume_batch = {
+                    **summary,
+                    **_document_batch_urls(request, resume_batch_id),
+                }
+            else:
+                error_message = "该批次已结束上传，请返回批次状态页查看处理结果。"
     return _render(
         request,
         "document_upload.html",
         {
-            "error_message": "",
+            "error_message": error_message,
             "max_batch_files": settings.max_upload_batch_files,
             "max_upload_mb": settings.max_upload_bytes // (1024 * 1024),
+            "resume_batch": resume_batch,
         },
     )
 
@@ -117,6 +143,7 @@ async def upload_documents(
                 "error_message": str(exc),
                 "max_batch_files": settings.max_upload_batch_files,
                 "max_upload_mb": settings.max_upload_bytes // (1024 * 1024),
+                "resume_batch": None,
             },
             status_code=400,
         )
@@ -142,10 +169,7 @@ def create_document_batch_api(
     return JSONResponse(
         {
             **batch.as_dict(),
-            "upload_url": _app_url(request, f"/api/document-batches/{batch.batch_id}/files"),
-            "queue_url": _app_url(request, f"/api/document-batches/{batch.batch_id}/queue"),
-            "status_url": _app_url(request, f"/api/document-batches/{batch.batch_id}"),
-            "detail_url": _app_url(request, f"/document-batches/{batch.batch_id}"),
+            **_document_batch_urls(request, batch.batch_id),
         },
         status_code=201,
     )
@@ -284,13 +308,14 @@ def run_document_raw_metrics(request: Request, doc_id: str) -> RedirectResponse:
         document = load_document(settings, doc_id)
         if document.ocr_status != STATUS_COMPLETED:
             return _home_redirect(error="请先点击“开始识别”。")
-        update_document_status(settings, doc_id, raw_metrics_status=STATUS_RUNNING, error_message="")
-        run_raw_metrics_step(settings, document_to_job(settings, document))
-        update_document_status(settings, doc_id, raw_metrics_status=STATUS_COMPLETED, error_message="")
+        enqueue_document_pipeline(
+            settings,
+            doc_id,
+            start_stage=DOCUMENT_PIPELINE_STAGE_RAW_METRICS,
+        )
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="文件不存在。") from exc
     except ValueError as exc:
-        update_document_status(settings, doc_id, raw_metrics_status=STATUS_FAILED, error_message=str(exc))
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return RedirectResponse(url=f"/documents/{doc_id}/continue", status_code=303)
 
@@ -300,13 +325,17 @@ def run_document_standard_metrics(request: Request, doc_id: str) -> RedirectResp
     settings = get_settings(request)
     try:
         document = load_document(settings, doc_id)
-        update_document_status(settings, doc_id, standard_metrics_status=STATUS_RUNNING, error_message="")
-        run_standard_metrics_step(settings, document_to_job(settings, document))
-        update_document_status(settings, doc_id, standard_metrics_status=STATUS_COMPLETED, error_message="")
+        job = document_to_job(settings, document)
+        if not load_simple_flow_state(job, settings).get("raw_ready"):
+            raise ValueError("请先生成原始数据，再执行标准映射。")
+        enqueue_document_pipeline(
+            settings,
+            doc_id,
+            start_stage=DOCUMENT_PIPELINE_STAGE_STANDARD_METRICS,
+        )
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="文件不存在。") from exc
     except ValueError as exc:
-        update_document_status(settings, doc_id, standard_metrics_status=STATUS_FAILED, error_message=str(exc))
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return RedirectResponse(url=f"/documents/{doc_id}/continue", status_code=303)
 

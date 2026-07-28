@@ -1,6 +1,9 @@
 {% extends "base.html" %}
 {% block title %}继续处理 | {{ settings.app_name }}{% endblock %}
 {% block head %}
+{% if document.is_processing %}
+<meta http-equiv="refresh" content="3">
+{% endif %}
 <style>
     .document-action-panel {
         max-width: 760px;
@@ -69,7 +72,9 @@
 <section class="card document-action-panel">
     <h2>处理结果</h2>
     <p>
-        {% if simple_flow.standard_ready %}
+        {% if document.is_processing %}
+        任务已进入后台队列，系统一次处理一份文件。本页会自动刷新。
+        {% elif simple_flow.standard_ready %}
         原始数据和标准化数据已生成。
         {% elif simple_flow.raw_ready %}
         原始数据已生成，可继续生成标准化数据。
@@ -78,16 +83,18 @@
         {% endif %}
     </p>
     <div class="document-action-actions">
-        {% if simple_flow.combined_ready %}
+        {% if document.is_processing %}
+        <button class="button button--secondary" type="button" disabled>后台处理中…</button>
+        {% elif simple_flow.combined_ready %}
         <a class="button button--download" href="{{ url_prefix }}/documents/{{ document.doc_id }}/download/combined_metrics_xlsx">下载数据表</a>
         <a class="button button--secondary" href="{{ url_prefix }}/documents/{{ document.doc_id }}/download-preview/combined_metrics_xlsx" target="_blank" rel="noopener">预览下载版</a>
         {% elif not simple_flow.raw_ready %}
         <form action="{{ url_prefix }}/documents/{{ document.doc_id }}/raw-metrics/run" method="post">
-            <button class="button button--primary" type="submit">提取原始数据</button>
+            <button class="button button--primary" type="submit">生成结构化数据</button>
         </form>
         {% endif %}
 
-        {% if simple_flow.raw_ready %}
+        {% if simple_flow.raw_ready and not document.is_processing %}
         <a class="button button--review" href="{{ url_prefix }}/documents/{{ document.doc_id }}/proofread">校对数据和映射</a>
         <form action="{{ url_prefix }}/documents/{{ document.doc_id }}/standard-metrics/run" method="post">
             {% if simple_flow.standard_ready %}

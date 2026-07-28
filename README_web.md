@@ -24,12 +24,14 @@ The normal home page shows:
 Each PDF shows a simple status and actions:
 
 - 未识别: 开始识别, 删除
-- 已排队或处理中: 处理中, 删除
+- 已排队或处理中: 查看进度, 处理中；删除入口隐藏且服务端也会拒绝删除
 - 已识别或已有结果: 重新识别, 继续处理, 删除
 
 The upload page automatically starts the full background pipeline. The
 per-document buttons and advanced/admin pages remain available for previously
 saved documents and diagnostics, but they are not the normal new-upload path.
+The continue page refreshes every three seconds while a queued or running
+document is changing stages.
 
 ## Batch Upload and Durable Queue
 
@@ -46,8 +48,18 @@ GET  /document-batches/{batch_id}
 ```
 
 An individual file upload is retry-safe for the same batch position and
-filename. Successfully accepted positions are skipped when the user clicks
-`重试上传` in the same browser session.
+filename. The browser stores only the unfinished batch id, expected count, and
+selected-file signature in `localStorage`; API URLs are always derived from the
+current page rather than trusted from browser storage.
+
+An unfinished upload survives a page refresh or browser restart. Recovery can
+start automatically from the saved browser pointer or explicitly from
+`/documents/upload?resume_batch_id=<batch_id>` via the batch detail page's
+`继续上传` button. The user must reselect the original complete file set in the
+same order because browsers do not restore file-input contents. The page reads
+the durable batch state, skips positions already accepted by the server, uploads
+only missing positions, and then queues the complete batch. `开始新批次` clears
+the browser recovery pointer; it does not delete the unfinished server batch.
 
 Batch and queue state is durable in:
 
@@ -137,46 +149,52 @@ Existing OCR outputs can be copied into `data/corpus/library/<doc_id>/ocr_output
 
 ## Manual Compatibility Flow
 
-The following Step 1 and Step 2 actions remain available for existing documents,
-testing, and recovery. A normal batch upload already runs both steps in the
-background worker.
+The following resume actions remain available for existing documents, testing,
+and recovery. A normal batch upload already runs both stages in the background
+worker. Both actions only enqueue durable work and return immediately; the
+single worker performs the actual processing.
 
-### Step 1: 原始数据
+### Resume from raw extraction
 
 The document page button is:
 
 ```text
-一键提取原始数据
+生成结构化数据
 ```
 
-It runs Stage 12 raw extraction with:
+This queues `requested_stage=raw_metrics`. The worker requires completed OCR,
+reuses those OCR outputs, runs raw extraction, and then continues through
+standard mapping and combined-download generation:
 
 ```text
 input-dir = data/corpus/library/<doc_id>/ocr_outputs/
 source-image-dir = data/corpus/library/<doc_id>/input/
-output-dir = data/generated/raw_metrics/<doc_id>/
+raw-output-dir = data/generated/raw_metrics/<doc_id>/
+standard-output-dir = data/generated/standard_metrics/<doc_id>/
 ```
 
-After Step 1, the page shows:
+After completion, the page shows:
 
 ```text
 下载数据表
 校对数据和映射
-一键生成标准化数据
+重新生成标准指标 / 标准映射
 ```
 
-At this point `数据表.xlsx` may contain only `数据总表`, `原始数据`, and `说明`.
-Raw CSV/XLSX files remain available under `高级下载`.
+Raw and standardized CSV files remain available under `高级下载`.
 
-### Step 2: 标准化数据
+### Resume from standard mapping
 
-The document page button is:
+When raw facts already exist, the document page button is:
 
 ```text
-一键生成标准化数据
+生成标准指标 / 标准映射
+重新生成标准指标 / 标准映射
 ```
 
-It runs deterministic standard mapping with the latest `raw_metrics.csv`, including the Stage 15 local mapping store, and writes:
+This queues `requested_stage=standard_metrics`. The worker reuses OCR and the
+latest raw facts, runs only deterministic standard mapping (including the Stage
+15 local mapping store), and regenerates the combined download. It writes:
 
 ```text
 data/generated/standard_metrics/<doc_id>/

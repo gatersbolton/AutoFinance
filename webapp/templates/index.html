@@ -60,15 +60,18 @@
                     <td>{{ document.updated_at_label_zh }}</td>
                     <td>
                         <div class="actions document-actions">
+                            {% if document.is_processing %}
                             {% if document.ocr_status == "completed" %}
+                            <a class="button button--secondary" href="{{ url_prefix }}/documents/{{ document.doc_id }}/continue">查看进度</a>
+                            {% endif %}
+                            <button class="button button--secondary" type="button" disabled>处理中</button>
+                            {% elif document.ocr_status == "completed" %}
                             <form action="{{ url_prefix }}/documents/{{ document.doc_id }}/rerun-ocr" method="post">
                                 <button class="button button--secondary" type="submit">重新OCR</button>
                             </form>
                             <form action="{{ url_prefix }}/documents/{{ document.doc_id }}/continue" method="get">
                                 <button class="button button--primary" type="submit">继续处理</button>
                             </form>
-                            {% elif document.ocr_status in ["queued", "running"] %}
-                            <button class="button button--secondary" type="button" disabled>处理中</button>
                             {% else %}
                             <form action="{{ url_prefix }}/documents/{{ document.doc_id }}/start-ocr" method="post">
                                 <button class="button button--primary" type="submit">
@@ -76,7 +79,9 @@
                                 </button>
                             </form>
                             {% endif %}
+                            {% if not document.is_processing %}
                             <a class="button button--danger" href="{{ url_prefix }}/documents/{{ document.doc_id }}/delete-confirm">删除</a>
+                            {% endif %}
                         </div>
                     </td>
                 </tr>

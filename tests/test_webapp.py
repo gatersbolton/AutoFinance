@@ -40,9 +40,14 @@ from webapp.db import (
     update_job,
     update_review_operation,
 )
-from webapp.jobs import build_job_stage_flow, discover_output_files
+from webapp.jobs import build_job_stage_flow, discover_output_files, job_stage_label_zh
 from webapp.main import create_app
-from webapp.models import JOB_MODE_DOCUMENT_PIPELINE, JobRecord
+from webapp.models import (
+    DOCUMENT_PIPELINE_STAGE_RAW_METRICS,
+    DOCUMENT_PIPELINE_STAGE_STANDARD_METRICS,
+    JOB_MODE_DOCUMENT_PIPELINE,
+    JobRecord,
+)
 from webapp.review import export_review_actions, get_review_dir, load_review_items, filter_review_items
 from webapp.runner import run_worker_once
 from webapp.simple_flow import (
@@ -965,6 +970,45 @@ class WebAppTests(unittest.TestCase):
             1,
         )
 
+    def test_incomplete_document_batch_can_be_resumed_after_page_reload(self):
+        created = self.client.post(
+            "/api/document-batches",
+            data={"expected_files": "2"},
+        ).json()
+        uploaded = self.client.post(
+            created["upload_url"],
+            data={"upload_index": "0"},
+            files={
+                "uploaded_file": (
+                    "resume-first.pdf",
+                    b"%PDF-1.4\n%mock\n%%EOF\n",
+                    "application/pdf",
+                )
+            },
+        )
+        self.assertEqual(uploaded.status_code, 201)
+
+        detail = self.client.get(created["detail_url"])
+        self.assertEqual(detail.status_code, 200)
+        self.assertIn("继续上传", detail.text)
+        self.assertIn(
+            f"/documents/upload?resume_batch_id={created['batch_id']}",
+            detail.text,
+        )
+
+        resumed = self.client.get(
+            "/documents/upload",
+            params={"resume_batch_id": created["batch_id"]},
+        )
+        self.assertEqual(resumed.status_code, 200)
+        self.assertIn("已恢复未完成批次", resumed.text)
+        self.assertIn('data-resume-expected-files="2"', resumed.text)
+        self.assertIn(
+            f'data-resume-batch-id="{created["batch_id"]}"',
+            resumed.text,
+        )
+        self.assertIn("重新选择原批次的全部文件并保持原顺序", resumed.text)
+
     def test_document_batch_limits_and_incomplete_queue_are_rejected(self):
         too_many = self.client.post(
             "/api/document-batches",
@@ -1071,6 +1115,23 @@ class WebAppTests(unittest.TestCase):
         self.assertEqual(job.status, "queued")
         home = self.client.get("/")
         self.assertIn("处理中", home.text)
+
+    def test_document_cannot_be_deleted_while_background_job_is_active(self):
+        self._write_secret_file(aliyun=True)
+        doc_id = self._upload_library_pdf()
+        self.client.post(
+            f"/documents/{doc_id}/start-ocr",
+            follow_redirects=False,
+        )
+
+        response = self.client.post(
+            f"/documents/{doc_id}/delete",
+            follow_redirects=False,
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("正在后台处理中", response.json()["detail"])
+        self.assertTrue(Path(load_document(self.settings, doc_id).pdf_path).exists())
 
     def test_document_with_existing_results_stays_queued_when_reenqueued(self):
         self._write_secret_file(aliyun=True)
@@ -1234,20 +1295,48 @@ class WebAppTests(unittest.TestCase):
     def test_document_step1_raw_extraction_from_fixture_ocr(self):
         doc_id = self._upload_library_pdf()
         self._write_tiny_library_ocr(doc_id)
-        response = self.client.post(f"/documents/{doc_id}/raw-metrics/run", follow_redirects=False)
+        with mock.patch("webapp.simple_flow.run_raw_metrics_step") as raw_step:
+            response = self.client.post(
+                f"/documents/{doc_id}/raw-metrics/run",
+                follow_redirects=False,
+            )
         self.assertEqual(response.status_code, 303)
+        raw_step.assert_not_called()
+        document = load_document(self.settings, doc_id)
+        self.assertEqual(document.raw_metrics_status, STATUS_QUEUED)
+        self.assertEqual(document.standard_metrics_status, STATUS_QUEUED)
+        queued_job = get_job(self.settings, doc_id)
+        self.assertEqual(
+            queued_job.requested_stage,
+            DOCUMENT_PIPELINE_STAGE_RAW_METRICS,
+        )
+        self.assertEqual(
+            job_stage_label_zh(queued_job),
+            "等待提取原始数据（复用已有 OCR）",
+        )
+        stage_flow = build_job_stage_flow(queued_job)
+        self.assertEqual(stage_flow[0]["state"], "done")
+        self.assertEqual(stage_flow[1]["state"], "done")
+        self.assertEqual(stage_flow[1]["status_label_zh"], "复用已有 OCR")
+        self.assertEqual(stage_flow[2]["state"], "current")
+        self.assertEqual(stage_flow[2]["status_label_zh"], "排队等待提取原始数据")
+
+        result = run_worker_once(self.settings)
+        self.assertIsNotNone(result)
         document = load_document(self.settings, doc_id)
         self.assertEqual(document.raw_metrics_status, STATUS_COMPLETED)
+        self.assertEqual(document.standard_metrics_status, STATUS_COMPLETED)
         state = load_simple_flow_state(document_to_job(self.settings, document))
         self.assertTrue(state["raw_ready"])
+        self.assertTrue(state["standard_ready"])
         self.assertTrue(Path(state["raw_metrics_csv"]).exists())
         self.assertTrue(str(Path(state["raw_metrics_csv"]).resolve()).startswith(str((self.raw_metrics_root / doc_id).resolve())))
         self.assertTrue(state["combined_ready"])
         workbook = load_workbook(Path(state["combined_metrics_xlsx"]))
         self.assertIn("数据总表", workbook.sheetnames)
         self.assertIn("原始数据", workbook.sheetnames)
+        self.assertIn("标准化数据", workbook.sheetnames)
         self.assertIn("说明", workbook.sheetnames)
-        self.assertNotIn("标准化数据", workbook.sheetnames)
 
     def test_document_metadata_copied_from_windows_uses_current_library_paths(self):
         doc_id = self._upload_library_pdf()
@@ -1265,15 +1354,56 @@ class WebAppTests(unittest.TestCase):
 
         response = self.client.post(f"/documents/{doc_id}/raw-metrics/run", follow_redirects=False)
         self.assertEqual(response.status_code, 303)
+        run_worker_once(self.settings)
         state = load_simple_flow_state(document_to_job(self.settings, load_document(self.settings, doc_id)))
         self.assertTrue(state["raw_ready"])
+
+    def test_document_standard_mapping_queue_requires_raw_metrics(self):
+        doc_id = self._upload_library_pdf()
+        self._write_tiny_library_ocr(doc_id)
+
+        response = self.client.post(
+            f"/documents/{doc_id}/standard-metrics/run",
+            follow_redirects=False,
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("请先生成原始数据", response.json()["detail"])
+        self.assertIsNone(get_job(self.settings, doc_id))
 
     def test_document_step2_standard_mapping_after_raw_metrics_exists(self):
         doc_id = self._upload_library_pdf()
         self._write_tiny_library_ocr(doc_id)
         self.client.post(f"/documents/{doc_id}/raw-metrics/run", follow_redirects=False)
-        response = self.client.post(f"/documents/{doc_id}/standard-metrics/run", follow_redirects=False)
+        run_worker_once(self.settings)
+        with mock.patch("webapp.simple_flow.run_standard_metrics_step") as standard_step:
+            response = self.client.post(
+                f"/documents/{doc_id}/standard-metrics/run",
+                follow_redirects=False,
+            )
         self.assertEqual(response.status_code, 303)
+        standard_step.assert_not_called()
+        queued_document = load_document(self.settings, doc_id)
+        self.assertEqual(queued_document.standard_metrics_status, STATUS_QUEUED)
+        self.assertEqual(
+            get_job(self.settings, doc_id).requested_stage,
+            DOCUMENT_PIPELINE_STAGE_STANDARD_METRICS,
+        )
+        queued_job = get_job(self.settings, doc_id)
+        self.assertEqual(
+            job_stage_label_zh(queued_job),
+            "等待重新映射标准科目（复用已有原始数据）",
+        )
+        stage_flow = build_job_stage_flow(queued_job)
+        self.assertEqual(stage_flow[0]["state"], "done")
+        self.assertEqual(stage_flow[1]["state"], "done")
+        self.assertEqual(stage_flow[1]["status_label_zh"], "复用已有 OCR")
+        self.assertEqual(stage_flow[2]["state"], "current")
+        self.assertEqual(
+            stage_flow[2]["status_label_zh"],
+            "排队等待重新映射（复用原始数据）",
+        )
+        run_worker_once(self.settings)
         document = load_document(self.settings, doc_id)
         self.assertEqual(document.standard_metrics_status, STATUS_COMPLETED)
         state = load_simple_flow_state(document_to_job(self.settings, document))
@@ -1777,7 +1907,7 @@ class WebAppTests(unittest.TestCase):
         response = self.client.get(f"/jobs/{job_id}/proofread")
         self.assertEqual(response.status_code, 200)
         self.assertIn("data-unified-proofread-workbench", response.text)
-        self.assertIn("/static/app.js?v=document-batches-20260727-1", response.text)
+        self.assertIn("/static/app.js?v=resumable-pipeline-20260728-1", response.text)
         self.assertIn("source-panel", response.text)
         self.assertIn("sheet-panel", response.text)
         self.assertIn("data-page-image-key=", response.text)

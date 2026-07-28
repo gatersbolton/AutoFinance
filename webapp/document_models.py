@@ -118,6 +118,13 @@ class DocumentRecord:
         return STANDARD_METRICS_STATUS_LABELS_ZH.get(self.standard_metrics_status, self.standard_metrics_status)
 
     @property
+    def is_processing(self) -> bool:
+        return bool(
+            {self.ocr_status, self.raw_metrics_status, self.standard_metrics_status}
+            & {STATUS_QUEUED, STATUS_RUNNING}
+        )
+
+    @property
     def updated_at_label_zh(self) -> str:
         raw_value = self.updated_at or self.created_at
         if not raw_value:
