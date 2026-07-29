@@ -5,12 +5,13 @@ import csv
 import json
 import tempfile
 import unittest
+from decimal import Decimal
 from pathlib import Path
 
 from project_paths import REPO_ROOT
 from raw_extract.cli import validate_output_base
 from raw_extract.company_resolver import resolve_company_name
-from raw_extract.date_resolver import resolve_item_date
+from raw_extract.date_resolver import resolve_fill_date, resolve_item_date
 from raw_extract.export import export_raw_metrics_run
 from raw_extract.metric_extractor import extract_raw_metric_candidates, select_accepted_candidates
 from raw_extract.models import MAIN_OUTPUT_COLUMNS, CompanyResolution, RawMetricCandidate, display_period_role
@@ -22,11 +23,11 @@ from standardize.providers.tencent import load_tencent_page, normalize_tencent_r
 
 class RawExtractTests(unittest.TestCase):
     def test_number_parsing(self):
-        self.assertEqual(parse_metric_number("396，149，420.62").value, 396149420.62)
-        self.assertEqual(parse_metric_number("(1,234.56)").value, -1234.56)
-        self.assertEqual(parse_metric_number("98.26%").value, 0.9826)
+        self.assertEqual(parse_metric_number("396，149，420.62").value, Decimal("396149420.62"))
+        self.assertEqual(parse_metric_number("(1,234.56)").value, Decimal("-1234.56"))
+        self.assertEqual(parse_metric_number("98.26%").value, Decimal("0.9826"))
         abnormal = parse_metric_number("20000,000.00")
-        self.assertEqual(abnormal.value, 20000000.0)
+        self.assertEqual(abnormal.value, Decimal("20000000.00"))
         self.assertIn("suspicious_numeric", abnormal.issue_flags)
         broken = parse_metric_number("2,029,298.849.12")
         self.assertIsNone(broken.value)
@@ -121,6 +122,43 @@ class RawExtractTests(unittest.TestCase):
         self.assertEqual({row.value_confidence for row in accepted}, {0.84, 0.88})
         self.assertEqual({row.confidence for row in accepted}, {0.84, 0.88})
         self.assertIsInstance(issues, list)
+
+    def test_raw_metric_amounts_are_normalized_to_yuan(self):
+        page = self._tiny_balance_sheet_page("aliyun_table")
+        page.page_text = page.page_text.replace("单位：元", "单位：万元")
+        page.context_lines = [line.replace("单位：元", "单位：万元") for line in page.context_lines]
+        _, subtables, _ = rebuild_logical_subtables([page])
+        company = resolve_company_name(doc_id="DTEST", pages=[page], input_dir=Path("data/corpus/DTEST/ocr_outputs"))
+
+        candidates, _ = extract_raw_metric_candidates(
+            subtables=subtables,
+            pages=[page],
+            company=company,
+            input_dir=Path("data/corpus/DTEST/ocr_outputs"),
+            source_image_dir=None,
+            provider_priority=["aliyun_table"],
+        )
+        accepted, _ = select_accepted_candidates(candidates, include_blank=False, include_ratios=True)
+
+        self.assertEqual({row.unit_raw for row in accepted}, {"万元"})
+        self.assertEqual({row.unit_multiplier for row in accepted}, {Decimal("10000.0")})
+        self.assertEqual({row.metric_value for row in accepted}, {Decimal("1000000.0"), Decimal("2000000.0")})
+
+    def test_filename_only_date_requires_review(self):
+        page = self._tiny_balance_sheet_page("aliyun_table")
+        page.page_text = "资产负债表\n编制单位：AAA有限公司\n单位：元"
+        page.context_lines = ["资产负债表", "编制单位：AAA有限公司", "单位：元"]
+        _, subtables, _ = rebuild_logical_subtables([page])
+
+        resolution = resolve_fill_date(
+            subtable=subtables[0],
+            page=page,
+            input_dir=Path("data/corpus/DTEST/2022年度/ocr_outputs"),
+        )
+
+        self.assertEqual(resolution.fill_date, "")
+        self.assertEqual(resolution.method, "needs_review_low_confidence")
+        self.assertIn("low_confidence_date", resolution.issue_flags)
 
     def test_provider_priority_candidate_selection(self):
         low = self._candidate("tencent_table_v3", 1, 100.0)

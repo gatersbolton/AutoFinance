@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 from collections import defaultdict
+from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 import re
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
@@ -95,6 +96,13 @@ def extract_raw_metric_candidates(
                     value_type=number_info.value_type,
                     include_ratios=include_ratios,
                 )
+                unit_multiplier = Decimal(str(subtable.statement_meta.unit_multiplier or 1))
+                metric_value = number_info.value
+                if metric_value is not None and number_info.value_type == "amount":
+                    metric_value = (metric_value * unit_multiplier).quantize(
+                        Decimal("0.01"),
+                        rounding=ROUND_HALF_UP,
+                    )
                 candidate = RawMetricCandidate(
                     candidate_id=build_candidate_id(
                         [
@@ -112,10 +120,11 @@ def extract_raw_metric_candidates(
                     item_date=item_resolution.item_date,
                     company_name=company.company_name,
                     metric_name=metric_name,
-                    metric_value=number_info.value,
+                    metric_value=metric_value,
                     value_raw=cell.text_raw,
                     value_type=number_info.value_type,
                     unit_raw=subtable.statement_meta.unit_raw,
+                    unit_multiplier=unit_multiplier,
                     statement_type=subtable.statement_meta.statement_type,
                     statement_name_raw=subtable.statement_meta.statement_name_raw,
                     provider=subtable.provider,
@@ -375,8 +384,8 @@ def numeric_values_by_provider(group: Sequence[RawMetricCandidate]) -> Dict[str,
     return values
 
 
-def numeric_signature(value: float) -> str:
-    return f"{float(value):.8f}".rstrip("0").rstrip(".")
+def numeric_signature(value: Decimal | float) -> str:
+    return format(Decimal(str(value)).normalize(), "f")
 
 
 def natural_sort_key(value: Any) -> Tuple[Any, ...]:

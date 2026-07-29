@@ -16,6 +16,7 @@ from .review_quality import display_period_role, has_temporal_key, is_invalid_me
 
 
 COMBINED_WORKBOOK_DOWNLOAD_NAME = "数据表.xlsx"
+COMBINED_CSV_DOWNLOAD_NAME = "数据表.csv"
 PRIMARY_DOWNLOAD_LABEL = "下载数据表"
 NUMBER_FORMAT = "#,##0.00"
 DATE_FORMAT = "yyyy-mm-dd"
@@ -25,10 +26,13 @@ DATA_TOTAL_COLUMNS = [
     "当前条目日期",
     "期间类型",
     "公司名",
+    "报表类型",
     "原始指标名",
     "标准指标编码",
     "标准指标名称",
     "指标数值",
+    "原始单位",
+    "标准单位",
     "映射状态",
     "映射方法",
     "口径说明",
@@ -40,10 +44,13 @@ STANDARD_COLUMNS = [
     "当前条目日期",
     "期间类型",
     "公司名",
+    "报表类型",
     "原始指标名",
     "标准指标编码",
     "标准指标名称",
     "指标数值",
+    "原始单位",
+    "标准单位",
     "映射方法",
     "映射状态",
     "口径说明",
@@ -55,8 +62,11 @@ RAW_COLUMNS = [
     "当前条目日期",
     "期间类型",
     "公司名",
+    "报表类型",
     "指标名",
     "指标数值",
+    "原始单位",
+    "标准单位",
 ]
 
 REVIEW_COLUMNS = [
@@ -140,11 +150,16 @@ def build_combined_metrics_workbook(
         standard_rows,
         review_rows,
         action_rows,
+        value_not_before_timestamp=raw_path.stat().st_mtime if raw_path and raw_path.exists() else None,
         mapping_not_before_timestamp=standard_path.stat().st_mtime if standard_path and standard_path.exists() else None,
     )
 
     combined_rows = _build_combined_rows(raw_rows, standard_rows)
-    normalized_standard_rows = [_normalize_standard_row(row) for row in standard_rows]
+    raw_lookup = {_row_raw_metric_id(row): row for row in raw_rows if _row_raw_metric_id(row)}
+    normalized_standard_rows = [
+        _normalize_combined_from_standard(row, raw_lookup.get(_row_raw_metric_id(row), {}))
+        for row in standard_rows
+    ]
     normalized_raw_rows = [_normalize_raw_row(row) for row in raw_rows]
     normalized_review_rows = _build_review_rows(review_rows, standard_rows)
 
@@ -174,11 +189,14 @@ def build_combined_metrics_workbook(
 
     output.parent.mkdir(parents=True, exist_ok=True)
     workbook.save(output)
+    csv_output = output.with_suffix(".csv")
+    _write_csv(csv_output, DATA_TOTAL_COLUMNS, combined_rows)
 
     summary = {
         "pass": output.exists(),
         "workbook_path": str(output),
         "output_path": str(output),
+        "csv_path": str(csv_output),
         "sheets_created": sheets_created,
         "raw_metrics_source": str(raw_path) if raw_path else "",
         "standardized_metrics_source": str(standard_path) if standard_path else "",
@@ -265,6 +283,17 @@ def _with_raw_metric_ids(rows: list[dict[str, Any]], detail_rows: list[dict[str,
             period_role = _period_role_from_row(detail)
             if period_role:
                 item["期间类型"] = period_role
+        for key in (
+            "statement_type",
+            "statement_name_raw",
+            "unit_raw",
+            "unit_multiplier",
+            "value_raw",
+            "period_role_norm",
+            "period_role_raw",
+        ):
+            if not _first(item, key) and _first(detail, key) not in (None, ""):
+                item[key] = _first(detail, key)
         result.append(item)
     return result
 
@@ -314,10 +343,12 @@ def _apply_unified_review_overlays(
     review_rows: list[dict[str, Any]],
     action_rows: list[dict[str, Any]],
     *,
+    value_not_before_timestamp: float | None = None,
     mapping_not_before_timestamp: float | None = None,
 ) -> dict[str, Any]:
-    value_overrides, mapping_overrides = _latest_unified_review_overrides(
+    value_overrides, mapping_overrides, date_overrides, unit_overrides = _latest_unified_review_overrides(
         action_rows,
+        value_not_before_timestamp=value_not_before_timestamp,
         mapping_not_before_timestamp=mapping_not_before_timestamp,
     )
     for rows in (raw_rows, standard_rows, review_rows):
@@ -331,32 +362,63 @@ def _apply_unified_review_overlays(
             mapping_action = mapping_overrides.get(raw_metric_id)
             if mapping_action:
                 _apply_mapping_override(row, mapping_action)
+            date_action = date_overrides.get(raw_metric_id)
+            if date_action:
+                _apply_date_override(row, date_action)
+            unit_action = unit_overrides.get(raw_metric_id)
+            if unit_action:
+                _apply_unit_override(row, unit_action)
     return {
         "unified_review_actions_total": len(action_rows),
         "unified_review_value_overrides_total": len(value_overrides),
         "unified_review_mapping_overrides_total": len(mapping_overrides),
+        "unified_review_date_overrides_total": len(date_overrides),
+        "unified_review_unit_overrides_total": len(unit_overrides),
     }
 
 
 def _latest_unified_review_overrides(
-    action_rows: list[dict[str, Any]], *, mapping_not_before_timestamp: float | None = None
-) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
+    action_rows: list[dict[str, Any]],
+    *,
+    value_not_before_timestamp: float | None = None,
+    mapping_not_before_timestamp: float | None = None,
+) -> tuple[
+    dict[str, dict[str, Any]],
+    dict[str, dict[str, Any]],
+    dict[str, dict[str, Any]],
+    dict[str, dict[str, Any]],
+]:
     value_overrides: dict[str, dict[str, Any]] = {}
     mapping_overrides: dict[str, dict[str, Any]] = {}
+    date_overrides: dict[str, dict[str, Any]] = {}
+    unit_overrides: dict[str, dict[str, Any]] = {}
     for action in action_rows:
         raw_metric_id = str(action.get("raw_metric_id", "") or "")
         if not raw_metric_id:
             continue
         edit_type = str(action.get("edit_type", "") or "")
-        if edit_type in {"value_change", "reset_value"}:
+        if edit_type in {"value_change", "reset_value", "unit_change", "reset_unit"}:
+            if _action_predates(action, value_not_before_timestamp):
+                continue
             value_overrides[raw_metric_id] = action
+            if edit_type in {"unit_change", "reset_unit"}:
+                unit_overrides[raw_metric_id] = action
+        elif edit_type in {"date_change", "reset_date"}:
+            if _action_predates(action, value_not_before_timestamp):
+                continue
+            date_overrides[raw_metric_id] = action
         elif edit_type in {"mapping_change", "reset_mapping"}:
-            if mapping_not_before_timestamp is not None:
-                action_timestamp = _action_created_timestamp(action)
-                if action_timestamp is not None and action_timestamp < mapping_not_before_timestamp:
-                    continue
+            if _action_predates(action, mapping_not_before_timestamp):
+                continue
             mapping_overrides[raw_metric_id] = action
-    return value_overrides, mapping_overrides
+    return value_overrides, mapping_overrides, date_overrides, unit_overrides
+
+
+def _action_predates(action: dict[str, Any], not_before_timestamp: float | None) -> bool:
+    if not_before_timestamp is None:
+        return False
+    action_timestamp = _action_created_timestamp(action)
+    return action_timestamp is not None and action_timestamp < not_before_timestamp
 
 
 def _row_raw_metric_id(row: dict[str, Any]) -> str:
@@ -393,6 +455,24 @@ def _apply_mapping_override(row: dict[str, Any], action: dict[str, Any]) -> None
         row["mapping_decision"] = "accept_once" if mapped else "reject"
 
 
+def _apply_date_override(row: dict[str, Any], action: dict[str, Any]) -> None:
+    fill_date = str(action.get("new_date", "") or "")
+    item_date = str(action.get("new_item_date", "") or fill_date)
+    for key in ("填表日期", "fill_date"):
+        if key in row:
+            row[key] = fill_date
+    for key in ("当前条目日期", "item_date"):
+        if key in row:
+            row[key] = item_date
+
+
+def _apply_unit_override(row: dict[str, Any], action: dict[str, Any]) -> None:
+    unit = str(action.get("new_unit", "") or "")
+    for key in ("原始单位", "unit_raw"):
+        if key in row:
+            row[key] = unit
+
+
 def _action_created_timestamp(action: dict[str, Any]) -> float | None:
     created_at = str(action.get("created_at", "") or "").strip()
     if not created_at:
@@ -412,8 +492,12 @@ def _build_combined_rows(raw_rows: list[dict[str, Any]], standard_rows: list[dic
 
 def _normalize_combined_from_standard(row: dict[str, Any], raw_row: dict[str, Any] | None = None) -> dict[str, Any]:
     normalized = _normalize_standard_row(row)
-    if not normalized.get("期间类型") and raw_row:
-        normalized["期间类型"] = _normalize_raw_row(raw_row).get("期间类型", "")
+    if raw_row:
+        raw = _normalize_raw_row(raw_row)
+        for key in ("期间类型", "报表类型", "原始单位"):
+            if not normalized.get(key):
+                normalized[key] = raw.get(key, "")
+        normalized["标准单位"] = "人民币元"
     return {column: normalized.get(column, "") for column in DATA_TOTAL_COLUMNS}
 
 
@@ -425,10 +509,13 @@ def _normalize_combined_from_raw(row: dict[str, Any]) -> dict[str, Any]:
         "当前条目日期": raw.get("当前条目日期", ""),
         "期间类型": raw.get("期间类型", ""),
         "公司名": raw.get("公司名", ""),
+        "报表类型": raw.get("报表类型", ""),
         "原始指标名": raw.get("指标名", ""),
         "标准指标编码": "",
         "标准指标名称": "",
         "指标数值": raw.get("指标数值", ""),
+        "原始单位": raw.get("原始单位", ""),
+        "标准单位": "人民币元",
         "映射状态": "未标准化",
         "映射方法": "",
         "口径说明": "日期或期间缺失，需人工校对。" if temporal_review else "",
@@ -451,10 +538,13 @@ def _normalize_standard_row(row: dict[str, Any]) -> dict[str, Any]:
         "当前条目日期": _first(row, "当前条目日期", "item_date"),
         "期间类型": _first(row, "期间类型", "period_role") or _period_role_from_row(row),
         "公司名": _first(row, "公司名", "company_name"),
+        "报表类型": _first(row, "报表类型", "statement_type"),
         "原始指标名": _first(row, "原始指标名", "指标名", "metric_name", "original_metric_name"),
         "标准指标编码": _first(row, "标准指标编码", "standard_code", "candidate_code", "current_code"),
         "标准指标名称": _first(row, "标准指标名称", "standard_name", "candidate_name", "current_name"),
         "指标数值": _first(row, "指标数值", "metric_value", "value_raw"),
+        "原始单位": _first(row, "原始单位", "unit_raw"),
+        "标准单位": "人民币元",
         "映射方法": _first(row, "映射方法", "mapping_method", "candidate_method"),
         "映射状态": _first(row, "映射状态", "mapping_status"),
         "口径说明": notes,
@@ -468,8 +558,11 @@ def _normalize_raw_row(row: dict[str, Any]) -> dict[str, Any]:
         "当前条目日期": _first(row, "当前条目日期", "item_date"),
         "期间类型": _first(row, "期间类型", "period_role") or _period_role_from_row(row),
         "公司名": _first(row, "公司名", "company_name"),
+        "报表类型": _first(row, "报表类型", "statement_type"),
         "指标名": _first(row, "指标名", "metric_name", "原始指标名"),
         "指标数值": _first(row, "指标数值", "metric_value", "value_raw"),
+        "原始单位": _first(row, "原始单位", "unit_raw"),
+        "标准单位": "人民币元",
     }
 
 
@@ -513,6 +606,15 @@ def _write_sheet(
     for row in rows:
         sheet.append([row.get(column, "") for column in columns])
     _format_sheet(sheet, columns, counters)
+
+
+def _write_csv(path: Path, columns: list[str], rows: list[dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8-sig", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=columns)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({column: row.get(column, "") for column in columns})
 
 
 def _write_explanation_sheet(workbook: Workbook, metadata: dict[str, Any], warnings: Iterable[str]) -> None:

@@ -9,33 +9,35 @@ Two implementation paths currently coexist:
 1. Legacy workbook path: `OCR.py` -> `standardize.cli` / `standardize.batch` -> filled accounting workbook and audit artifacts.
 2. Reviewable-data path: `OCR.py` -> `raw_extract` -> `standard_map` -> web proofreading -> Excel/CSV dataset.
 
-The target integration between these paths is still being designed. Do not remove either path or assume that one of the two deliverables is optional without an explicit product decision.
+The target integration between these paths should remain deliberately lightweight. Do not remove either path or assume that one of the two deliverables is optional without an explicit product decision.
+
+Product simplicity is the primary design constraint. The customer accepts an imperfect tool if it is easy to understand and operate. Prefer a small number of obvious screens and actions, current-result files, and direct regeneration over fine-grained domain models, revision workflows, or exhaustive audit infrastructure. In particular, do not introduce a unified/versioned "trusted fact layer", `facts`/`fact_revisions`/`source_versions`-style tables, or similar architecture unless the user explicitly reverses this decision.
 
 ## Confirmed Product Requirements
 
 - The structured dataset and the filled accounting workbook are both formal outputs of one project.
 - The structured dataset is also the finance-user review surface for extraction accuracy.
-- A single reviewed structured-fact layer must feed both Excel/CSV exports and workbook filling. Do not build two independently corrected sources of truth.
-- Store canonical facts in long form: one metric, period, reporting scope, and value per fact. Finance-facing Excel may pivot those facts into beginning/end or current/prior columns.
+- Keep the two outputs practically consistent by regenerating them from the same current corrected structured-result file or in-memory table. This is an implementation convenience, not a request for a new persisted fact layer.
+- Do not add canonical-fact, fact-version, source-version, processing-run, revision-history, or export-history subsystems. The current corrected result is sufficient for this small product.
 - The current default workbook layout is fixed at `data/templates/会计报表.xlsx`. Its 194 `ZT_*` subjects are the canonical template codes and names. Keep template-specific cell placement behind an adapter boundary for future layouts.
 - Current workbook filling covers the balance sheet and income statement. Cash-flow workbook support is deferred, not part of the current acceptance scope.
 - Preserve every valid extracted metric in the structured dataset. Classify it as template-mapped, known outside the template, unresolved mapping, or uncertain extraction/period; do not report every non-template metric as an error.
 - Only safely template-mapped facts fill workbook cells.
-- Support arbitrary numbers of periods in the canonical layer and dynamic period columns in finance-facing Excel. Do not hard-code the data model to exactly two periods.
+- Keep period handling reasonably extensible where it is already easy to do, but do not build generalized period infrastructure beyond the annual-report workflow.
 - If a metric name and value are valid but OCR did not capture a date, do not silently discard the row solely because the date is missing.
 - Infer a date or period only when the available evidence reaches an explicit confidence standard; otherwise route the row to human review. Same-table headers and current-page statement titles are the strongest evidence. Cover/report periods, adjacent pages, column context, and filenames require corroboration.
-- Persist whether a date or period was observed, inferred, or manually corrected, together with its evidence and confidence.
+- The current result should visibly distinguish an observed, inferred, or manually corrected date when practical; a full historical evidence/revision store is not required.
 - Downstream business amounts are normalized RMB-yuan values and should use precise decimal arithmetic. Foreign-currency conversion is out of the current scope, but raw OCR values and units remain audit provenance.
 - Only genuine one-to-one synonyms may auto-map. Aggregate, split, and ambiguous relationships must not be persisted as exact aliases; use an explicit computation/relation or human review.
 - Learned mapping decisions are scoped by company and statement type by default; they must not silently become global aliases.
 - Primary downstream interchange formats are Excel and CSV.
-- A risk-marked draft dataset may be downloaded before review is complete. A workbook with unresolved high-risk facts remains incomplete unless the user explicitly requests a risk-bearing export, and that override must be audited.
+- A risk-marked draft dataset may be downloaded before review is complete. Keep the warning and confirmation flow simple; no separate audit subsystem is required.
 - When both consolidated and parent-company statements exist, preserve both scopes and use consolidated statements as the default workbook scope. Fall back to parent-company statements only when the consolidated scope is absent or the user explicitly selects it.
 - Primary statement values take precedence for workbook filling. Notes may supplement a missing primary-statement value only when metric, period, unit, and reporting scope align; conflicts require review and must not silently overwrite the primary statement.
 - Preserve reported totals and independently calculate consistency checks. A computed total may flag a discrepancy but must not silently replace the reported fact.
 - Treat an explicit numeric zero as zero, a blank as missing, and a dash as missing/not-presented unless the table's convention reliably establishes that the dash means zero. Parenthesized amounts are negative.
 - The user manually confirms generation of the final workbook. Automatically produced workbooks are drafts.
-- An uploaded PDF and each processing run are versioned. Company-and-statement mapping memory may carry forward, but manually corrected amounts and dates must not silently carry into a new OCR/source version.
+- Reprocessing may replace the document's current derived result. Company-and-statement mapping memory may carry forward, but manually corrected amounts and dates should not be automatically copied into a newly extracted result.
 - The expected deployment environment is a domestic enterprise server.
 - Public Aliyun/Tencent OCR and DeepSeek use is currently permitted, including sending the financial context needed for extraction and mapping. Provider selection, enablement, and outbound use must still be explicit, configurable, and auditable.
 - Corpus documents D01-D08 are representative of expected production inputs.
@@ -48,7 +50,7 @@ The target integration between these paths is still being designed. Do not remov
 - Production OCR is cloud-based. Select the primary provider using D01-D08 quality results and use the other permitted cloud provider as fallback; local PaddleOCR is not a production dependency on the low-specification server.
 - Initial configurable safety limits may use 50 MB and 300 pages per PDF and five PDFs per upload batch. D01-D08 currently range from 3 to 69 pages and under 1 MB to about 26 MB.
 - Implement browser batch upload as sequential single-file requests grouped into one logical batch. Do not send all two-to-five PDFs in one large multipart request.
-- Retain original PDFs, processing versions, and review history until explicit user deletion.
+- Retain original PDFs and current results until explicit user deletion. Processing-version and review-history management are not product requirements.
 - Automatic backup is out of the current scope. Never claim that server-local retained data is backed up or protected against disk/server loss.
 
 ## Observed Production Baseline

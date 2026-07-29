@@ -42,6 +42,7 @@ from .simple_flow import (
     build_mapping_review_sheet,
     build_raw_review_sheet,
     find_review_item,
+    generate_accounting_workbook,
     job_root,
     load_mapping_review_items,
     load_raw_review_items,
@@ -348,9 +349,11 @@ def download_document_artifact(request: Request, doc_id: str, slug: str) -> File
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="文件不存在。") from exc
     job = document_to_job(settings, document)
-    if slug == "combined_metrics_xlsx":
+    if slug == "accounting_workbook" and not load_simple_flow_state(job, settings).get("accounting_workbook_ready"):
+        raise HTTPException(status_code=409, detail="校对结果已变化，请重新生成会计报表。")
+    if slug in {"combined_metrics_xlsx", "combined_metrics_csv"}:
         state = load_simple_flow_state(job, settings)
-        path_text = str(state.get("combined_metrics_xlsx", "") or "")
+        path_text = str(state.get(slug, "") or "")
         path = Path(path_text) if path_text else Path()
         action_path = job_root(job) / "unified_review" / "unified_review_actions.json"
         needs_refresh = not path_text or not path.exists() or (action_path.exists() and path.exists() and action_path.stat().st_mtime > path.stat().st_mtime)
@@ -363,6 +366,26 @@ def download_document_artifact(request: Request, doc_id: str, slug: str) -> File
     if not artifact.exists or not path.exists():
         raise HTTPException(status_code=404, detail="文件未生成。")
     return FileResponse(path=str(path), filename=artifact.download_name)
+
+
+@document_router.post(
+    "/documents/{doc_id}/generate-accounting-workbook",
+    dependencies=[Depends(password_gate)],
+)
+def document_generate_accounting_workbook(request: Request, doc_id: str) -> FileResponse:
+    settings = get_settings(request)
+    try:
+        document = load_document(settings, doc_id)
+        job = document_to_job(settings, document)
+        summary = generate_accounting_workbook(settings, job)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="文件不存在。") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    path = Path(str(summary.get("workbook_path", "") or ""))
+    if not path.exists():
+        raise HTTPException(status_code=500, detail="会计报表生成失败。")
+    return FileResponse(path=str(path), filename="会计报表.xlsx")
 
 
 @document_router.get("/documents/{doc_id}/download-preview/combined_metrics_xlsx", response_class=HTMLResponse, dependencies=[Depends(password_gate)])

@@ -18,6 +18,8 @@ EXACT_DATE_PATTERNS = (
 )
 ANNUAL_RE = re.compile(r"(?P<year>20\d{2})年度")
 MONTH_RE = re.compile(r"(?P<year>20\d{2})年\s*(?P<month>\d{1,2})月")
+DATE_AUTO_ACCEPT_SCORE = 80
+DATE_COMPETING_SCORE_GAP = 5
 
 
 @dataclass
@@ -93,7 +95,28 @@ def resolve_fill_date(
     if len(exact_values) > 1:
         issue_flags.append("ambiguous_date")
 
-    best = sorted(candidates, key=lambda item: (-item.score, item.kind != "exact", item.fill_date))[0]
+    ordered = sorted(candidates, key=lambda item: (-item.score, item.kind != "exact", item.fill_date))
+    best = ordered[0]
+    competing = [
+        candidate
+        for candidate in ordered[1:]
+        if candidate.fill_date != best.fill_date and candidate.score >= best.score - DATE_COMPETING_SCORE_GAP
+    ]
+    if best.score < DATE_AUTO_ACCEPT_SCORE or competing:
+        issue_flags.append("missing_fill_date")
+        issue_flags.append("low_confidence_date" if best.score < DATE_AUTO_ACCEPT_SCORE else "ambiguous_date")
+        return FillDateResolution(
+            doc_id=subtable.doc_id,
+            provider=subtable.provider,
+            page_no=subtable.page_no,
+            table_id=subtable.table_id,
+            logical_subtable_id=subtable.logical_subtable_id,
+            fill_date="",
+            method="needs_review_low_confidence" if best.score < DATE_AUTO_ACCEPT_SCORE else "needs_review_ambiguous",
+            source_text=best.source_text,
+            candidates=[candidate.row() for candidate in candidates],
+            issue_flags=list(dict.fromkeys(issue_flags)),
+        )
     return FillDateResolution(
         doc_id=subtable.doc_id,
         provider=subtable.provider,

@@ -16,19 +16,19 @@ PDF -> OCR evidence -> structured facts -> confidence-based automation and human
     -> Excel/CSV dataset + filled accounting workbook
 ```
 
-The reviewed structured-fact layer is the shared source for both deliverables. Internally, facts should use a long form in which one metric, period, and reporting scope identify one value. Finance-facing Excel exports may pivot the same facts into familiar beginning/end or current/prior columns.
+Product simplicity takes priority over a fine-grained accounting data architecture. The current corrected structured-result file or in-memory table should be used to regenerate both deliverables, but the product does not need a separate unified/versioned "trusted fact layer", source-version model, fact-revision history, or export-history subsystem.
 
-The current default accounting template is `data/templates/会计报表.xlsx`. Its 194 `ZT_*` subjects are the canonical template terminology. Template filling currently covers the balance sheet and income statement; cash-flow workbook support is deferred. Template-specific placement should remain behind an adapter boundary so additional layouts can be supported later without changing the canonical facts.
+The current default accounting template is `data/templates/会计报表.xlsx`. Its 194 `ZT_*` subjects are the canonical template terminology. Template filling currently covers the balance sheet and income statement; cash-flow workbook support is deferred. Keep template-specific placement isolated enough to support another layout later, without building a generalized template platform now.
 
-The structured dataset should retain every valid extracted metric, including metrics that do not belong in the current template. Each fact is classified as template-mapped, known but outside the template, unresolved mapping, or uncertain extraction/period. Only safely template-mapped facts fill workbook cells. Arbitrary numbers of periods are supported internally and may be rendered as dynamic period columns in Excel.
+The structured dataset should retain every valid extracted metric, including metrics that do not belong in the current template. Rows may be shown as template-mapped, known but outside the template, unresolved mapping, or uncertain extraction/period. Only safely template-mapped rows fill workbook cells. Keep period handling extensible where inexpensive, but optimize the UI and implementation for annual reports.
 
 A missing OCR date is not, by itself, a reason to discard an otherwise valid metric and value. The system should infer the date or period when the available evidence is sufficiently reliable; otherwise it should preserve the row for human review.
 
-The current amount scope uses normalized RMB-yuan values with precise decimal arithmetic and does not require foreign-currency conversion. OCR text, raw values, units, and inference evidence should still be retained as audit provenance rather than used as the downstream business value. Only genuine one-to-one synonyms may map automatically; aggregate, split, or otherwise ambiguous relationships require an explicit rule or review.
+The current amount scope uses normalized RMB-yuan values with precise decimal arithmetic and does not require foreign-currency conversion. Keep the OCR text, raw value, and unit alongside the current result when this is useful for checking mistakes; no separate provenance database is required. Only genuine one-to-one synonyms may map automatically; aggregate, split, or otherwise ambiguous relationships require an explicit rule or review.
 
-Users may download a draft dataset with visible risk markers at any time. A workbook with unresolved high-risk facts remains marked incomplete unless the user explicitly requests a risk-bearing export; that decision must be recorded.
+Users may download a draft dataset with visible risk markers at any time. A workbook with unresolved high-risk rows remains marked incomplete unless the user explicitly confirms a risk-bearing export. Keep this as a straightforward warning/confirmation, not a separate audit workflow.
 
-The expected deployment environment is a domestic enterprise server. Auditability, data-boundary controls, recoverable failures, and reproducible exports therefore need to be treated as product requirements. The current product policy permits calls to public Aliyun/Tencent OCR and DeepSeek, including the financial context required for extraction and mapping, while provider use must remain explicit, configurable, and auditable.
+The expected deployment environment is a domestic enterprise server. The product should emphasize obvious operation, recoverable failures, and practical correctness rather than enterprise-grade workflow complexity. Calls to public Aliyun/Tencent OCR and DeepSeek, including the financial context required for extraction and mapping, are permitted and remain configurable.
 
 The expected installation has one or two regular users and at most roughly five concurrent users, using one shared application account. It may run on a low-specification server. Horizontal scaling and load balancing are not current requirements; simple resource-bounded execution, failure recovery, and preservation of completed work are.
 
@@ -36,7 +36,7 @@ The production target is Linux with Docker. The current business scope is annual
 
 Representative D01-D08 inputs range from 3 to 69 pages and from under 1 MB to about 26 MB. Initial configurable safety limits may therefore use 50 MB and 300 pages per PDF, five PDFs per upload batch, and one actively processing document at a time. A browser batch should upload one file per request and group the resulting document ids, avoiding one oversized multipart request on the small server.
 
-Original PDFs, result versions, and review history are retained until a user explicitly deletes them. Automatic backups are not part of the current deployment scope, so the application and deployment documentation must not imply that retained data is protected from server or disk loss.
+Original PDFs and current results are retained until a user explicitly deletes them. Result-version and review-history management are not required. Automatic backups are not part of the current deployment scope, so the application and deployment documentation must not imply that retained data is protected from server or disk loss.
 
 The current users work in desktop Chrome. Responsive mobile workflows and external completion notifications are out of scope; durable status and progress are displayed in the web application.
 
@@ -51,8 +51,10 @@ create logical batch
   -> upload each PDF in a separate request
   -> atomically enqueue all documents in SQLite
   -> one worker processes one document at a time
-  -> OCR -> raw facts -> standard mapping -> combined Excel download
-  -> review in the browser
+  -> OCR -> raw rows -> standard mapping
+  -> review dates, amounts, source units, and terms in the browser
+  -> download the current Excel/CSV dataset
+  -> manually generate the accounting workbook
 ```
 
 A logical batch accepts one to five PDFs; two to five is the expected normal usage. The browser retries an interrupted individual upload without duplicating a file that was already accepted at the same batch position. An unfinished batch can also be recovered after a refresh or browser restart: the upload page remembers the batch id and selected-file signature, while the durable server record remains the source of truth. The user reselects the original complete file set in the same order, and the browser skips positions already accepted by the server. The batch detail page provides an explicit `继续上传` entry point; `开始新批次` clears the browser-side recovery pointer without deleting the unfinished server record.
@@ -62,6 +64,8 @@ After every file is present, all jobs and the batch status are committed in one 
 The durable queue uses `data/generated/web/webapp.sqlite3`. `document_batches` and `document_batch_items` retain logical upload state, while the existing `jobs` table is the processing queue. SQLite claiming is serialized and refuses to claim another job while any job is running. A running job that remains unchanged beyond its configured task timeout plus grace period is marked failed so the queue can continue; completed outputs are not deleted.
 
 The document pipeline job mode is `document_pipeline`. It runs cloud OCR, raw fact extraction, deterministic standard-term mapping, and the combined finance-facing workbook in the worker rather than in the upload HTTP request. Existing per-document raw-extraction and mapping actions use the same durable queue: raw extraction resumes after OCR and continues through mapping, while mapping-only regeneration reuses both OCR and raw facts. No OCR, extraction, or mapping step runs inside those HTTP requests.
+
+The unified proofreading page saves corrections directly into the current result. Dates, amounts, source units, and standard terms can be corrected in one table. Saving refreshes both `数据表.xlsx` and `数据表.csv`. The finance user explicitly clicks `生成并下载会计报表` after checking the data; if the current corrections later change, the previously generated accounting workbook is treated as outdated and must be generated again. This is deliberately a current-file regeneration flow, not a fact-version or export-history system.
 
 While any stage is queued or running, the file list and continue page show a processing state, the continue page refreshes every three seconds, and deletion is rejected. Queue displays distinguish a full OCR run from a raw-fact resume or mapping-only resume.
 

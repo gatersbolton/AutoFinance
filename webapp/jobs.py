@@ -410,6 +410,37 @@ def discover_output_files(job: JobRecord) -> list[OutputArtifact]:
             download_name="数据表.xlsx",
         )
     )
+    combined_csv_path = str(simple_state.get("combined_metrics_csv", "") or "")
+    artifacts.append(
+        _artifact_from_path(
+            "combined_metrics_csv",
+            "数据表 CSV",
+            Path(combined_csv_path) if combined_csv_path else Path(job.result_dir) / "downloads" / "数据表.csv",
+            download_name="数据表.csv",
+        )
+    )
+    accounting_path = str(simple_state.get("accounting_workbook", "") or "")
+    artifacts.append(
+        _artifact_from_path(
+            "accounting_workbook",
+            "会计报表",
+            Path(accounting_path) if accounting_path else Path(job.result_dir) / "downloads" / "会计报表.xlsx",
+            download_name="会计报表.xlsx",
+        )
+    )
+    accounting_summary_path = str(simple_state.get("accounting_export_summary", "") or "")
+    artifacts.append(
+        _artifact_from_path(
+            "accounting_export_summary",
+            "会计报表生成摘要",
+            (
+                Path(accounting_summary_path)
+                if accounting_summary_path
+                else Path(job.result_dir) / "downloads" / "会计报表生成摘要.json"
+            ),
+            download_name="会计报表生成摘要.json",
+        )
+    )
     combined_summary_path = str(simple_state.get("combined_download_summary", "") or "")
     artifacts.append(
         _artifact_from_path(

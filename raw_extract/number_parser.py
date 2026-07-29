@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from decimal import Decimal, InvalidOperation
 from typing import List, Optional
 
 from .models import NumberParseResult
@@ -85,7 +86,7 @@ def has_abnormal_comma_grouping(text: str) -> bool:
     return any(len(group) != 3 for group in groups[1:])
 
 
-def _parse_normalized(text: str, issue_flags: List[str]) -> Optional[tuple[float, str]]:
+def _parse_normalized(text: str, issue_flags: List[str]) -> Optional[tuple[Decimal, str]]:
     token = text
     negative = False
     if token.startswith("(") and token.endswith(")"):
@@ -104,9 +105,12 @@ def _parse_normalized(text: str, issue_flags: List[str]) -> Optional[tuple[float
         return None
     if not NUMBER_RE.fullmatch(token):
         return None
-    value = float(token)
+    try:
+        value = Decimal(token)
+    except InvalidOperation:
+        return None
     if percent:
-        value = value / 100.0
+        value = value / Decimal("100")
         return value, "ratio"
     return value, "amount"
 

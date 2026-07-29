@@ -194,6 +194,8 @@ class AliasEntry:
     safe_auto_map: bool = True
     source: str = "base"
     note: str = ""
+    scope_company: str = "*"
+    scope_statement_type: str = "*"
 
 
 @dataclass(frozen=True)

@@ -87,6 +87,7 @@
         <button class="button button--secondary" type="button" disabled>后台处理中…</button>
         {% elif simple_flow.combined_ready %}
         <a class="button button--download" href="{{ url_prefix }}/documents/{{ document.doc_id }}/download/combined_metrics_xlsx">下载数据表</a>
+        <a class="button button--secondary" href="{{ url_prefix }}/documents/{{ document.doc_id }}/download/combined_metrics_csv">下载 CSV</a>
         <a class="button button--secondary" href="{{ url_prefix }}/documents/{{ document.doc_id }}/download-preview/combined_metrics_xlsx" target="_blank" rel="noopener">预览下载版</a>
         {% elif not simple_flow.raw_ready %}
         <form action="{{ url_prefix }}/documents/{{ document.doc_id }}/raw-metrics/run" method="post">
@@ -103,6 +104,14 @@
             <button class="button button--primary" type="submit">生成标准指标 / 标准映射</button>
             {% endif %}
         </form>
+        {% if simple_flow.standard_ready %}
+        <form action="{{ url_prefix }}/documents/{{ document.doc_id }}/generate-accounting-workbook" method="post">
+            <button class="button button--primary" type="submit">生成并下载会计报表</button>
+        </form>
+        {% if simple_flow.accounting_workbook_ready %}
+        <a class="button button--download" href="{{ url_prefix }}/documents/{{ document.doc_id }}/download/accounting_workbook">下载已生成会计报表</a>
+        {% endif %}
+        {% endif %}
         {% endif %}
     </div>
 

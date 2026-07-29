@@ -3,10 +3,13 @@ from __future__ import annotations
 import csv
 import json
 import re
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
 from typing import Any, Iterable
+
+from raw_extract.date_resolver import resolve_item_date
+from raw_extract.number_parser import parse_metric_number
 
 from .models import JobRecord
 from .simple_flow import (
@@ -32,6 +35,12 @@ UNIFIED_REVIEW_ACTION_HEADERS = [
     "edit_type",
     "previous_value",
     "new_value",
+    "previous_date",
+    "new_date",
+    "previous_item_date",
+    "new_item_date",
+    "previous_unit",
+    "new_unit",
     "previous_code",
     "previous_name",
     "new_code",
@@ -55,6 +64,8 @@ STATUS_LABELS_ZH = {
     "unmapped": "未映射",
     "changed": "术语已修改",
     "value_changed": "数值已修改",
+    "date_changed": "日期已修改",
+    "unit_changed": "单位已修改",
     "term_changed": "术语已修改",
     "skipped": "已跳过",
     "none": "未映射",
@@ -95,6 +106,12 @@ STATEMENT_TYPE_LABELS_ZH = {
 }
 
 _METRIC_NUMBER_RE = re.compile(r"^([+-]?)(?:(\d+)(?:\.(\d*))?|\.(\d+))$")
+SUPPORTED_AMOUNT_UNITS = {
+    "元": Decimal("1"),
+    "千元": Decimal("1000"),
+    "万元": Decimal("10000"),
+    "亿元": Decimal("100000000"),
+}
 
 
 def unified_review_dir(job: JobRecord) -> Path:
@@ -184,12 +201,18 @@ def load_unified_review_items(job: JobRecord) -> list[dict[str, Any]]:
     if not raw_items:
         return []
     state = load_simple_flow_state(job)
+    raw_csv = Path(str(state.get("raw_metrics_csv", "") or ""))
+    value_override_not_before = raw_csv.stat().st_mtime if raw_csv.exists() else None
     standard_csv = Path(str(state.get("standardized_metrics_csv", "") or ""))
     mapping_override_not_before = standard_csv.stat().st_mtime if standard_csv.exists() else None
     mapping_lookup = _mapping_lookup(job)
     standardized_lookup = _standardized_lookup(job)
     saved_actions = _load_unified_review_actions(job)
-    value_overrides, mapping_overrides = _latest_unified_overrides(saved_actions, mapping_not_before_timestamp=mapping_override_not_before)
+    value_overrides, mapping_overrides, date_overrides, unit_overrides = _latest_unified_overrides(
+        saved_actions,
+        value_not_before_timestamp=value_override_not_before,
+        mapping_not_before_timestamp=mapping_override_not_before,
+    )
 
     items: list[dict[str, Any]] = []
     last_section_key = ""
@@ -202,6 +225,23 @@ def load_unified_review_items(job: JobRecord) -> list[dict[str, Any]]:
         current_value = str(value_override.get("new_value", original_value) or "")
         parsed_current = parse_metric_number_input(current_value, value_type=value_type)
         current_value_normalized = str(parsed_current.get("value") if parsed_current.get("valid") else current_value)
+        original_fill_date = str(raw.get("填表日期", "") or "")
+        original_item_date = str(raw.get("当前条目日期", "") or "")
+        date_override = date_overrides.get(raw_metric_id, {})
+        current_fill_date = str(date_override.get("new_date", original_fill_date) or "")
+        current_item_date = str(date_override.get("new_item_date", original_item_date) or "")
+        date_changed = bool(date_override) and (
+            current_fill_date != original_fill_date or current_item_date != original_item_date
+        )
+        original_unit = _normalize_amount_unit(raw.get("unit_raw", ""))
+        unit_override = unit_overrides.get(raw_metric_id, {})
+        current_unit = _normalize_amount_unit(unit_override.get("new_unit", original_unit))
+        unit_changed = bool(unit_override) and current_unit != original_unit
+        original_temporal_review_required = not has_temporal_key(
+            original_item_date,
+            raw.get("period_role_norm", "") or raw.get("期间类型", ""),
+            raw.get("period_role_raw", ""),
+        )
 
         mapping_method = str(mapping.get("mapping_method") or mapping.get("映射方法") or "")
         candidate_original_code = str(mapping.get("current_code") or mapping.get("标准指标编码") or mapping.get("candidate_code") or "")
@@ -215,8 +255,8 @@ def load_unified_review_items(job: JobRecord) -> list[dict[str, Any]]:
         current_name = str(mapping_override.get("new_name", original_name) or "")
         mapping_changed = bool(mapping_override) and (current_code != original_code or current_name != original_name)
         value_changed = bool(value_override) and str(current_value_normalized) != str(parse_metric_number_input(original_value, value_type=value_type).get("value", original_value))
-        temporal_review_required = bool(raw.get("temporal_review_required")) or not has_temporal_key(
-            raw.get("当前条目日期", ""),
+        temporal_review_required = not has_temporal_key(
+            current_item_date,
             raw.get("period_role_norm", "") or raw.get("期间类型", ""),
             raw.get("period_role_raw", ""),
         )
@@ -229,6 +269,8 @@ def load_unified_review_items(job: JobRecord) -> list[dict[str, Any]]:
             base_status_label=display_status_label,
             value_changed=value_changed,
             mapping_changed=mapping_changed,
+            date_changed=date_changed,
+            unit_changed=unit_changed,
             temporal_review_required=temporal_review_required,
         )
 
@@ -264,9 +306,13 @@ def load_unified_review_items(job: JobRecord) -> list[dict[str, Any]]:
             "mapping_review_item_id": mapping.get("review_item_id", ""),
             "raw_metric_id": raw_metric_id,
             "original_metric_name": str(raw.get("指标名") or raw.get("row_label_clean") or mapping.get("original_metric_name") or ""),
-            "item_date": raw.get("当前条目日期", ""),
-            "fill_date": raw.get("填表日期", ""),
-            "table_date": raw.get("填表日期", "") or raw.get("当前条目日期", ""),
+            "item_date": current_item_date,
+            "fill_date": current_fill_date,
+            "table_date": current_fill_date or current_item_date,
+            "original_fill_date": original_fill_date,
+            "original_item_date": original_item_date,
+            "current_fill_date": current_fill_date,
+            "current_item_date": current_item_date,
             "period_role": _display_period_role(raw.get("period_role_norm", ""), raw.get("period_role_raw", ""))
             or _display_period_role(raw.get("期间类型", ""), ""),
             "_period_role_norm": raw.get("period_role_norm", ""),
@@ -278,6 +324,10 @@ def load_unified_review_items(job: JobRecord) -> list[dict[str, Any]]:
             "current_value": current_value_normalized,
             "display_value": format_metric_number(current_value_normalized, value_type=value_type),
             "value_type": value_type,
+            "value_raw": str(raw.get("value_raw", "") or ""),
+            "original_unit": original_unit,
+            "current_unit": current_unit,
+            "supported_amount_units": list(SUPPORTED_AMOUNT_UNITS),
             "original_code": original_code,
             "original_name": original_name,
             "current_code": current_code,
@@ -292,7 +342,10 @@ def load_unified_review_items(job: JobRecord) -> list[dict[str, Any]]:
             "mapping_base_status_label": base_status_label,
             "status_badges": status_badges,
             "temporal_review_required": temporal_review_required,
+            "original_temporal_review_required": original_temporal_review_required,
             "value_changed": value_changed,
+            "date_changed": date_changed,
+            "unit_changed": unit_changed,
             "mapping_changed": mapping_changed,
             "source_page_no": raw.get("source_page_no") or mapping.get("source_page_no") or "",
             "source_pdf_path": raw.get("source_pdf_path") or mapping.get("source_pdf_path") or "",
@@ -440,6 +493,10 @@ def _empty_period_value(slot: str) -> dict[str, Any]:
         "current_value": "",
         "display_value": "",
         "value_type": "",
+        "value_raw": "",
+        "original_unit": "",
+        "current_unit": "",
+        "supported_amount_units": list(SUPPORTED_AMOUNT_UNITS),
         "source_page_no": "",
         "source_value_bbox_json": "",
         "value_confidence_available": False,
@@ -521,13 +578,24 @@ def _finalize_period_group(group: dict[str, Any]) -> dict[str, Any]:
             "raw_review_item_id": base.get("raw_review_item_id", ""),
             "mapping_review_item_id": base.get("mapping_review_item_id", ""),
             "raw_metric_ids": list(dict.fromkeys(str(raw_id) for raw_id in group.get("raw_metric_ids", []) if str(raw_id))),
-            "table_date": group.get("fill_date") or group.get("table_date") or group.get("item_date") or "",
-            "item_date": group.get("fill_date") or group.get("table_date") or group.get("item_date") or "",
+            "table_date": base.get("current_fill_date") or base.get("fill_date") or base.get("current_item_date") or "",
+            "item_date": base.get("current_item_date") or base.get("item_date") or "",
+            "fill_date": base.get("current_fill_date") or base.get("fill_date") or "",
+            "original_fill_date": base.get("original_fill_date", ""),
+            "original_item_date": base.get("original_item_date", ""),
+            "current_fill_date": base.get("current_fill_date", ""),
+            "current_item_date": base.get("current_item_date", ""),
             "period_role": "",
             "value_items": value_items,
             "leaf_items": leaf_items,
             "value_changed": any(bool(item.get("value_changed")) for item in leaf_items),
+            "date_changed": any(bool(item.get("date_changed")) for item in leaf_items),
+            "unit_changed": any(bool(item.get("unit_changed")) for item in leaf_items),
             "mapping_changed": any(bool(item.get("mapping_changed")) for item in leaf_items),
+            "temporal_review_required": any(bool(item.get("temporal_review_required")) for item in leaf_items),
+            "original_temporal_review_required": any(
+                bool(item.get("original_temporal_review_required")) for item in leaf_items
+            ),
         }
     )
     merged["raw_metric_ids_joined"] = ",".join(merged["raw_metric_ids"])
@@ -548,7 +616,9 @@ def _finalize_period_group(group: dict[str, Any]) -> dict[str, Any]:
         base_status_label=str(merged.get("base_status_label", "") or "未映射"),
         value_changed=bool(merged.get("value_changed")),
         mapping_changed=bool(merged.get("mapping_changed")),
-        temporal_review_required=any(bool(item.get("temporal_review_required")) for item in leaf_items),
+        date_changed=bool(merged.get("date_changed")),
+        unit_changed=bool(merged.get("unit_changed")),
+        temporal_review_required=bool(merged.get("temporal_review_required")),
     )
     merged["period_values"] = [merged.get("beginning_value") or _empty_period_value("first"), merged.get("ending_value") or _empty_period_value("second")]
     merged["period_columns"] = _period_columns(merged["period_values"][0], merged["period_values"][1])
@@ -605,17 +675,49 @@ def save_unified_review_actions(job: JobRecord, edits: Iterable[dict[str, Any]],
         if item is None:
             raise ValueError("校对项不存在。")
         edit_type = str(edit.get("edit_type", "") or "").strip()
-        if edit_type not in {"value_change", "mapping_change", "reset_value", "reset_mapping"}:
+        if edit_type not in {
+            "value_change",
+            "mapping_change",
+            "date_change",
+            "unit_change",
+            "reset_value",
+            "reset_mapping",
+            "reset_date",
+            "reset_unit",
+        }:
             raise ValueError(f"不支持的统一校对动作: {edit_type}")
         for target_item in _action_target_items(item, edit, edit_type):
             action = _build_action_row(target_item, edit, edit_type=edit_type, reviewer_name=reviewer_name, created_at=created_at)
-            if edit_type in {"value_change", "reset_value"}:
+            if edit_type in {"value_change", "reset_value", "unit_change", "reset_unit"}:
+                if edit_type in {"unit_change", "reset_unit"}:
+                    new_unit = _normalize_amount_unit(action["new_unit"])
+                    action["new_unit"] = new_unit
+                    action["new_value"] = _normalized_yuan_value(
+                        target_item.get("value_raw", ""),
+                        new_unit,
+                        fallback=action.get("new_value", ""),
+                    )
                 parsed = parse_metric_number_input(action["new_value"], value_type=str(target_item.get("value_type", "")))
                 if not parsed.get("valid"):
                     raise ValueError("数值格式有误，请输入普通数字或带千分位分隔符的数字。")
                 action["new_value"] = str(parsed["value"])
                 if parsed.get("precision_adjusted"):
                     precision_warnings_total += 1
+            if edit_type in {"date_change", "reset_date"}:
+                if edit_type == "reset_date" and not str(action.get("new_date", "") or "").strip():
+                    action["new_date"] = ""
+                    action["new_item_date"] = str(target_item.get("original_item_date", "") or "")
+                else:
+                    new_date = _validate_review_date(action["new_date"])
+                    action["new_date"] = new_date
+                    resolution = resolve_item_date(
+                        fill_date=new_date,
+                        header_path=[str(target_item.get("header_path", "") or "")],
+                        period_role_raw=str(target_item.get("_period_role_raw", "") or ""),
+                        statement_type=str(target_item.get("statement_type", "") or ""),
+                        fill_date_method="manual_review",
+                    )
+                    action["new_item_date"] = resolution.item_date or new_date
             new_actions.append(action)
 
     target_dir = unified_review_dir(job)
@@ -636,6 +738,8 @@ def save_unified_review_actions(job: JobRecord, edits: Iterable[dict[str, Any]],
         "actions_total": len(all_actions),
         "new_actions_total": len(new_actions),
         "value_changes_total": sum(1 for action in new_actions if action.get("edit_type") in {"value_change", "reset_value"}),
+        "date_changes_total": sum(1 for action in new_actions if action.get("edit_type") in {"date_change", "reset_date"}),
+        "unit_changes_total": sum(1 for action in new_actions if action.get("edit_type") in {"unit_change", "reset_unit"}),
         "mapping_changes_total": sum(1 for action in new_actions if action.get("edit_type") in {"mapping_change", "reset_mapping"}),
         "precision_warnings_total": precision_warnings_total,
         "confidence_available_total": sum(1 for item in items if item.get("confidence_available")),
@@ -654,7 +758,7 @@ def save_unified_review_actions(job: JobRecord, edits: Iterable[dict[str, Any]],
 
 
 def _action_target_items(item: dict[str, Any], edit: dict[str, Any], edit_type: str) -> list[dict[str, Any]]:
-    if edit_type in {"value_change", "reset_value"}:
+    if edit_type in {"value_change", "reset_value", "unit_change", "reset_unit"}:
         return [_value_item_for_edit(item, edit)]
     raw_metric_ids = _edit_raw_metric_ids(edit)
     leaf_items = [candidate for candidate in item.get("leaf_items", []) if isinstance(candidate, dict)]
@@ -703,6 +807,7 @@ def _build_action_row(
     created_at: str,
 ) -> dict[str, Any]:
     is_mapping = edit_type in {"mapping_change", "reset_mapping"}
+    is_date = edit_type in {"date_change", "reset_date"}
     return {
         "item_id": edit.get("item_id") or item.get("group_review_item_id") or item.get("review_item_id", ""),
         "raw_metric_id": item.get("raw_metric_id", ""),
@@ -710,12 +815,39 @@ def _build_action_row(
         "edit_type": edit_type,
         "previous_value": str(edit.get("previous_value", item.get("current_value", "")) or ""),
         "new_value": str(edit.get("new_value", item.get("original_value_normalized", "")) or ""),
+        "previous_date": str(edit.get("previous_date", item.get("current_fill_date", "")) or ""),
+        "new_date": str(
+            edit.get(
+                "new_date",
+                item.get("original_fill_date" if edit_type == "reset_date" else "current_fill_date", ""),
+            )
+            or ""
+        ),
+        "previous_item_date": str(edit.get("previous_item_date", item.get("current_item_date", "")) or ""),
+        "new_item_date": str(
+            edit.get(
+                "new_item_date",
+                item.get("original_item_date" if edit_type == "reset_date" else "current_item_date", ""),
+            )
+            or ""
+        ),
+        "previous_unit": str(edit.get("previous_unit", item.get("current_unit", "")) or ""),
+        "new_unit": str(
+            edit.get(
+                "new_unit",
+                item.get("original_unit" if edit_type == "reset_unit" else "current_unit", ""),
+            )
+            or ""
+        ),
         "previous_code": str(edit.get("previous_code", item.get("current_code", "")) or ""),
         "previous_name": str(edit.get("previous_name", item.get("current_name", "")) or ""),
         "new_code": str(edit.get("new_code", item.get("original_code" if edit_type == "reset_mapping" else "current_code", "")) or ""),
         "new_name": str(edit.get("new_name", item.get("original_name" if edit_type == "reset_mapping" else "current_name", "")) or ""),
         "source_page_no": item.get("source_page_no", ""),
-        "source_bbox_json": item.get("source_term_bbox_json" if is_mapping else "source_value_bbox_json", "") or item.get("source_bbox_json", ""),
+        "source_bbox_json": (
+            item.get("source_term_bbox_json" if is_mapping else "source_value_bbox_json", "")
+            or ("" if is_date else item.get("source_bbox_json", ""))
+        ),
         "reviewer_name": reviewer_name,
         "created_at": created_at,
     }
@@ -761,24 +893,47 @@ def _standardized_lookup(job: JobRecord) -> dict[str, dict[str, Any]]:
 
 
 def _latest_unified_overrides(
-    actions: list[dict[str, Any]], *, mapping_not_before_timestamp: float | None = None
-) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
+    actions: list[dict[str, Any]],
+    *,
+    value_not_before_timestamp: float | None = None,
+    mapping_not_before_timestamp: float | None = None,
+) -> tuple[
+    dict[str, dict[str, Any]],
+    dict[str, dict[str, Any]],
+    dict[str, dict[str, Any]],
+    dict[str, dict[str, Any]],
+]:
     value_overrides: dict[str, dict[str, Any]] = {}
     mapping_overrides: dict[str, dict[str, Any]] = {}
+    date_overrides: dict[str, dict[str, Any]] = {}
+    unit_overrides: dict[str, dict[str, Any]] = {}
     for action in actions:
         raw_metric_id = str(action.get("raw_metric_id", "") or "")
         if not raw_metric_id:
             continue
         edit_type = str(action.get("edit_type", "") or "")
-        if edit_type in {"value_change", "reset_value"}:
+        if edit_type in {"value_change", "reset_value", "unit_change", "reset_unit"}:
+            if _action_predates(action, value_not_before_timestamp):
+                continue
             value_overrides[raw_metric_id] = action
+            if edit_type in {"unit_change", "reset_unit"}:
+                unit_overrides[raw_metric_id] = action
+        elif edit_type in {"date_change", "reset_date"}:
+            if _action_predates(action, value_not_before_timestamp):
+                continue
+            date_overrides[raw_metric_id] = action
         elif edit_type in {"mapping_change", "reset_mapping"}:
-            if mapping_not_before_timestamp is not None:
-                action_timestamp = _action_created_timestamp(action)
-                if action_timestamp is not None and action_timestamp < mapping_not_before_timestamp:
-                    continue
+            if _action_predates(action, mapping_not_before_timestamp):
+                continue
             mapping_overrides[raw_metric_id] = action
-    return value_overrides, mapping_overrides
+    return value_overrides, mapping_overrides, date_overrides, unit_overrides
+
+
+def _action_predates(action: dict[str, Any], not_before_timestamp: float | None) -> bool:
+    if not_before_timestamp is None:
+        return False
+    action_timestamp = _action_created_timestamp(action)
+    return action_timestamp is not None and action_timestamp < not_before_timestamp
 
 
 def _action_created_timestamp(action: dict[str, Any]) -> float | None:
@@ -821,7 +976,7 @@ def _write_compatibility_actions(job: JobRecord, actions: list[dict[str, Any]]) 
     for action in actions:
         raw_metric_id = str(action.get("raw_metric_id", "") or "")
         edit_type = str(action.get("edit_type", "") or "")
-        if edit_type in {"value_change", "reset_value"}:
+        if edit_type in {"value_change", "reset_value", "unit_change", "reset_unit"}:
             raw_item = raw_by_metric_id.get(raw_metric_id)
             if raw_item is None:
                 continue
@@ -872,11 +1027,17 @@ def _status_badges(
     base_status_label: str,
     value_changed: bool,
     mapping_changed: bool,
+    date_changed: bool = False,
+    unit_changed: bool = False,
     temporal_review_required: bool = False,
 ) -> list[dict[str, str]]:
     badges: list[dict[str, str]] = []
     if value_changed:
         badges.append({"code": "value_changed", "label": STATUS_LABELS_ZH["value_changed"]})
+    if unit_changed:
+        badges.append({"code": "unit_changed", "label": STATUS_LABELS_ZH["unit_changed"]})
+    if date_changed:
+        badges.append({"code": "date_changed", "label": STATUS_LABELS_ZH["date_changed"]})
     if mapping_changed:
         badges.append({"code": "term_changed", "label": STATUS_LABELS_ZH["term_changed"]})
     if temporal_review_required:
@@ -897,6 +1058,42 @@ def _display_period_role(period_role_norm: Any, period_role_raw: Any = "") -> st
 def _safe_cell_bbox_json(value: Any) -> str:
     bbox_json = str(value or "")
     return "" if _is_coarse_bbox_json(bbox_json) else bbox_json
+
+
+def _normalize_amount_unit(value: Any) -> str:
+    text = str(value or "").strip().replace("人民币", "").replace("单位", "")
+    text = text.strip(" :：")
+    if not text:
+        return "元"
+    for unit in sorted(SUPPORTED_AMOUNT_UNITS, key=len, reverse=True):
+        if unit in text:
+            return unit
+    return text
+
+
+def _normalized_yuan_value(value_raw: Any, unit: str, *, fallback: Any = "") -> str:
+    normalized_unit = _normalize_amount_unit(unit)
+    multiplier = SUPPORTED_AMOUNT_UNITS.get(normalized_unit)
+    if multiplier is None:
+        raise ValueError("单位仅支持元、千元、万元或亿元。")
+    parsed = parse_metric_number(value_raw, expected_numeric=True)
+    if parsed.value is None or parsed.value_type != "amount":
+        fallback_parsed = parse_metric_number_input(fallback)
+        if fallback_parsed.get("valid"):
+            return str(fallback_parsed["value"])
+        raise ValueError("无法根据原始数值换算单位，请直接修改人民币元金额。")
+    return f"{(parsed.value * multiplier).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP):.2f}"
+
+
+def _validate_review_date(value: Any) -> str:
+    text = str(value or "").strip()
+    try:
+        parsed = date.fromisoformat(text)
+    except ValueError as exc:
+        raise ValueError("日期格式有误，请使用 YYYY-MM-DD。") from exc
+    if not 2000 <= parsed.year <= 2099:
+        raise ValueError("日期年份应在 2000 至 2099 年之间。")
+    return parsed.isoformat()
 
 
 def _statement_label(raw: dict[str, Any]) -> str:

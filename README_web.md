@@ -222,8 +222,8 @@ sheets are:
 The Excel workbook is formatted for ordinary finance users: metric value cells are
 numeric Excel cells with thousands separators, date columns display as
 `yyyy-mm-dd`, the header row is frozen, filters are enabled, and column widths are
-set for direct review. Original CSV files, standardized CSV files, detailed JSON,
-and logs are advanced files rather than the normal primary download.
+set for direct review. `数据表.xlsx` and `数据表.csv` are the two ordinary structured
+data downloads. Detailed JSON and logs remain advanced files.
 
 ## Proofreading Pages
 
@@ -233,10 +233,10 @@ The ordinary proofreading page is now the unified workbench:
 /documents/{doc_id}/proofread
 ```
 
-It combines raw value proofreading and standard term mapping in one screen. The left side shows the source PDF page image and highlights the selected source term or value when a bbox is available. The right side is a continuous spreadsheet-like table:
+It combines date, amount, source-unit, and standard-term proofreading in one screen. The left side shows the source PDF page image and highlights the selected source term or value when a bbox is available. The right side is a continuous spreadsheet-like table:
 
 ```text
-原始术语 | 当前条目日期 | 指标数值 | 标准术语 | 状态
+原始术语 | 表格日期 | 指标数值及原单位 | 标准术语 | 状态
 ```
 
 OCR confidence is hidden by default. Use the slider-style `显示置信度` switch to show confidence inline next to each original term; missing confidence is shown as `未记录`.
@@ -248,6 +248,13 @@ Value editing:
 - On blur, parseable values are formatted again with thousands separators.
 - Invalid numeric input is marked in the cell and is rejected by the save endpoint.
 - Changed value cells are highlighted and show `重置`; reset restores the original extracted value.
+
+Date and unit editing:
+
+- A table date can be corrected directly. A changed row shows `日期已修改`, and `重置` restores the extracted or inferred date.
+- Amount source units support `元`, `千元`, `万元`, and `亿元`. Changing the source unit immediately recalculates the displayed RMB-yuan amount.
+- Unit corrections show `单位已修改`; `重置单位` restores both the original unit and normalized amount.
+- Rows whose dates cannot be inferred safely remain visible as `日期待校对`.
 
 Mapping editing:
 
@@ -274,6 +281,8 @@ unified_review_summary.json
 ```
 
 Compatibility raw-review and mapping-review action files may also be written under their existing review folders.
+
+Saving the unified page immediately refreshes the current `数据表.xlsx` and `数据表.csv`. There is no separate fact-version or export-history subsystem. Use `保存并生成会计报表` only after the current rows have been checked. The accounting workbook writes only safely mapped balance-sheet and income-statement rows with clear dates; skipped or conflicting rows are listed in its `生成说明` sheet. If proofreading changes afterward, the old accounting workbook is no longer downloadable until it is regenerated.
 
 Known limitations:
 
@@ -315,6 +324,8 @@ After choosing a term, use:
 - `不采纳`: reject the suggestion for this job.
 - `仅本次采用`: apply only to the current job output.
 - `采用并记住`: apply now and save the raw term to the local mapping store.
+
+Remembered aliases are scoped by company and statement type, so a decision for one company/report does not silently become a global alias.
 
 Actions are written under the existing web review path, for example:
 

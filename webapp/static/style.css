@@ -1358,8 +1358,25 @@ td {
     gap: 6px;
 }
 
+.metric-date-cell .cell-edit-wrap {
+    flex-wrap: wrap;
+}
+
+.metric-date-cell .cell-reset {
+    margin-left: auto;
+}
+
 .metric-value-cell .cell-edit-wrap {
     min-width: 16ch;
+}
+
+.metric-date-input {
+    width: 100%;
+    min-height: 34px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 7px 6px;
+    font: inherit;
 }
 
 .metric-value-input {
@@ -1390,8 +1407,32 @@ td {
 }
 
 .metric-value-cell.metric-cell--dirty,
+.metric-date-cell.metric-cell--dirty,
 .unified-standard-term-picker.mapping-row--dirty {
     background: rgba(168, 104, 10, 0.1);
+}
+
+.unit-edit-wrap {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-top: 5px;
+    color: var(--muted);
+    font-size: 12px;
+}
+
+.unit-edit-wrap label {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.unit-edit-wrap select {
+    min-height: 28px;
+    border: 1px solid var(--line);
+    border-radius: 7px;
+    background: #fff;
 }
 
 .metric-value-cell--empty {

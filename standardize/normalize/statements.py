@@ -39,7 +39,9 @@ def classify_statement(page: ProviderPage, keyword_config: Dict[str, Any]) -> St
     units = keyword_config.get("units", {})
     for line in candidate_lines:
         normalized = clean_text(line)
-        for unit_name, multiplier in units.items():
+        # Match the most specific unit first.  "万元" and "千元" both contain
+        # "元", so configuration order must not silently turn them into yuan.
+        for unit_name, multiplier in sorted(units.items(), key=lambda item: len(str(item[0])), reverse=True):
             if unit_name in normalized:
                 unit_raw = unit_name
                 unit_multiplier = float(multiplier)

@@ -83,6 +83,10 @@
             </form>
             <button class="button button--primary" type="button" data-unified-save>保存修改</button>
             <a class="button button--secondary" href="{{ base_url }}/download-preview/combined_metrics_xlsx" target="_blank" rel="noopener" data-unified-download-preview>预览下载版</a>
+            <a class="button button--secondary" href="{{ base_url }}/download/combined_metrics_csv">下载 CSV</a>
+            <form action="{{ base_url }}/generate-accounting-workbook" method="post" data-accounting-generate-form>
+                <button class="button button--primary" type="submit">保存并生成会计报表</button>
+            </form>
             <span class="save-status" data-unified-save-status></span>
         </div>
         <div class="unified-filter-controls">
@@ -181,7 +185,10 @@
                         data-base-status-code="{{ row.base_status }}"
                         data-base-status-label="{{ row.base_status_label }}"
                         data-temporal-review-required="{{ 'true' if row.temporal_review_required else 'false' }}"
+                        data-original-temporal-review-required="{{ 'true' if row.original_temporal_review_required else 'false' }}"
                         data-value-changed="{{ 'true' if row.value_changed else 'false' }}"
+                        data-date-changed="{{ 'true' if row.date_changed else 'false' }}"
+                        data-unit-changed="{{ 'true' if row.unit_changed else 'false' }}"
                         data-mapping-changed="{{ 'true' if row.mapping_changed else 'false' }}"
                         data-mapping-decision-note="{{ row.mapping_decision_note }}"
                         data-text-confidence="{{ row.text_confidence_score }}"
@@ -195,7 +202,22 @@
                             <span class="confidence-inline confidence-inline--{{ row.text_confidence_level }}" data-ocr-confidence-text hidden>{{ row.text_confidence_display }}</span>
                             {% endif %}
                         </th>
-                        <td>{{ row.table_date or "未记录" }}</td>
+                        <td class="metric-date-cell {% if row.date_changed %}metric-cell--dirty{% endif %}" data-date-cell>
+                            <div class="cell-edit-wrap">
+                                <input
+                                    class="metric-date-input"
+                                    type="date"
+                                    value="{{ row.current_fill_date }}"
+                                    data-metric-date-input
+                                    data-original-date="{{ row.original_fill_date }}"
+                                    data-current-date="{{ row.current_fill_date }}"
+                                    data-saved-date="{{ row.current_fill_date }}"
+                                    autocomplete="off"
+                                >
+                                <button class="cell-reset" type="button" data-reset-date hidden>重置</button>
+                            </div>
+                            <span class="cell-error" data-date-error hidden>请选择有效日期</span>
+                        </td>
                         {% for value in row.period_values %}
                         <td
                             class="metric-value-cell {% if value.cell_changed %}metric-cell--dirty{% endif %} {% if not value.available %}metric-value-cell--empty{% endif %}"
@@ -223,6 +245,29 @@
                                 >
                                 <button class="cell-reset" type="button" data-reset-value hidden>重置</button>
                             </div>
+                            {% if value.value_type == "amount" %}
+                            <div class="unit-edit-wrap">
+                                <label>
+                                    原单位
+                                    <select
+                                        data-source-unit-select
+                                        data-original-unit="{{ value.original_unit }}"
+                                        data-current-unit="{{ value.current_unit }}"
+                                        data-saved-unit="{{ value.current_unit }}"
+                                        data-raw-value="{{ value.value_raw }}"
+                                    >
+                                        {% if value.current_unit and value.current_unit not in value.supported_amount_units %}
+                                        <option value="{{ value.current_unit }}">{{ value.current_unit }}</option>
+                                        {% endif %}
+                                        {% for unit in value.supported_amount_units %}
+                                        <option value="{{ unit }}" {% if unit == value.current_unit %}selected{% endif %}>{{ unit }}</option>
+                                        {% endfor %}
+                                    </select>
+                                </label>
+                                <span>→ 人民币元</span>
+                                <button class="cell-reset" type="button" data-reset-unit hidden>重置单位</button>
+                            </div>
+                            {% endif %}
                             {% if value.value_confidence_available %}
                             <span class="confidence-inline confidence-inline--{{ value.value_confidence_level }}" data-ocr-confidence-text hidden>{{ value.value_confidence_display }}</span>
                             {% endif %}

@@ -249,7 +249,8 @@ class LocalMappingStore:
         with self._connect() as conn:
             rows = conn.execute(
                 """
-                SELECT alias, standard_code, standard_name, relation_type, confidence, source, note, enabled
+                SELECT alias, standard_code, standard_name, relation_type, confidence, source, note, enabled,
+                       scope_company, scope_statement_type
                 FROM term_aliases
                 WHERE enabled = 1 AND COALESCE(source, '') != 'base'
                 ORDER BY approved_at, alias
@@ -269,6 +270,8 @@ class LocalMappingStore:
                     safe_auto_map=relation_type in SAFE_RELATION_TYPES or source == "human_approved",
                     source=source,
                     note=str(row["note"] or ""),
+                    scope_company=str(row["scope_company"] or "*"),
+                    scope_statement_type=str(row["scope_statement_type"] or "*"),
                 )
             )
         return entries
@@ -284,6 +287,8 @@ class LocalMappingStore:
         source: str = "human_approved",
         approved_by: str = "web",
         note: str = "",
+        scope_company: str = "*",
+        scope_statement_type: str = "*",
     ) -> str:
         self.initialize()
         approved_at = _utc_now()
@@ -301,6 +306,8 @@ class LocalMappingStore:
                 approved_at=approved_at,
                 enabled=True,
                 note=note,
+                scope_company=scope_company,
+                scope_statement_type=scope_statement_type,
             )
 
     def record_decision(
@@ -319,6 +326,8 @@ class LocalMappingStore:
         confidence: float | None = None,
         decided_by: str = "web",
         note: str = "",
+        company_name: str = "",
+        statement_type: str = "",
     ) -> dict[str, Any]:
         self.initialize()
         decided_at = _utc_now()
@@ -365,6 +374,8 @@ class LocalMappingStore:
                 source="human_approved",
                 approved_by=decided_by,
                 note=note or f"由任务 {job_id} 人工采用并记住。",
+                scope_company=str(company_name or "*"),
+                scope_statement_type=str(statement_type or "*"),
             )
         return payload
 
@@ -559,11 +570,15 @@ class LocalMappingStore:
         approved_at: str,
         enabled: bool,
         note: str,
+        scope_company: str = "*",
+        scope_statement_type: str = "*",
     ) -> str:
         alias_text = str(alias or "").strip()
         alias_norm = normalize_metric_name(alias_text)
         relation_type = normalize_relation_type(relation_type) or "exact_alias"
-        alias_id = _stable_id("alias", alias_norm, standard_code, relation_type, source)
+        company_scope = str(scope_company or "*").strip() or "*"
+        statement_scope = str(scope_statement_type or "*").strip() or "*"
+        alias_id = _stable_id("alias", alias_norm, standard_code, relation_type, source, company_scope, statement_scope)
         conn.execute(
             """
             INSERT INTO term_aliases (
@@ -571,12 +586,14 @@ class LocalMappingStore:
                 scope_company, scope_statement_type, confidence, source, approved_by,
                 approved_at, enabled, note
             )
-            VALUES (?, ?, ?, ?, ?, ?, '*', '*', ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 alias=excluded.alias,
                 alias_norm=excluded.alias_norm,
                 standard_name=excluded.standard_name,
                 relation_type=excluded.relation_type,
+                scope_company=excluded.scope_company,
+                scope_statement_type=excluded.scope_statement_type,
                 confidence=excluded.confidence,
                 source=excluded.source,
                 approved_by=excluded.approved_by,
@@ -591,6 +608,8 @@ class LocalMappingStore:
                 standard_code,
                 standard_name,
                 relation_type,
+                company_scope,
+                statement_scope,
                 confidence,
                 source,
                 approved_by,

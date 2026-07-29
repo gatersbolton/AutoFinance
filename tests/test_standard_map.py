@@ -49,12 +49,12 @@ class StandardMapTests(unittest.TestCase):
             writer = csv.DictWriter(handle, fieldnames=["填表日期", "当前条目日期", "期间类型", "公司名", "指标名", "指标数值"])
             writer.writeheader()
             for row in rows:
-                writer.writerow(row)
+                writer.writerow({field: row.get(field, "") for field in writer.fieldnames})
         detailed = run_dir / "raw_metrics_detailed.csv"
         with detailed.open("w", encoding="utf-8-sig", newline="") as handle:
             writer = csv.DictWriter(
                 handle,
-                fieldnames=["source_cell_ref", "page_no", "bbox_json", "evidence_path", "source_file", "provider", "doc_id"],
+                fieldnames=["source_cell_ref", "page_no", "bbox_json", "evidence_path", "source_file", "provider", "doc_id", "statement_type"],
             )
             writer.writeheader()
             for index, _ in enumerate(rows, start=1):
@@ -67,6 +67,7 @@ class StandardMapTests(unittest.TestCase):
                         "source_file": "fixture.json",
                         "provider": "aliyun_table",
                         "doc_id": "DTEST",
+                        "statement_type": rows[index - 1].get("_statement_type", "balance_sheet"),
                     }
                 )
         return tempdir, path
@@ -212,6 +213,43 @@ class StandardMapTests(unittest.TestCase):
         finally:
             raw_temp.cleanup()
             output_temp.cleanup()
+
+    def test_remembered_alias_is_scoped_by_company_and_statement_type(self):
+        store_path = self._new_store_path()
+        store = LocalMappingStore(store_path)
+        store.record_decision(
+            job_id="JOB_SCOPE",
+            raw_metric_name="本公司专用货币",
+            decision="accept_and_remember",
+            final_code="ZT_001",
+            final_name="货币资金",
+            relation_type="exact_alias",
+            company_name="AAA有限公司",
+            statement_type="balance_sheet",
+        )
+
+        matching = self._row("本公司专用货币", "100")
+        wrong_company = self._row("本公司专用货币", "100")
+        wrong_company["公司名"] = "BBB有限公司"
+        wrong_statement = self._row("本公司专用货币", "100")
+        wrong_statement["_statement_type"] = "income_statement"
+
+        runs = [
+            self._run_mapping([matching], mapping_store_path=store_path),
+            self._run_mapping([wrong_company], mapping_store_path=store_path),
+            self._run_mapping([wrong_statement], mapping_store_path=store_path),
+        ]
+        try:
+            self.assertEqual(runs[0][2].rows[0].mapping_method, "local_alias")
+            self.assertNotEqual(runs[1][2].rows[0].mapping_method, "local_alias")
+            self.assertNotEqual(runs[2][2].rows[0].mapping_method, "local_alias")
+            alias = next(row for row in store.alias_rows(include_base=False) if row["alias"] == "本公司专用货币")
+            self.assertEqual(alias["scope_company"], "AAA有限公司")
+            self.assertEqual(alias["scope_statement_type"], "balance_sheet")
+        finally:
+            for raw_temp, output_temp, _ in runs:
+                raw_temp.cleanup()
+                output_temp.cleanup()
 
     def test_ambiguous_relation_requires_review(self):
         raw_temp, output_temp, result = self._run_mapping([self._row("往来款", "100")])

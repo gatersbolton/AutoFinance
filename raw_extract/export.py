@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import json
 from dataclasses import fields
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Sequence
 
@@ -85,7 +86,13 @@ def write_xlsx(
 def append_rows(sheet, fieldnames: Sequence[str], rows: Iterable[Dict[str, Any]]) -> None:
     sheet.append(list(fieldnames))
     for row in rows:
-        sheet.append([serialize_value(row.get(field)) for field in fieldnames])
+        sheet.append([_xlsx_value(row.get(field)) for field in fieldnames])
+
+
+def _xlsx_value(value: Any) -> Any:
+    if isinstance(value, Decimal):
+        return float(value)
+    return serialize_value(value)
 
 
 def write_dict_csv(path: Path, rows: List[Dict[str, Any]], fieldnames: Sequence[str]) -> None:
@@ -108,7 +115,8 @@ def write_dataclass_csv(path: Path, rows: Sequence[Any], model_cls: Any) -> None
 def write_jsonl(path: Path, rows: Iterable[Dict[str, Any]]) -> None:
     with path.open("w", encoding="utf-8") as handle:
         for row in rows:
-            handle.write(json.dumps(row, ensure_ascii=False, separators=(",", ":"), sort_keys=True))
+            payload = {key: serialize_value(value) for key, value in row.items()}
+            handle.write(json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True))
             handle.write("\n")
 
 

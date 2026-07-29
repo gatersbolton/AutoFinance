@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass, field, fields, is_dataclass
+from decimal import Decimal
 from typing import Any, Dict, List, Optional
 
 
@@ -25,6 +26,7 @@ DETAILED_OUTPUT_FIELDS = [
     "value_raw",
     "value_type",
     "unit_raw",
+    "unit_multiplier",
     "statement_type",
     "statement_name_raw",
     "provider",
@@ -110,6 +112,8 @@ def compact_json(value: Any) -> str:
 def serialize_value(value: Any) -> Any:
     if value is None:
         return ""
+    if isinstance(value, Decimal):
+        return format(value, "f")
     if isinstance(value, (list, dict, tuple)):
         return compact_json(value)
     return value
@@ -158,7 +162,7 @@ class ItemDateResolution:
 
 @dataclass
 class NumberParseResult:
-    value: Optional[float]
+    value: Optional[Decimal]
     value_type: str
     normalized_text: str
     issue_flags: List[str] = field(default_factory=list)
@@ -172,7 +176,7 @@ class RawMetricCandidate:
     item_date: str
     company_name: str
     metric_name: str
-    metric_value: Optional[float]
+    metric_value: Optional[Decimal]
     value_raw: str
     value_type: str
     unit_raw: str
@@ -203,6 +207,7 @@ class RawMetricCandidate:
     statement_name_raw: str = ""
     evidence_path: str = ""
     issue_flags: List[str] = field(default_factory=list)
+    unit_multiplier: Decimal = Decimal("1")
     provider_rank: int = 9999
     duplicate_key: str = ""
     accepted: bool = False

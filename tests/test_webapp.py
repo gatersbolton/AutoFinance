@@ -219,6 +219,9 @@ class WebAppTests(unittest.TestCase):
         value_confidence: str = "",
         period_role_norm: str = "ending",
         period_role_raw: str = "期末数",
+        unit_raw: str = "元",
+        value_raw: str = "",
+        statement_type: str = "balance_sheet",
     ) -> Path:
         self.raw_metrics_root.mkdir(parents=True, exist_ok=True)
         tempdir = tempfile.TemporaryDirectory(dir=self.raw_metrics_root)
@@ -261,9 +264,12 @@ class WebAppTests(unittest.TestCase):
                     "row_label_clean": metric_name,
                     "period_role_raw": period_role_raw,
                     "period_role_norm": period_role_norm,
-                    "statement_type": "balance_sheet",
-                    "statement_name_raw": "资产负债表",
+                    "statement_type": statement_type,
+                    "statement_name_raw": "利润表" if statement_type == "income_statement" else "资产负债表",
                     "value_type": "amount",
+                    "value_raw": value_raw or metric_value,
+                    "unit_raw": unit_raw,
+                    "unit_multiplier": {"元": "1", "千元": "1000", "万元": "10000", "亿元": "100000000"}.get(unit_raw, "1"),
                     "confidence": confidence,
                 }
             ],
@@ -287,6 +293,9 @@ class WebAppTests(unittest.TestCase):
                 "statement_type",
                 "statement_name_raw",
                 "value_type",
+                "value_raw",
+                "unit_raw",
+                "unit_multiplier",
                 "confidence",
             ],
         )
@@ -1561,6 +1570,9 @@ class WebAppTests(unittest.TestCase):
         download = self.client.get(f"/jobs/{job_id}/download/combined_metrics_xlsx")
         self.assertEqual(download.status_code, 200)
         self.assertTrue(download.content.startswith(b"PK"))
+        csv_download = self.client.get(f"/jobs/{job_id}/download/combined_metrics_csv")
+        self.assertEqual(csv_download.status_code, 200)
+        self.assertTrue(csv_download.content.startswith(b"\xef\xbb\xbf"))
 
         preview = self.client.get(f"/jobs/{job_id}/download-preview/combined_metrics_xlsx")
         self.assertEqual(preview.status_code, 200)
@@ -1580,6 +1592,57 @@ class WebAppTests(unittest.TestCase):
         self.assertIn("标准化数据 CSV", detail.text)
         self.assertNotIn("下载原始数据表 Excel", detail.text)
         self.assertNotIn("下载标准化数据表 Excel", detail.text)
+
+    def test_manual_accounting_workbook_generation_uses_current_corrected_csv(self):
+        job_id = self._create_job("accounting workbook")
+        raw_path = self._create_raw_metrics_fixture(metric_name="货币资金", metric_value="12345.67")
+        self.client.post(
+            f"/jobs/{job_id}/standard-metrics/run",
+            data={"raw_metrics_path": str(raw_path)},
+            follow_redirects=False,
+        )
+
+        response = self.client.post(f"/jobs/{job_id}/generate-accounting-workbook")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.content.startswith(b"PK"))
+        job = get_job(self.settings, job_id)
+        state = load_simple_flow_state(job)
+        self.assertTrue(state["accounting_workbook_ready"])
+        workbook = load_workbook(Path(state["accounting_workbook"]), data_only=True)
+        self.assertIn("生成说明", workbook.sheetnames)
+        sheet = workbook[workbook.sheetnames[0]]
+        headers = [sheet.cell(row=3, column=column).value for column in range(1, sheet.max_column + 1)]
+        self.assertEqual(headers, ["科目名称", "2022-12-31__期末数"])
+        self.assertEqual(sheet["B4"].value, 12345.67)
+        self.assertNotIn("金额", headers)
+        workbook.close()
+
+        summary = json.loads(Path(state["accounting_export_summary"]).read_text(encoding="utf-8"))
+        self.assertEqual(summary["written_cells_total"], 1)
+        self.assertEqual(summary["conflicted_cells_total"], 0)
+        download = self.client.get(f"/jobs/{job_id}/download/accounting_workbook")
+        self.assertEqual(download.status_code, 200)
+
+        save = self.client.post(
+            f"/jobs/{job_id}/proofread/save",
+            json={
+                "edits": [
+                    {
+                        "item_id": "unirev_000001",
+                        "raw_metric_id": "CASE1:1:aliyun_table:0:1-1:2-2",
+                        "raw_metric_ids": ["CASE1:1:aliyun_table:0:1-1:2-2"],
+                        "edit_type": "date_change",
+                        "previous_date": "2022-12-31",
+                        "new_date": "2023-12-31",
+                    }
+                ]
+            },
+        )
+        self.assertEqual(save.status_code, 200)
+        stale_download = self.client.get(f"/jobs/{job_id}/download/accounting_workbook")
+        self.assertEqual(stale_download.status_code, 409)
+        self.assertEqual(stale_download.json()["detail"], "校对结果已变化，请重新生成会计报表。")
 
     def test_raw_review_page_loads_and_raw_actions_are_saved(self):
         job_id = self._create_job("raw review")
@@ -1782,7 +1845,13 @@ class WebAppTests(unittest.TestCase):
         self.assertEqual(remember.status_code, 200)
         self.assertEqual(remember.json()["decision"], "accept_and_remember")
         aliases = store.alias_rows(include_base=False)
-        self.assertTrue(any(row["alias"] == "阶段十五待映射" and row["standard_code"] == "ZT_068" for row in aliases))
+        remembered_alias = next(
+            row
+            for row in aliases
+            if row["alias"] == "阶段十五待映射" and row["standard_code"] == "ZT_068"
+        )
+        self.assertEqual(remembered_alias["scope_company"], "AAA有限公司")
+        self.assertEqual(remembered_alias["scope_statement_type"], "balance_sheet")
         self.assertTrue((self.settings.mapping_store_root / "local_aliases_export.yml").exists())
         self.assertTrue((self.settings.mapping_store_root / "mapping_decisions_audit.csv").exists())
 
@@ -1803,7 +1872,14 @@ class WebAppTests(unittest.TestCase):
             decisions = list(csv.DictReader(handle))
         self.assertEqual([row["decision"] for row in decisions], ["accept_once", "accept_and_remember", "reject"])
 
-        candidates = self.client.get("/api/mapping/candidates?raw_metric_name=阶段十五待映射")
+        candidates = self.client.get(
+            "/api/mapping/candidates",
+            params={
+                "raw_metric_name": "阶段十五待映射",
+                "company_name": "AAA有限公司",
+                "statement_type": "balance_sheet",
+            },
+        )
         self.assertEqual(candidates.status_code, 200)
         self.assertEqual(candidates.json()["mapping_method"], "local_alias")
         self.assertEqual(candidates.json()["standard_code"], "ZT_068")
@@ -1907,7 +1983,7 @@ class WebAppTests(unittest.TestCase):
         response = self.client.get(f"/jobs/{job_id}/proofread")
         self.assertEqual(response.status_code, 200)
         self.assertIn("data-unified-proofread-workbench", response.text)
-        self.assertIn("/static/app.js?v=resumable-pipeline-20260728-1", response.text)
+        self.assertIn("/static/app.js?v=current-review-20260729-1", response.text)
         self.assertIn("source-panel", response.text)
         self.assertIn("sheet-panel", response.text)
         self.assertIn("data-page-image-key=", response.text)
@@ -2024,6 +2100,72 @@ class WebAppTests(unittest.TestCase):
         self.assertTrue((mapping_review_dir(job) / "mapping_review_actions.json").exists())
         self.assertTrue(str(actions_path.resolve()).startswith(str(self.runtime_root.resolve())))
         self.assertFalse((REPO_ROOT / "unified_review_actions.csv").exists())
+
+    def test_unified_proofread_saves_date_and_source_unit_corrections(self):
+        job_id = self._create_job("unified date unit review")
+        raw_path = self._create_raw_metrics_fixture(
+            metric_name="货币资金",
+            metric_value="1000000.00",
+            value_raw="100.00",
+            unit_raw="万元",
+        )
+        self.client.post(
+            f"/jobs/{job_id}/standard-metrics/run",
+            data={"raw_metrics_path": str(raw_path)},
+            follow_redirects=False,
+        )
+
+        page = self.client.get(f"/jobs/{job_id}/proofread")
+        self.assertEqual(page.status_code, 200)
+        self.assertIn("data-metric-date-input", page.text)
+        self.assertIn("data-source-unit-select", page.text)
+        self.assertIn("保存并生成会计报表", page.text)
+
+        response = self.client.post(
+            f"/jobs/{job_id}/proofread/save",
+            json={
+                "edits": [
+                    {
+                        "item_id": "unirev_000001",
+                        "raw_metric_id": "CASE1:1:aliyun_table:0:1-1:2-2",
+                        "raw_metric_ids": ["CASE1:1:aliyun_table:0:1-1:2-2"],
+                        "edit_type": "date_change",
+                        "previous_date": "2022-12-31",
+                        "new_date": "2023-12-31",
+                    },
+                    {
+                        "item_id": "unirev_000001",
+                        "raw_metric_id": "CASE1:1:aliyun_table:0:1-1:2-2",
+                        "edit_type": "unit_change",
+                        "previous_unit": "万元",
+                        "new_unit": "千元",
+                        "previous_value": "1000000.00",
+                        "new_value": "100000.00",
+                    },
+                ]
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["date_changes_total"], 1)
+        self.assertEqual(response.json()["unit_changes_total"], 1)
+        job = get_job(self.settings, job_id)
+        state = load_simple_flow_state(job)
+        self.assertTrue(state["combined_csv_ready"])
+        with Path(state["combined_metrics_csv"]).open("r", encoding="utf-8-sig", newline="") as handle:
+            row = next(csv.DictReader(handle))
+        self.assertEqual(row["填表日期"], "2023-12-31")
+        self.assertEqual(row["当前条目日期"], "2023-12-31")
+        self.assertEqual(row["指标数值"], "100000.00")
+        self.assertEqual(row["原始单位"], "千元")
+        self.assertEqual(row["标准单位"], "人民币元")
+
+        saved_page = self.client.get(f"/jobs/{job_id}/proofread")
+        self.assertIn("日期已修改", saved_page.text)
+        self.assertIn("单位已修改", saved_page.text)
+        self.assertIn('data-date-changed="true"', saved_page.text)
+        self.assertIn('data-unit-changed="true"', saved_page.text)
+        self.assertNotIn("日期待校对", saved_page.text)
 
     def test_unified_proofread_merges_beginning_and_ending_values_into_one_row(self):
         job_id = self._create_job("unified merged periods")

@@ -59,6 +59,7 @@ from .simple_flow import (
     build_mapping_review_sheet,
     build_raw_review_sheet,
     find_review_item,
+    generate_accounting_workbook,
     job_root,
     load_mapping_review_items,
     load_raw_review_items,
@@ -718,9 +719,11 @@ def queue_job_route(request: Request, job_id: str) -> RedirectResponse:
 def download_artifact(request: Request, job_id: str, slug: str) -> FileResponse:
     settings = get_settings(request)
     job = require_job(settings, job_id)
-    if slug == "combined_metrics_xlsx":
+    if slug == "accounting_workbook" and not load_simple_flow_state(job, settings).get("accounting_workbook_ready"):
+        raise HTTPException(status_code=409, detail="校对结果已变化，请重新生成会计报表。")
+    if slug in {"combined_metrics_xlsx", "combined_metrics_csv"}:
         state = load_simple_flow_state(job, settings)
-        path_text = str(state.get("combined_metrics_xlsx", "") or "")
+        path_text = str(state.get(slug, "") or "")
         path = Path(path_text) if path_text else Path()
         action_path = job_root(job) / "unified_review" / "unified_review_actions.json"
         needs_refresh = not path_text or not path.exists() or (action_path.exists() and path.exists() and action_path.stat().st_mtime > path.stat().st_mtime)
@@ -733,6 +736,23 @@ def download_artifact(request: Request, job_id: str, slug: str) -> FileResponse:
     if not artifact.exists or not path.exists():
         raise HTTPException(status_code=404, detail="文件未生成。")
     return FileResponse(path=str(path), filename=artifact.download_name)
+
+
+@router.post(
+    "/jobs/{job_id}/generate-accounting-workbook",
+    dependencies=[Depends(password_gate)],
+)
+def generate_job_accounting_workbook(request: Request, job_id: str) -> FileResponse:
+    settings = get_settings(request)
+    job = require_job(settings, job_id)
+    try:
+        summary = generate_accounting_workbook(settings, job)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    path = Path(str(summary.get("workbook_path", "") or ""))
+    if not path.exists():
+        raise HTTPException(status_code=500, detail="会计报表生成失败。")
+    return FileResponse(path=str(path), filename="会计报表.xlsx")
 
 
 @router.get("/jobs/{job_id}/download-preview/combined_metrics_xlsx", response_class=HTMLResponse, dependencies=[Depends(password_gate)])
@@ -1121,7 +1141,13 @@ def standard_terms_search_api(request: Request, q: str = "", limit: int = 10) ->
 
 
 @router.get("/api/mapping/candidates", response_class=JSONResponse, dependencies=[Depends(password_gate)])
-def mapping_candidates_api(request: Request, raw_metric_name: str = "", limit: int = 5) -> JSONResponse:
+def mapping_candidates_api(
+    request: Request,
+    raw_metric_name: str = "",
+    company_name: str = "",
+    statement_type: str = "",
+    limit: int = 5,
+) -> JSONResponse:
     settings = get_settings(request)
     registry = load_standard_registry()
     store = LocalMappingStore(settings.mapping_store_path)
@@ -1133,15 +1159,18 @@ def mapping_candidates_api(request: Request, raw_metric_name: str = "", limit: i
         raw_metric_id="api_candidate",
         fill_date="",
         item_date="",
-        company_name="",
+        company_name=company_name,
         metric_name=raw_metric_name,
         metric_value="",
+        provenance={"statement_type": statement_type},
     )
     result = map_raw_metric(raw, registry)
     candidates = [candidate.as_output_row() for candidate in result.candidates[: max(1, min(int(limit or 5), 20))]]
     return JSONResponse(
         {
             "raw_metric_name": raw_metric_name,
+            "company_name": company_name,
+            "statement_type": statement_type,
             "mapping_status": result.mapping_status,
             "mapping_method": result.mapping_method,
             "standard_code": result.standard_code,

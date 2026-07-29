@@ -22,7 +22,12 @@ from standard_map.registry import load_standard_registry
 from standard_map.search import normalize_standard_code
 from standard_map.store import LocalMappingStore
 
-from .combined_downloads import COMBINED_WORKBOOK_DOWNLOAD_NAME, build_combined_metrics_workbook
+from .accounting_export import (
+    ACCOUNTING_EXPORT_SUMMARY_NAME,
+    ACCOUNTING_WORKBOOK_DOWNLOAD_NAME,
+    build_accounting_workbook,
+)
+from .combined_downloads import COMBINED_CSV_DOWNLOAD_NAME, COMBINED_WORKBOOK_DOWNLOAD_NAME, build_combined_metrics_workbook
 from .config import WebAppSettings
 from .models import JOB_MODE_DOCUMENT_PIPELINE, JOB_MODE_UPLOAD, JobRecord
 from .review_quality import display_period_role, has_temporal_key, is_invalid_metric_name
@@ -98,8 +103,20 @@ def combined_workbook_path(job: JobRecord) -> Path:
     return combined_downloads_dir(job) / COMBINED_WORKBOOK_DOWNLOAD_NAME
 
 
+def combined_csv_path(job: JobRecord) -> Path:
+    return combined_downloads_dir(job) / COMBINED_CSV_DOWNLOAD_NAME
+
+
 def combined_download_summary_path(job: JobRecord) -> Path:
     return job_root(job) / "combined_download_summary.json"
+
+
+def accounting_workbook_path(job: JobRecord) -> Path:
+    return combined_downloads_dir(job) / ACCOUNTING_WORKBOOK_DOWNLOAD_NAME
+
+
+def accounting_export_summary_path(job: JobRecord) -> Path:
+    return combined_downloads_dir(job) / ACCOUNTING_EXPORT_SUMMARY_NAME
 
 
 def load_json(path: Path) -> dict[str, Any]:
@@ -145,6 +162,19 @@ def load_simple_flow_state(
         combined_downloads_dir(job),
         COMBINED_WORKBOOK_DOWNLOAD_NAME,
     )
+    combined_csv = _portable_summary_file(
+        combined_summary.get("csv_path", ""),
+        combined_downloads_dir(job),
+        COMBINED_CSV_DOWNLOAD_NAME,
+    )
+    accounting_workbook = accounting_workbook_path(job)
+    accounting_summary = accounting_export_summary_path(job)
+    unified_actions = job_root(job) / "unified_review" / "unified_review_actions.json"
+    accounting_workbook_current = accounting_workbook.exists()
+    if accounting_workbook_current and combined_csv and combined_csv.exists():
+        accounting_workbook_current = accounting_workbook.stat().st_mtime >= combined_csv.stat().st_mtime
+    if accounting_workbook_current and unified_actions.exists():
+        accounting_workbook_current = accounting_workbook.stat().st_mtime >= unified_actions.stat().st_mtime
     return {
         "raw_summary": raw_summary,
         "standard_summary": standard_summary,
@@ -154,10 +184,15 @@ def load_simple_flow_state(
         "standardized_metrics_csv": str(standardized_metrics_csv) if standardized_metrics_csv else str(standard_summary.get("standardized_metrics_csv", "") or ""),
         "standardized_metrics_xlsx": str(standardized_metrics_xlsx) if standardized_metrics_xlsx else str(standard_summary.get("standardized_metrics_xlsx", "") or ""),
         "combined_metrics_xlsx": str(combined_workbook) if combined_workbook else str(combined_summary.get("workbook_path", "") or ""),
+        "combined_metrics_csv": str(combined_csv) if combined_csv else str(combined_summary.get("csv_path", "") or ""),
         "combined_download_summary": str(combined_download_summary_path(job)) if combined_download_summary_path(job).exists() else "",
+        "accounting_workbook": str(accounting_workbook) if accounting_workbook.exists() else "",
+        "accounting_export_summary": str(accounting_summary) if accounting_summary.exists() else "",
         "raw_ready": bool(raw_metrics_csv and raw_metrics_csv.exists()),
         "standard_ready": bool(standardized_metrics_csv and standardized_metrics_csv.exists()),
         "combined_ready": bool(combined_workbook and combined_workbook.exists()),
+        "combined_csv_ready": bool(combined_csv and combined_csv.exists()),
+        "accounting_workbook_ready": accounting_workbook_current,
     }
 
 
@@ -305,6 +340,19 @@ def refresh_combined_metrics_workbook(settings: WebAppSettings, job: JobRecord) 
     )
     write_json(settings.runtime_root / "combined_download_summary.json", summary)
     return summary
+
+
+def generate_accounting_workbook(settings: WebAppSettings, job: JobRecord) -> dict[str, Any]:
+    combined_summary = refresh_combined_metrics_workbook(settings, job)
+    current_csv = Path(str(combined_summary.get("csv_path", "") or ""))
+    if not current_csv.exists():
+        raise ValueError("结构化数据 CSV 尚未生成。")
+    return build_accounting_workbook(
+        template_path=settings.template_path,
+        current_data_csv=current_csv,
+        output_path=accounting_workbook_path(job),
+        summary_path=accounting_export_summary_path(job),
+    )
 
 
 def _existing_state_file(value: object) -> Path | None:
@@ -608,6 +656,8 @@ def load_raw_review_items(job: JobRecord, *, apply_actions: bool = True) -> list
                 "statement_name_raw": detailed.get("statement_name_raw", ""),
                 "value_raw": detailed.get("value_raw", ""),
                 "value_type": detailed.get("value_type", ""),
+                "unit_raw": detailed.get("unit_raw", ""),
+                "unit_multiplier": detailed.get("unit_multiplier", ""),
                 "text_confidence": detailed.get("text_confidence", ""),
                 "value_confidence": detailed.get("value_confidence") or detailed.get("confidence", ""),
                 "confidence": detailed.get("confidence") or detailed.get("value_confidence", ""),
@@ -1204,6 +1254,8 @@ def _enrich_mapping_review_items(job: JobRecord, rows: list[dict[str, Any]]) -> 
                 "source_page_no": source_page_no,
                 "source_pdf_path": source_pdf_path,
                 "source_file": str(detailed.get("source_file") or item.get("source_file") or ""),
+                "company_name": str(item.get("公司名", "") or detailed.get("company_name", "")),
+                "statement_type": str(detailed.get("statement_type", "") or item.get("statement_type", "")),
                 "source_term_bbox_json": display_bbox_json,
                 "source_value_bbox_json": value_bbox_json,
                 "bbox_state": "has-bbox" if display_bbox_json else "missing-bbox",
@@ -1772,6 +1824,8 @@ def save_mapping_review_action(
         confidence=confidence,
         decided_by=decided_by,
         note=reviewer_note,
+        company_name=str(item.get("公司名", "") or item.get("company_name", "")),
+        statement_type=str(item.get("statement_type", "") or ""),
     )
     append_mapping_decision_file(mapping_review_dir(job), decision_payload)
     state = load_simple_flow_state(job)

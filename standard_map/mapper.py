@@ -139,6 +139,18 @@ def map_raw_metric(raw: RawMetricRow, registry: StandardRegistry, *, llm_service
     return _enforce_temporal_review(result)
 
 
+def _alias_applies_to_raw(entry, raw: RawMetricRow) -> bool:
+    company_scope = str(getattr(entry, "scope_company", "*") or "*").strip()
+    statement_scope = str(getattr(entry, "scope_statement_type", "*") or "*").strip()
+    company_name = str(raw.company_name or "").strip()
+    statement_type = str(raw.provenance.get("statement_type", "") or "").strip()
+    return (
+        company_scope in {"", "*"} or company_scope == company_name
+    ) and (
+        statement_scope in {"", "*"} or statement_scope == statement_type
+    )
+
+
 def _map_raw_metric_core(raw: RawMetricRow, registry: StandardRegistry, *, llm_service: LLMSuggestionService | None = None) -> MappingResult:
     normalized = normalize_metric_name(raw.metric_name)
     if not normalized:
@@ -155,12 +167,20 @@ def _map_raw_metric_core(raw: RawMetricRow, registry: StandardRegistry, *, llm_s
         )
 
     alias_entries = registry.normalized_alias_lookup.get(normalized, [])
-    local_alias_entries = [entry for entry in alias_entries if entry.source != "base"]
+    local_alias_entries = [
+        entry
+        for entry in alias_entries
+        if entry.source != "base" and _alias_applies_to_raw(entry, raw)
+    ]
     if local_alias_entries:
         return _map_alias_entries(raw, local_alias_entries, method="local_alias", note="按人工记住的本地别名匹配。")
 
     legacy_entries = registry.normalized_legacy_alias_lookup.get(normalized, [])
-    local_legacy_entries = [entry for entry in legacy_entries if entry.source != "base"]
+    local_legacy_entries = [
+        entry
+        for entry in legacy_entries
+        if entry.source != "base" and _alias_applies_to_raw(entry, raw)
+    ]
     if local_legacy_entries:
         return _map_alias_entries(raw, local_legacy_entries, method="local_alias", note="按人工记住的本地旧名称匹配。")
 
