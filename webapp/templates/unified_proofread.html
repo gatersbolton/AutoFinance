@@ -137,7 +137,6 @@
             <table class="spreadsheet-table unified-review-table" data-unified-table>
                 <colgroup>
                     <col class="unified-col-original-term">
-                    <col class="unified-col-item-date">
                     <col class="unified-col-period-value">
                     <col class="unified-col-period-value">
                     <col class="unified-col-standard-term">
@@ -147,7 +146,6 @@
                 <thead>
                     <tr>
                         <th class="row-heading">原始术语</th>
-                        <th>表格日期</th>
                         <th>期间数值一</th>
                         <th>期间数值二</th>
                         <th>标准术语</th>
@@ -158,11 +156,61 @@
                 <tbody>
                     {% for row in items %}
                     {% if row.starts_section %}
-                    <tr class="table-section-row" data-section-header data-section-key="{{ row.section_key }}">
-                        <th colspan="2">{{ row.section_label }}</th>
-                        {% for column in row.period_columns %}
-                        <th class="period-section-heading">{{ column.label }}</th>
-                        {% endfor %}
+                    <tr
+                        class="table-section-row"
+                        data-section-header
+                        data-section-key="{{ row.display_section_key or row.section_key }}"
+                        data-review-item-id="{{ row.review_item_id }}"
+                        data-raw-metric-id="{{ row.raw_metric_id }}"
+                        data-raw-metric-ids="{{ row.section_raw_metric_ids_joined }}"
+                        data-date-changed="{{ 'true' if row.section_date_changed else 'false' }}"
+                        data-unit-changed="{{ 'true' if row.section_unit_changed else 'false' }}"
+                        data-temporal-review-required="{{ 'true' if row.section_temporal_review_required else 'false' }}"
+                        data-original-temporal-review-required="{{ 'true' if row.section_original_temporal_review_required else 'false' }}"
+                    >
+                        <th colspan="6" class="section-metadata-cell">
+                            <div class="section-metadata-bar">
+                                <strong class="section-metadata-title">{{ row.section_label }}</strong>
+                                <span class="section-metadata-page">第{{ row.source_page_no or "?" }}页</span>
+                                <label class="section-metadata-control {% if row.section_date_changed %}section-metadata-control--dirty{% endif %}" data-section-date-cell>
+                                    <span>填表日期：</span>
+                                    <input
+                                        class="metric-date-input"
+                                        type="date"
+                                        value="{{ row.section_current_fill_date }}"
+                                        data-section-date-input
+                                        data-original-date="{{ row.section_original_fill_date }}"
+                                        data-current-date="{{ row.section_current_fill_date }}"
+                                        data-saved-date="{{ row.section_current_fill_date }}"
+                                        {% if row.section_date_mixed %}data-mixed="true" title="当前表内日期不一致，请选择统一日期"{% endif %}
+                                        autocomplete="off"
+                                    >
+                                    <button class="cell-reset" type="button" data-reset-section-date {% if not row.section_date_mixed and not row.section_date_changed %}hidden{% endif %}>重置</button>
+                                    <small class="cell-error" data-section-date-error hidden>请选择有效日期</small>
+                                </label>
+                                {% if row.section_has_amounts %}
+                                <label class="section-metadata-control {% if row.section_unit_changed %}section-metadata-control--dirty{% endif %}" data-section-unit-cell>
+                                    <span>单位：</span>
+                                    <select
+                                        data-section-unit-select
+                                        data-original-unit="{{ row.section_original_unit }}"
+                                        data-current-unit="{{ row.section_current_unit }}"
+                                        data-saved-unit="{{ row.section_current_unit }}"
+                                        {% if row.section_unit_mixed %}data-mixed="true" title="当前表内单位不一致，请选择统一单位"{% endif %}
+                                    >
+                                        {% for unit in row.section_supported_amount_units %}
+                                        <option value="{{ unit }}" {% if unit == row.section_current_unit %}selected{% endif %}>{{ unit }}</option>
+                                        {% endfor %}
+                                    </select>
+                                    <button class="cell-reset" type="button" data-reset-section-unit {% if not row.section_unit_mixed and not row.section_unit_changed %}hidden{% endif %}>重置单位</button>
+                                </label>
+                                {% endif %}
+                            </div>
+                        </th>
+                    </tr>
+                    <tr class="table-period-row" data-section-period-header data-section-key="{{ row.display_section_key or row.section_key }}">
+                        <th></th>
+                        {% for column in row.period_columns %}<th>{{ column.label }}</th>{% endfor %}
                         <th colspan="3"></th>
                     </tr>
                     {% endif %}
@@ -181,7 +229,7 @@
                         data-bbox-state="{{ row.bbox_state }}"
                         data-original-metric-name="{{ row.original_metric_name }}"
                         data-current-mapping-label="{{ row.current_mapping_label }}"
-                        data-section-key="{{ row.section_key }}"
+                        data-section-key="{{ row.display_section_key or row.section_key }}"
                         data-base-status-code="{{ row.base_status }}"
                         data-base-status-label="{{ row.base_status_label }}"
                         data-temporal-review-required="{{ 'true' if row.temporal_review_required else 'false' }}"
@@ -197,27 +245,10 @@
                     >
                         <th class="row-heading unified-term-cell" data-unified-term-cell>
                             <span>{{ row.original_metric_name or "未记录" }}</span>
-                            <small class="row-page-chip" data-row-page-chip hidden>第{{ row.source_page_no or "?" }}页</small>
                             {% if row.text_confidence_available %}
                             <span class="confidence-inline confidence-inline--{{ row.text_confidence_level }}" data-ocr-confidence-text hidden>{{ row.text_confidence_display }}</span>
                             {% endif %}
                         </th>
-                        <td class="metric-date-cell {% if row.date_changed %}metric-cell--dirty{% endif %}" data-date-cell>
-                            <div class="cell-edit-wrap">
-                                <input
-                                    class="metric-date-input"
-                                    type="date"
-                                    value="{{ row.current_fill_date }}"
-                                    data-metric-date-input
-                                    data-original-date="{{ row.original_fill_date }}"
-                                    data-current-date="{{ row.current_fill_date }}"
-                                    data-saved-date="{{ row.current_fill_date }}"
-                                    autocomplete="off"
-                                >
-                                <button class="cell-reset" type="button" data-reset-date hidden>重置</button>
-                            </div>
-                            <span class="cell-error" data-date-error hidden>请选择有效日期</span>
-                        </td>
                         {% for value in row.period_values %}
                         <td
                             class="metric-value-cell {% if value.cell_changed %}metric-cell--dirty{% endif %} {% if not value.available %}metric-value-cell--empty{% endif %}"
@@ -245,29 +276,6 @@
                                 >
                                 <button class="cell-reset" type="button" data-reset-value hidden>重置</button>
                             </div>
-                            {% if value.value_type == "amount" %}
-                            <div class="unit-edit-wrap">
-                                <label>
-                                    原单位
-                                    <select
-                                        data-source-unit-select
-                                        data-original-unit="{{ value.original_unit }}"
-                                        data-current-unit="{{ value.current_unit }}"
-                                        data-saved-unit="{{ value.current_unit }}"
-                                        data-raw-value="{{ value.value_raw }}"
-                                    >
-                                        {% if value.current_unit and value.current_unit not in value.supported_amount_units %}
-                                        <option value="{{ value.current_unit }}">{{ value.current_unit }}</option>
-                                        {% endif %}
-                                        {% for unit in value.supported_amount_units %}
-                                        <option value="{{ unit }}" {% if unit == value.current_unit %}selected{% endif %}>{{ unit }}</option>
-                                        {% endfor %}
-                                    </select>
-                                </label>
-                                <span>→ 人民币元</span>
-                                <button class="cell-reset" type="button" data-reset-unit hidden>重置单位</button>
-                            </div>
-                            {% endif %}
                             {% if value.value_confidence_available %}
                             <span class="confidence-inline confidence-inline--{{ value.value_confidence_level }}" data-ocr-confidence-text hidden>{{ value.value_confidence_display }}</span>
                             {% endif %}

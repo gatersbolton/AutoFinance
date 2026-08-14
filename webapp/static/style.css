@@ -1277,7 +1277,7 @@ td {
 }
 
 .unified-review-table {
-    min-width: 1260px;
+    min-width: 1140px;
     table-layout: fixed;
 }
 
@@ -1295,10 +1295,6 @@ td {
 
 .unified-col-original-term {
     width: 120px;
-}
-
-.unified-col-item-date {
-    width: 118px;
 }
 
 .unified-col-period-value {
@@ -1342,6 +1338,76 @@ td {
     font-weight: 700;
 }
 
+.table-section-row .section-metadata-cell {
+    padding: 9px 12px;
+    text-align: left;
+}
+
+.section-metadata-bar {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px 14px;
+}
+
+.section-metadata-title {
+    margin-right: auto;
+    font-size: 0.96rem;
+}
+
+.section-metadata-page {
+    white-space: nowrap;
+}
+
+.section-metadata-control {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    min-height: 34px;
+    border-radius: 8px;
+    padding: 2px 5px;
+    color: var(--text);
+    font-weight: 600;
+    white-space: nowrap;
+}
+
+.section-metadata-control--dirty {
+    background: rgba(168, 104, 10, 0.13);
+}
+
+.section-metadata-control .metric-date-input {
+    width: 148px;
+    min-height: 30px;
+    padding: 4px 6px;
+}
+
+.section-metadata-control select {
+    min-width: 74px;
+    min-height: 30px;
+    border: 1px solid var(--line);
+    border-radius: 7px;
+    padding: 4px 6px;
+    background: white;
+    color: var(--ink);
+    font: inherit;
+}
+
+.section-metadata-control .cell-reset {
+    min-height: 28px;
+    padding: 3px 7px;
+}
+
+.section-metadata-control .cell-error {
+    margin: 0;
+}
+
+.table-period-row th {
+    background: #f5f1e9;
+    color: var(--muted);
+    font-size: 0.82rem;
+    text-align: center;
+}
+
 .table-section-row th:first-child {
     left: 0;
     z-index: 5;
@@ -1356,14 +1422,6 @@ td {
     display: flex;
     align-items: center;
     gap: 6px;
-}
-
-.metric-date-cell .cell-edit-wrap {
-    flex-wrap: wrap;
-}
-
-.metric-date-cell .cell-reset {
-    margin-left: auto;
 }
 
 .metric-value-cell .cell-edit-wrap {
@@ -1410,29 +1468,6 @@ td {
 .metric-date-cell.metric-cell--dirty,
 .unified-standard-term-picker.mapping-row--dirty {
     background: rgba(168, 104, 10, 0.1);
-}
-
-.unit-edit-wrap {
-    display: flex;
-    align-items: center;
-    flex-wrap: wrap;
-    gap: 6px;
-    margin-top: 5px;
-    color: var(--muted);
-    font-size: 12px;
-}
-
-.unit-edit-wrap label {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-}
-
-.unit-edit-wrap select {
-    min-height: 28px;
-    border: 1px solid var(--line);
-    border-radius: 7px;
-    background: #fff;
 }
 
 .metric-value-cell--empty {

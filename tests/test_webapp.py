@@ -19,6 +19,7 @@ from project_paths import REPO_ROOT
 from scripts.deployment_check import main as deployment_check_main
 from standard_map.store import LocalMappingStore
 from standard_map.search import search_standard_terms
+from webapp.accounting_export import build_accounting_workbook
 from webapp.config import WebAppSettings
 from webapp.deployment import run_deployment_preflight
 from webapp.document_library import (
@@ -1621,6 +1622,7 @@ class WebAppTests(unittest.TestCase):
         summary = json.loads(Path(state["accounting_export_summary"]).read_text(encoding="utf-8"))
         self.assertEqual(summary["written_cells_total"], 1)
         self.assertEqual(summary["conflicted_cells_total"], 0)
+        self.assertEqual(summary["skipped_reason_counts"], {})
         download = self.client.get(f"/jobs/{job_id}/download/accounting_workbook")
         self.assertEqual(download.status_code, 200)
 
@@ -1643,6 +1645,87 @@ class WebAppTests(unittest.TestCase):
         stale_download = self.client.get(f"/jobs/{job_id}/download/accounting_workbook")
         self.assertEqual(stale_download.status_code, 409)
         self.assertEqual(stale_download.json()["detail"], "校对结果已变化，请重新生成会计报表。")
+
+    def test_accounting_export_migrates_legacy_code_by_matching_subject_name(self):
+        current_csv = self.temp_path / "legacy-code-current.csv"
+        self._write_csv(
+            current_csv,
+            [
+                {
+                    "填表日期": "2022-12-31",
+                    "当前条目日期": "2022-12-31",
+                    "期间类型": "期末数",
+                    "报表类型": "",
+                    "标准指标编码": "ZT_002",
+                    "标准指标名称": "短期借款",
+                    "指标数值": "136000000",
+                    "是否需要人工校对": "否",
+                },
+                {
+                    "填表日期": "2022-12-31",
+                    "当前条目日期": "2022-12-31",
+                    "期间类型": "期末数",
+                    "报表类型": "",
+                    "标准指标编码": "ZT_002",
+                    "标准指标名称": "无法识别科目",
+                    "指标数值": "99",
+                    "是否需要人工校对": "否",
+                },
+            ],
+            [
+                "填表日期",
+                "当前条目日期",
+                "期间类型",
+                "报表类型",
+                "标准指标编码",
+                "标准指标名称",
+                "指标数值",
+                "是否需要人工校对",
+            ],
+        )
+        output = self.temp_path / "legacy-code-accounting.xlsx"
+        summary = build_accounting_workbook(
+            template_path=self.template_path,
+            current_data_csv=current_csv,
+            output_path=output,
+        )
+
+        self.assertEqual(summary["written_cells_total"], 1)
+        self.assertEqual(
+            summary["skipped_reason_counts"],
+            {"标准指标编码与名称不一致，请重新映射": 1},
+        )
+        workbook = load_workbook(output, data_only=True)
+        sheet = workbook[workbook.sheetnames[0]]
+        self.assertEqual(sheet["B71"].value, 136000000)
+        self.assertIsNone(sheet["B5"].value)
+        explanation = workbook["生成说明"]
+        explanation_values = [cell.value for row in explanation.iter_rows() for cell in row]
+        self.assertIn("未写入：标准指标编码与名称不一致，请重新映射", explanation_values)
+        workbook.close()
+
+        blank_code_csv = self.temp_path / "blank-code-current.csv"
+        blank_code_row = {
+            "填表日期": "2022-12-31",
+            "当前条目日期": "2022-12-31",
+            "期间类型": "期末数",
+            "报表类型": "",
+            "标准指标编码": "",
+            "标准指标名称": "短期借款",
+            "指标数值": "1",
+            "是否需要人工校对": "否",
+        }
+        self._write_csv(blank_code_csv, [blank_code_row], list(blank_code_row))
+        blank_code_summary = build_accounting_workbook(
+            template_path=self.template_path,
+            current_data_csv=blank_code_csv,
+            output_path=self.temp_path / "blank-code-accounting.xlsx",
+        )
+        self.assertEqual(blank_code_summary["written_cells_total"], 0)
+        self.assertEqual(
+            blank_code_summary["skipped_reason_counts"],
+            {"未映射到当前会计报表模板": 1},
+        )
 
     def test_raw_review_page_loads_and_raw_actions_are_saved(self):
         job_id = self._create_job("raw review")
@@ -1983,12 +2066,19 @@ class WebAppTests(unittest.TestCase):
         response = self.client.get(f"/jobs/{job_id}/proofread")
         self.assertEqual(response.status_code, 200)
         self.assertIn("data-unified-proofread-workbench", response.text)
-        self.assertIn("/static/app.js?v=current-review-20260729-1", response.text)
+        self.assertIn("/static/app.js?v=current-review-20260813-1", response.text)
+        self.assertIn("/static/style.css?v=current-review-20260813-1", response.text)
         self.assertIn("source-panel", response.text)
         self.assertIn("sheet-panel", response.text)
         self.assertIn("data-page-image-key=", response.text)
-        for text in ("原始术语", "表格日期", "期间数值一", "期间数值二", "期末数", "标准术语", "状态", "映射决策"):
+        for text in ("原始术语", "填表日期：", "单位：", "期间数值一", "期间数值二", "期末数", "标准术语", "状态", "映射决策"):
             self.assertIn(text, response.text)
+        self.assertNotIn("<th>表格日期</th>", response.text)
+        self.assertEqual(response.text.count("data-section-date-input"), 1)
+        self.assertEqual(response.text.count("data-section-unit-select"), 1)
+        self.assertEqual(response.text.count("section-metadata-page"), 1)
+        self.assertNotIn("原单位", response.text)
+        self.assertNotIn("→ 人民币元", response.text)
         self.assertNotIn("期间类型", response.text)
         self.assertIn("资产负债表", response.text)
         self.assertNotIn("来源表 0", response.text)
@@ -2117,8 +2207,10 @@ class WebAppTests(unittest.TestCase):
 
         page = self.client.get(f"/jobs/{job_id}/proofread")
         self.assertEqual(page.status_code, 200)
-        self.assertIn("data-metric-date-input", page.text)
-        self.assertIn("data-source-unit-select", page.text)
+        self.assertIn("data-section-date-input", page.text)
+        self.assertIn("data-section-unit-select", page.text)
+        self.assertEqual(page.text.count("data-section-date-input"), 1)
+        self.assertEqual(page.text.count("data-section-unit-select"), 1)
         self.assertIn("保存并生成会计报表", page.text)
 
         response = self.client.post(
@@ -2166,6 +2258,139 @@ class WebAppTests(unittest.TestCase):
         self.assertIn('data-date-changed="true"', saved_page.text)
         self.assertIn('data-unit-changed="true"', saved_page.text)
         self.assertNotIn("日期待校对", saved_page.text)
+
+    def test_unified_proofread_section_metadata_updates_every_row_in_one_table(self):
+        job_id = self._create_job("unified table metadata")
+        raw_path = self._create_raw_metrics_fixture(metric_name="货币资金", metric_value="1000000.00")
+        run_dir = raw_path.parent
+        raw_ids = [
+            "CASE1:1:aliyun_table:0:1-1:2-2",
+            "CASE1:1:aliyun_table:0:2-2:2-2",
+        ]
+        rows = [
+            {
+                "填表日期": "2022-12-31",
+                "当前条目日期": "2022-12-31",
+                "公司名": "AAA有限公司",
+                "指标名": metric_name,
+                "指标数值": value,
+            }
+            for metric_name, value in (("货币资金", "1000000.00"), ("短期借款", "2000000.00"))
+        ]
+        self._write_csv(
+            raw_path,
+            rows,
+            ["填表日期", "当前条目日期", "公司名", "指标名", "指标数值"],
+        )
+        detailed_path = run_dir / "raw_metrics_detailed.csv"
+        with detailed_path.open("r", encoding="utf-8-sig", newline="") as handle:
+            fieldnames = list(csv.DictReader(handle).fieldnames or [])
+        detailed_rows = []
+        for index, (raw_id, metric_name, value) in enumerate(
+            zip(raw_ids, ("货币资金", "短期借款"), ("100.00", "200.00")),
+            start=1,
+        ):
+            detailed_rows.append(
+                {
+                    "source_cell_ref": raw_id,
+                    "page_no": "1",
+                    "bbox_json": '[{"x":1,"y":2},{"x":3,"y":4}]',
+                    "evidence_path": str(self.corpus_root / "CASE1" / "input" / "sample.pdf"),
+                    "source_file": "fixture.json",
+                    "provider": "aliyun_table",
+                    "doc_id": "CASE1",
+                    "table_id": "0",
+                    "logical_subtable_id": f"0_sub{index}",
+                    "row_index": str(index),
+                    "col_index": "2",
+                    "row_label_clean": metric_name,
+                    "period_role_raw": "期末数",
+                    "period_role_norm": "ending",
+                    "statement_type": "balance_sheet",
+                    "statement_name_raw": "资产负债表",
+                    "value_type": "amount",
+                    "value_raw": value,
+                    "unit_raw": "万元",
+                    "unit_multiplier": "10000",
+                }
+            )
+        self._write_csv(detailed_path, detailed_rows, fieldnames)
+        self.client.post(
+            f"/jobs/{job_id}/standard-metrics/run",
+            data={"raw_metrics_path": str(raw_path)},
+            follow_redirects=False,
+        )
+
+        page = self.client.get(f"/jobs/{job_id}/proofread")
+        self.assertEqual(page.status_code, 200)
+        self.assertEqual(page.text.count("data-section-date-input"), 1)
+        self.assertEqual(page.text.count("data-section-unit-select"), 1)
+        self.assertEqual(page.text.count("section-metadata-page"), 1)
+        self.assertIn("资产负债表", page.text)
+        self.assertNotIn("资产负债表-左半部分", page.text)
+        self.assertNotIn("资产负债表-右半部分", page.text)
+
+        response = self.client.post(
+            f"/jobs/{job_id}/proofread/save",
+            json={
+                "edits": [
+                    {
+                        "item_id": "unirev_000001",
+                        "raw_metric_id": raw_ids[0],
+                        "raw_metric_ids": raw_ids,
+                        "edit_type": "date_change",
+                        "previous_date": "2022-12-31",
+                        "new_date": "2023-12-31",
+                    },
+                    {
+                        "item_id": "unirev_000001",
+                        "raw_metric_id": raw_ids[0],
+                        "raw_metric_ids": raw_ids,
+                        "edit_type": "unit_change",
+                        "previous_unit": "万元",
+                        "new_unit": "千元",
+                    },
+                ]
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["date_changes_total"], 2)
+        self.assertEqual(response.json()["unit_changes_total"], 2)
+        state = load_simple_flow_state(get_job(self.settings, job_id))
+        with Path(state["combined_metrics_csv"]).open("r", encoding="utf-8-sig", newline="") as handle:
+            saved_rows = list(csv.DictReader(handle))
+        self.assertEqual([row["填表日期"] for row in saved_rows], ["2023-12-31", "2023-12-31"])
+        self.assertEqual([row["原始单位"] for row in saved_rows], ["千元", "千元"])
+        self.assertEqual([row["指标数值"] for row in saved_rows], ["100000.00", "200000.00"])
+
+        reset_response = self.client.post(
+            f"/jobs/{job_id}/proofread/save",
+            json={
+                "edits": [
+                    {
+                        "item_id": "unirev_000001",
+                        "raw_metric_id": raw_ids[0],
+                        "raw_metric_ids": raw_ids,
+                        "edit_type": "reset_date",
+                        "previous_date": "2023-12-31",
+                    },
+                    {
+                        "item_id": "unirev_000001",
+                        "raw_metric_id": raw_ids[0],
+                        "raw_metric_ids": raw_ids,
+                        "edit_type": "reset_unit",
+                        "previous_unit": "千元",
+                    },
+                ]
+            },
+        )
+        self.assertEqual(reset_response.status_code, 200)
+        reset_state = load_simple_flow_state(get_job(self.settings, job_id))
+        with Path(reset_state["combined_metrics_csv"]).open("r", encoding="utf-8-sig", newline="") as handle:
+            reset_rows = list(csv.DictReader(handle))
+        self.assertEqual([row["填表日期"] for row in reset_rows], ["2022-12-31", "2022-12-31"])
+        self.assertEqual([row["原始单位"] for row in reset_rows], ["万元", "万元"])
+        self.assertEqual([row["指标数值"] for row in reset_rows], ["1000000.00", "2000000.00"])
 
     def test_unified_proofread_merges_beginning_and_ending_values_into_one_row(self):
         job_id = self._create_job("unified merged periods")
@@ -2667,7 +2892,11 @@ class WebAppTests(unittest.TestCase):
         self.assertIn("valueInput.dataset.savedValue", script)
         self.assertIn("data-ocr-confidence-text", script)
         self.assertIn("openUnifiedDownloadPreview", script)
-        self.assertIn("data-row-page-chip", script)
+        self.assertIn("data-section-date-input", script)
+        self.assertIn("data-section-unit-select", script)
+        self.assertNotIn("data-row-page-chip", script)
+        self.assertIn("sectionRowsToSort", script)
+        self.assertIn("header.hidden = !hasVisibleRows", script)
         self.assertNotIn('setAttribute("data-original-value"', script)
         self.assertNotIn("search();\n    });\n    input.addEventListener(\"click\"", script)
         style = (REPO_ROOT / "webapp" / "static" / "style.css").read_text(encoding="utf-8")

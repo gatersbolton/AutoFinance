@@ -3,7 +3,7 @@ from __future__ import annotations
 import csv
 import json
 import re
-from collections import defaultdict
+from collections import Counter, defaultdict
 from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -40,6 +40,8 @@ def build_accounting_workbook(
     rows = _read_csv(current_csv)
     subjects, sheet_name, header_row = load_template_subjects(template)
     subject_codes = {subject.code for subject in subjects}
+    template_name_by_code = {subject.code: subject.canonical_name for subject in subjects}
+    template_code_by_name = {_normalized_subject_name(subject.canonical_name): subject.code for subject in subjects}
     registry = load_standard_registry()
     term_scopes = {
         code: str(term.statement_scope or "")
@@ -55,6 +57,8 @@ def build_accounting_workbook(
             row,
             row_number=row_number,
             subject_codes=subject_codes,
+            template_name_by_code=template_name_by_code,
+            template_code_by_name=template_code_by_name,
             term_scopes=term_scopes,
         )
         if candidate is None:
@@ -89,6 +93,10 @@ def build_accounting_workbook(
                 }
             )
 
+    skipped_reason_counts = dict(
+        sorted(Counter(str(row.get("未写入原因", "") or "未说明") for row in skipped).items())
+    )
+
     workbook = load_workbook(template)
     worksheet = workbook[sheet_name]
     cleanup = sanitize_template_output_sheet(worksheet, header_row)
@@ -115,6 +123,7 @@ def build_accounting_workbook(
         "rows_total": len(rows),
         "written_cells_total": len(selected),
         "skipped_rows_total": len(skipped),
+        "skipped_reason_counts": skipped_reason_counts,
         "conflicted_cells_total": len(conflicts),
         "period_keys": period_keys,
         "template_values_cleared_total": cleanup["values_cleared_total"],
@@ -143,10 +152,19 @@ def _accounting_candidate(
     *,
     row_number: int,
     subject_codes: set[str],
+    template_name_by_code: dict[str, str],
+    template_code_by_name: dict[str, str],
     term_scopes: dict[str, str],
 ) -> tuple[dict[str, Any] | None, str]:
     code = str(row.get("标准指标编码", "") or "").strip().upper()
     name = str(row.get("标准指标名称", "") or "").strip()
+    expected_name = template_name_by_code.get(code, "")
+    if expected_name and _normalized_subject_name(expected_name) != _normalized_subject_name(name):
+        migrated_code = template_code_by_name.get(_normalized_subject_name(name), "")
+        if migrated_code:
+            code = migrated_code
+        else:
+            return None, "标准指标编码与名称不一致，请重新映射"
     if code not in subject_codes:
         return None, "未映射到当前会计报表模板"
     if _is_yes(row.get("是否需要人工校对", "")):
@@ -224,6 +242,8 @@ def _write_explanation_sheet(workbook, summary: dict[str, Any], skipped: list[di
     )
     for label, value in labels:
         sheet.append([label, value])
+    for reason, total in summary.get("skipped_reason_counts", {}).items():
+        sheet.append([f"未写入：{reason}", total])
     sheet.append([])
     headers = ["行号", "标准指标编码", "标准指标名称", "期间", "指标数值", "未写入原因"]
     sheet.append(headers)
@@ -274,6 +294,12 @@ def _parse_date(value: Any) -> date | None:
         return date.fromisoformat(text)
     except ValueError:
         return None
+
+
+def _normalized_subject_name(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    text = text.replace("（", "(").replace("）", ")").replace("：", ":")
+    return re.sub(r"[\s,，]", "", text)
 
 
 def _is_yes(value: Any) -> bool:

@@ -802,22 +802,6 @@ function updateValueResetVisibility(input) {
     }
 }
 
-function updateDateResetVisibility(input) {
-    const cell = input.closest("[data-date-cell]");
-    const reset = cell ? cell.querySelector("[data-reset-date]") : null;
-    if (reset) {
-        reset.hidden = !isDateChangedFromOriginal(input);
-    }
-}
-
-function updateUnitResetVisibility(select) {
-    const cell = select.closest("[data-value-cell]");
-    const reset = cell ? cell.querySelector("[data-reset-unit]") : null;
-    if (reset) {
-        reset.hidden = !isUnitChangedFromOriginal(select);
-    }
-}
-
 function updateValuePrecisionNote(input, parsed = null) {
     const cell = input.closest("[data-value-cell]");
     const note = cell ? cell.querySelector("[data-value-precision-note]") : null;
@@ -927,9 +911,24 @@ function resetUnifiedValue(row, input) {
     updateUnifiedStatus(row);
 }
 
-function markUnifiedDateChanged(row, input) {
-    const cell = input.closest("[data-date-cell]");
-    const error = cell ? cell.querySelector("[data-date-error]") : null;
+function sectionRows(root, header) {
+    const sectionKey = header.getAttribute("data-section-key") || "";
+    return Array.from(root.querySelectorAll("[data-unified-row]")).filter(
+        (row) => (row.getAttribute("data-section-key") || "") === sectionKey,
+    );
+}
+
+function updateSectionDateResetVisibility(input) {
+    const cell = input.closest("[data-section-date-cell]");
+    const reset = cell?.querySelector("[data-reset-section-date]");
+    if (reset) {
+        reset.hidden = !isDateChangedFromOriginal(input) && input.dataset.mixed !== "true";
+    }
+}
+
+function markSectionDateChanged(root, header, input) {
+    const cell = input.closest("[data-section-date-cell]");
+    const error = cell?.querySelector("[data-section-date-error]");
     const currentDate = input.value || "";
     const originalDate = input.getAttribute("data-original-date") || "";
     const savedDate = input.dataset.savedDate || originalDate;
@@ -943,106 +942,99 @@ function markUnifiedDateChanged(row, input) {
         return;
     }
     input.dataset.currentDate = currentDate;
+    input.dataset.mixed = "false";
     const resetPending = currentDate === originalDate && savedDate !== originalDate;
     input.dataset.dirty = currentDate !== savedDate && !resetPending ? "true" : "false";
     if (cell) {
         cell.dataset.resetPending = resetPending ? "true" : "false";
-        cell.classList.toggle("metric-cell--dirty", currentDate !== originalDate);
+        cell.classList.toggle("section-metadata-control--dirty", currentDate !== originalDate);
     }
-    row.dataset.dateChanged = currentDate !== originalDate ? "true" : "false";
-    row.dataset.temporalReviewRequired = "false";
-    updateDateResetVisibility(input);
-    updateUnifiedStatus(row);
+    const changed = currentDate !== originalDate;
+    header.dataset.dateChanged = changed ? "true" : "false";
+    header.dataset.temporalReviewRequired = "false";
+    sectionRows(root, header).forEach((row) => {
+        row.dataset.dateChanged = changed ? "true" : "false";
+        row.dataset.temporalReviewRequired = "false";
+        updateUnifiedStatus(row);
+    });
+    updateSectionDateResetVisibility(input);
 }
 
-function resetUnifiedDate(row, input) {
-    const cell = input.closest("[data-date-cell]");
+function resetSectionDate(root, header, input) {
+    const cell = input.closest("[data-section-date-cell]");
     const originalDate = input.getAttribute("data-original-date") || "";
     const savedDate = input.dataset.savedDate || originalDate;
     input.value = originalDate;
     input.dataset.currentDate = originalDate;
     input.dataset.dirty = "false";
+    input.dataset.mixed = "false";
     input.classList.remove("metric-value-input--invalid");
     if (cell) {
         cell.dataset.resetPending = savedDate !== originalDate ? "true" : "false";
-        cell.classList.remove("metric-cell--dirty");
-        const error = cell.querySelector("[data-date-error]");
+        cell.classList.remove("section-metadata-control--dirty");
+        const error = cell.querySelector("[data-section-date-error]");
         if (error) {
             error.hidden = true;
         }
     }
-    row.dataset.dateChanged = "false";
-    row.dataset.temporalReviewRequired = row.dataset.originalTemporalReviewRequired || "false";
-    updateDateResetVisibility(input);
-    updateUnifiedStatus(row);
+    header.dataset.dateChanged = "false";
+    header.dataset.temporalReviewRequired = header.dataset.originalTemporalReviewRequired || "false";
+    sectionRows(root, header).forEach((row) => {
+        row.dataset.dateChanged = "false";
+        row.dataset.temporalReviewRequired = row.dataset.originalTemporalReviewRequired || "false";
+        updateUnifiedStatus(row);
+    });
+    updateSectionDateResetVisibility(input);
 }
 
-function normalizedYuanFromRaw(rawValue, unit) {
-    let text = String(rawValue || "").trim();
-    const negative = text.startsWith("(") && text.endsWith(")");
-    if (negative) {
-        text = `-${text.slice(1, -1)}`;
+function updateSectionUnitResetVisibility(select) {
+    const cell = select.closest("[data-section-unit-cell]");
+    const reset = cell?.querySelector("[data-reset-section-unit]");
+    if (reset) {
+        reset.hidden = !isUnitChangedFromOriginal(select) && select.dataset.mixed !== "true";
     }
-    text = text.replace(/[￥¥元]/g, "");
-    const parsed = parseMetricNumberInput(text, "amount");
-    if (!parsed.valid) {
-        return "";
-    }
-    const factors = { "元": 1n, "千元": 1000n, "万元": 10000n, "亿元": 100000000n };
-    const factor = factors[unit];
-    if (!factor) {
-        return "";
-    }
-    const match = parsed.value.match(/^([+-]?)(\d+)\.(\d{2})$/);
-    if (!match) {
-        return "";
-    }
-    const cents = BigInt(`${match[2]}${match[3]}`) * factor;
-    const digits = cents.toString().padStart(3, "0");
-    const integer = digits.slice(0, -2);
-    const fraction = digits.slice(-2);
-    return `${match[1] || ""}${integer}.${fraction}`;
 }
 
-function markUnifiedUnitChanged(row, select) {
-    const cell = select.closest("[data-value-cell]");
-    const valueInput = cell ? cell.querySelector("[data-metric-value-input]") : null;
-    const originalUnit = select.getAttribute("data-original-unit") || "";
+function markSectionUnitChanged(root, header, select) {
+    const cell = select.closest("[data-section-unit-cell]");
+    const originalUnit = select.getAttribute("data-original-unit") || "元";
     const savedUnit = select.dataset.savedUnit || originalUnit;
-    const currentUnit = select.value || "";
+    const currentUnit = select.value || "元";
     const resetPending = currentUnit === originalUnit && savedUnit !== originalUnit;
     select.dataset.currentUnit = currentUnit;
+    select.dataset.mixed = "false";
     select.dataset.dirty = currentUnit !== savedUnit && !resetPending ? "true" : "false";
-    select.dataset.resetPending = resetPending ? "true" : "false";
-    if (valueInput) {
-        const normalized = normalizedYuanFromRaw(select.dataset.rawValue || "", currentUnit);
-        if (normalized) {
-            valueInput.value = formatMetricNumber(normalized, valueInput.getAttribute("data-value-type") || "");
-            valueInput.dataset.currentValue = normalized;
-            markUnifiedValueChanged(row, valueInput);
-        }
-    }
-    row.dataset.unitChanged = isUnitChangedFromOriginal(select) ? "true" : "false";
     if (cell) {
-        cell.classList.toggle("metric-cell--dirty", row.dataset.unitChanged === "true" || (valueInput && isValueChangedFromOriginal(valueInput)));
+        cell.dataset.resetPending = resetPending ? "true" : "false";
+        cell.classList.toggle("section-metadata-control--dirty", currentUnit !== originalUnit);
     }
-    updateUnitResetVisibility(select);
-    updateUnifiedStatus(row);
+    const changed = currentUnit !== originalUnit;
+    header.dataset.unitChanged = changed ? "true" : "false";
+    sectionRows(root, header).forEach((row) => {
+        row.dataset.unitChanged = changed ? "true" : "false";
+        updateUnifiedStatus(row);
+    });
+    updateSectionUnitResetVisibility(select);
 }
 
-function resetUnifiedUnit(row, select) {
+function resetSectionUnit(root, header, select) {
+    const cell = select.closest("[data-section-unit-cell]");
     const originalUnit = select.getAttribute("data-original-unit") || "元";
     const savedUnit = select.dataset.savedUnit || originalUnit;
     select.value = originalUnit;
     select.dataset.currentUnit = originalUnit;
     select.dataset.dirty = "false";
-    select.dataset.resetPending = savedUnit !== originalUnit ? "true" : "false";
-    markUnifiedUnitChanged(row, select);
-    select.dataset.dirty = "false";
-    select.dataset.resetPending = savedUnit !== originalUnit ? "true" : "false";
-    row.dataset.unitChanged = "false";
-    updateUnitResetVisibility(select);
-    updateUnifiedStatus(row);
+    select.dataset.mixed = "false";
+    if (cell) {
+        cell.dataset.resetPending = savedUnit !== originalUnit ? "true" : "false";
+        cell.classList.remove("section-metadata-control--dirty");
+    }
+    header.dataset.unitChanged = "false";
+    sectionRows(root, header).forEach((row) => {
+        row.dataset.unitChanged = "false";
+        updateUnifiedStatus(row);
+    });
+    updateSectionUnitResetVisibility(select);
 }
 
 function markUnifiedMappingChanged(row, result) {
@@ -1104,16 +1096,17 @@ function resetUnifiedMapping(row) {
 
 function collectUnifiedEdits(root) {
     const edits = [];
-    root.querySelectorAll("[data-unified-row]").forEach((row) => {
-        const itemId = row.getAttribute("data-review-item-id") || "";
-        const rawMetricId = row.getAttribute("data-raw-metric-id") || "";
-        const dateInput = row.querySelector("[data-metric-date-input]");
-        const dateCell = dateInput ? dateInput.closest("[data-date-cell]") : null;
+    root.querySelectorAll("[data-section-header]").forEach((header) => {
+        const itemId = header.getAttribute("data-review-item-id") || "";
+        const rawMetricId = header.getAttribute("data-raw-metric-id") || "";
+        const rawMetricIds = (header.getAttribute("data-raw-metric-ids") || rawMetricId).split(",").filter(Boolean);
+        const dateInput = header.querySelector("[data-section-date-input]");
+        const dateCell = header.querySelector("[data-section-date-cell]");
         if (dateInput && dateInput.dataset.dirty === "true") {
             edits.push({
                 item_id: itemId,
                 raw_metric_id: rawMetricId,
-                raw_metric_ids: (row.getAttribute("data-raw-metric-ids") || rawMetricId).split(",").filter(Boolean),
+                raw_metric_ids: rawMetricIds,
                 edit_type: "date_change",
                 previous_date: dateInput.dataset.savedDate || dateInput.getAttribute("data-original-date") || "",
                 new_date: dateInput.dataset.currentDate || dateInput.value,
@@ -1122,42 +1115,44 @@ function collectUnifiedEdits(root) {
             edits.push({
                 item_id: itemId,
                 raw_metric_id: rawMetricId,
-                raw_metric_ids: (row.getAttribute("data-raw-metric-ids") || rawMetricId).split(",").filter(Boolean),
+                raw_metric_ids: rawMetricIds,
                 edit_type: "reset_date",
                 previous_date: dateInput.dataset.savedDate || "",
                 new_date: dateInput.getAttribute("data-original-date") || "",
             });
         }
+        const unitSelect = header.querySelector("[data-section-unit-select]");
+        const unitCell = header.querySelector("[data-section-unit-cell]");
+        if (unitSelect && unitSelect.dataset.dirty === "true") {
+            edits.push({
+                item_id: itemId,
+                raw_metric_id: rawMetricId,
+                raw_metric_ids: rawMetricIds,
+                edit_type: "unit_change",
+                previous_unit: unitSelect.dataset.savedUnit || unitSelect.getAttribute("data-original-unit") || "",
+                new_unit: unitSelect.dataset.currentUnit || unitSelect.value,
+            });
+        } else if (unitSelect && unitCell && unitCell.dataset.resetPending === "true") {
+            edits.push({
+                item_id: itemId,
+                raw_metric_id: rawMetricId,
+                raw_metric_ids: rawMetricIds,
+                edit_type: "reset_unit",
+                previous_unit: unitSelect.dataset.savedUnit || "",
+                new_unit: unitSelect.getAttribute("data-original-unit") || "元",
+            });
+        }
+    });
+    root.querySelectorAll("[data-unified-row]").forEach((row) => {
+        const itemId = row.getAttribute("data-review-item-id") || "";
+        const rawMetricId = row.getAttribute("data-raw-metric-id") || "";
         row.querySelectorAll("[data-metric-value-input]").forEach((valueInput) => {
             const valueCell = valueInput.closest("[data-value-cell]");
             const inputRawMetricId = valueInput.getAttribute("data-raw-metric-id") || valueCell?.getAttribute("data-raw-metric-id") || rawMetricId;
-            const unitSelect = valueCell ? valueCell.querySelector("[data-source-unit-select]") : null;
             if (!inputRawMetricId) {
                 return;
             }
-            if (unitSelect && unitSelect.dataset.dirty === "true") {
-                edits.push({
-                    item_id: itemId,
-                    raw_metric_id: inputRawMetricId,
-                    value_slot: valueInput.getAttribute("data-value-slot") || valueCell?.getAttribute("data-value-slot") || "",
-                    edit_type: "unit_change",
-                    previous_unit: unitSelect.dataset.savedUnit || unitSelect.getAttribute("data-original-unit") || "",
-                    new_unit: unitSelect.dataset.currentUnit || unitSelect.value,
-                    previous_value: valueInput.dataset.savedValue || valueInput.getAttribute("data-original-value") || "",
-                    new_value: valueInput.dataset.currentValue || valueInput.value,
-                });
-            } else if (unitSelect && unitSelect.dataset.resetPending === "true") {
-                edits.push({
-                    item_id: itemId,
-                    raw_metric_id: inputRawMetricId,
-                    value_slot: valueInput.getAttribute("data-value-slot") || valueCell?.getAttribute("data-value-slot") || "",
-                    edit_type: "reset_unit",
-                    previous_unit: unitSelect.dataset.savedUnit || "",
-                    new_unit: unitSelect.getAttribute("data-original-unit") || "元",
-                    previous_value: valueInput.dataset.savedValue || "",
-                    new_value: valueInput.getAttribute("data-original-value") || "",
-                });
-            } else if (valueInput.dataset.dirty === "true") {
+            if (valueInput.dataset.dirty === "true") {
                 const savedValue = valueInput.dataset.savedValue || valueInput.getAttribute("data-original-value") || "";
                 edits.push({
                     item_id: itemId,
@@ -1307,14 +1302,15 @@ function sortUnifiedRows(root) {
             const sectionKey = header.getAttribute("data-section-key") || "";
             const hasVisibleRows = rows.some((row) => !row.hidden && (row.getAttribute("data-section-key") || "") === sectionKey);
             header.hidden = !hasVisibleRows;
-        });
-        root.querySelectorAll("[data-row-page-chip]").forEach((chip) => {
-            chip.hidden = true;
+            const periodHeader = root.querySelector(`[data-section-period-header][data-section-key="${CSS.escape(sectionKey)}"]`);
+            if (periodHeader) {
+                periodHeader.hidden = !hasVisibleRows;
+            }
         });
         return;
     }
 
-    const sortedRows = rows.sort((left, right) => {
+    const compareRows = (left, right) => {
         if (sortValue === "value_confidence_asc" || sortValue === "text_confidence_asc") {
             const key = sortValue === "value_confidence_asc" ? "data-value-confidence" : "data-text-confidence";
             const leftValue = numericDatasetValue(left, key);
@@ -1332,14 +1328,21 @@ function sortUnifiedRows(root) {
             }
         }
         return Number(left.dataset.originalOrder || "0") - Number(right.dataset.originalOrder || "0");
-    });
+    };
     headers.forEach((header) => {
-        header.hidden = true;
+        const sectionKey = header.getAttribute("data-section-key") || "";
+        const sectionRowsToSort = rows
+            .filter((row) => (row.getAttribute("data-section-key") || "") === sectionKey)
+            .sort(compareRows);
+        const hasVisibleRows = sectionRowsToSort.some((row) => !row.hidden);
+        header.hidden = !hasVisibleRows;
         tbody.appendChild(header);
-    });
-    sortedRows.forEach((row) => tbody.appendChild(row));
-    root.querySelectorAll("[data-row-page-chip]").forEach((chip) => {
-        chip.hidden = false;
+        const periodHeader = root.querySelector(`[data-section-period-header][data-section-key="${CSS.escape(sectionKey)}"]`);
+        if (periodHeader) {
+            periodHeader.hidden = !hasVisibleRows;
+            tbody.appendChild(periodHeader);
+        }
+        sectionRowsToSort.forEach((row) => tbody.appendChild(row));
     });
 }
 
@@ -1363,6 +1366,9 @@ function filterUnifiedRows(root) {
         }
     });
     root.querySelectorAll("[data-section-header]").forEach((header) => {
+        header.hidden = !visibleSections.has(header.getAttribute("data-section-key") || "");
+    });
+    root.querySelectorAll("[data-section-period-header]").forEach((header) => {
         header.hidden = !visibleSections.has(header.getAttribute("data-section-key") || "");
     });
     sortUnifiedRows(root);
@@ -1399,13 +1405,13 @@ async function saveUnifiedEdits(root, options = {}) {
             throw new Error(payload.detail || "保存失败");
         }
         const payload = await response.json();
-        root.querySelectorAll("[data-unified-row]").forEach((row) => {
-            const dateInput = row.querySelector("[data-metric-date-input]");
-            const dateCell = dateInput ? dateInput.closest("[data-date-cell]") : null;
+        root.querySelectorAll("[data-section-header]").forEach((header) => {
+            const dateInput = header.querySelector("[data-section-date-input]");
+            const dateCell = header.querySelector("[data-section-date-cell]");
             if (dateInput) {
                 const originalDate = dateInput.getAttribute("data-original-date") || "";
                 const currentDate = dateInput.dataset.currentDate || dateInput.value || originalDate;
-                if (dateCell && dateCell.dataset.resetPending === "true") {
+                if (dateCell?.dataset.resetPending === "true") {
                     dateInput.dataset.savedDate = originalDate;
                     dateInput.value = originalDate;
                     dateInput.dataset.currentDate = originalDate;
@@ -1414,17 +1420,33 @@ async function saveUnifiedEdits(root, options = {}) {
                     dateInput.value = currentDate;
                 }
                 dateInput.dataset.dirty = "false";
-                const changedFromOriginal = isDateChangedFromOriginal(dateInput);
-                row.dataset.dateChanged = changedFromOriginal ? "true" : "false";
-                row.dataset.temporalReviewRequired = changedFromOriginal
-                    ? "false"
-                    : (row.dataset.originalTemporalReviewRequired || "false");
                 if (dateCell) {
                     dateCell.dataset.resetPending = "false";
-                    dateCell.classList.toggle("metric-cell--dirty", changedFromOriginal);
+                    dateCell.classList.toggle("section-metadata-control--dirty", isDateChangedFromOriginal(dateInput));
                 }
-                updateDateResetVisibility(dateInput);
+                updateSectionDateResetVisibility(dateInput);
             }
+            const unitSelect = header.querySelector("[data-section-unit-select]");
+            const unitCell = header.querySelector("[data-section-unit-cell]");
+            if (unitSelect) {
+                const originalUnit = unitSelect.getAttribute("data-original-unit") || "元";
+                const currentUnit = unitSelect.dataset.currentUnit || unitSelect.value || originalUnit;
+                if (unitCell?.dataset.resetPending === "true") {
+                    unitSelect.dataset.savedUnit = originalUnit;
+                    unitSelect.value = originalUnit;
+                    unitSelect.dataset.currentUnit = originalUnit;
+                } else if (unitSelect.dataset.dirty === "true") {
+                    unitSelect.dataset.savedUnit = currentUnit;
+                }
+                unitSelect.dataset.dirty = "false";
+                if (unitCell) {
+                    unitCell.dataset.resetPending = "false";
+                    unitCell.classList.toggle("section-metadata-control--dirty", isUnitChangedFromOriginal(unitSelect));
+                }
+                updateSectionUnitResetVisibility(unitSelect);
+            }
+        });
+        root.querySelectorAll("[data-unified-row]").forEach((row) => {
             row.querySelectorAll("[data-metric-value-input]").forEach((valueInput) => {
                 const valueCell = valueInput.closest("[data-value-cell]");
                 const originalValue = valueInput.getAttribute("data-original-value") || "";
@@ -1442,26 +1464,9 @@ async function saveUnifiedEdits(root, options = {}) {
                     valueCell.dataset.resetPending = "false";
                     valueCell.classList.toggle("metric-cell--dirty", changedFromOriginal);
                 }
-                const unitSelect = valueCell ? valueCell.querySelector("[data-source-unit-select]") : null;
-                if (unitSelect) {
-                    const originalUnit = unitSelect.getAttribute("data-original-unit") || "";
-                    const currentUnit = unitSelect.dataset.currentUnit || unitSelect.value || originalUnit;
-                    if (unitSelect.dataset.resetPending === "true") {
-                        unitSelect.dataset.savedUnit = originalUnit;
-                        unitSelect.value = originalUnit;
-                        unitSelect.dataset.currentUnit = originalUnit;
-                    } else if (unitSelect.dataset.dirty === "true") {
-                        unitSelect.dataset.savedUnit = currentUnit;
-                    }
-                    unitSelect.dataset.dirty = "false";
-                    unitSelect.dataset.resetPending = "false";
-                    updateUnitResetVisibility(unitSelect);
-                }
                 updateValueResetVisibility(valueInput);
             });
             row.dataset.valueChanged = rowHasChangedMetricValue(row) ? "true" : "false";
-            row.dataset.unitChanged = Array.from(row.querySelectorAll("[data-source-unit-select]"))
-                .some((select) => isUnitChangedFromOriginal(select)) ? "true" : "false";
             const picker = row.querySelector("[data-mapping-picker]");
             const mappingInput = row.querySelector("[data-standard-term-input]");
             if (picker) {
@@ -1545,28 +1550,33 @@ function initUnifiedProofreadWorkbench() {
             child.dataset.originalDomOrder = String(index);
         });
     }
-    rows.forEach((row) => {
-        row.addEventListener("click", (event) => selectUnifiedRow(row, event.target));
-        const dateInput = row.querySelector("[data-metric-date-input]");
+    root.querySelectorAll("[data-section-header]").forEach((header) => {
+        const dateInput = header.querySelector("[data-section-date-input]");
         if (dateInput) {
-            dateInput.addEventListener("focus", () => {
-                selectUnifiedRow(row, dateInput);
-                updateDateResetVisibility(dateInput);
-            });
-            dateInput.addEventListener("input", () => markUnifiedDateChanged(row, dateInput));
-            dateInput.addEventListener("blur", () => window.setTimeout(() => updateDateResetVisibility(dateInput), 80));
-            const dateReset = dateInput.closest("[data-date-cell]")?.querySelector("[data-reset-date]");
-            if (dateReset) {
-                dateReset.addEventListener("mousedown", (event) => {
+            dateInput.addEventListener("input", () => markSectionDateChanged(root, header, dateInput));
+            dateInput.addEventListener("blur", () => window.setTimeout(() => updateSectionDateResetVisibility(dateInput), 80));
+            const reset = header.querySelector("[data-reset-section-date]");
+            if (reset) {
+                reset.addEventListener("click", (event) => {
                     event.preventDefault();
-                    event.stopPropagation();
-                });
-                dateReset.addEventListener("click", (event) => {
-                    event.stopPropagation();
-                    resetUnifiedDate(row, dateInput);
+                    resetSectionDate(root, header, dateInput);
                 });
             }
         }
+        const unitSelect = header.querySelector("[data-section-unit-select]");
+        if (unitSelect) {
+            unitSelect.addEventListener("change", () => markSectionUnitChanged(root, header, unitSelect));
+            const reset = header.querySelector("[data-reset-section-unit]");
+            if (reset) {
+                reset.addEventListener("click", (event) => {
+                    event.preventDefault();
+                    resetSectionUnit(root, header, unitSelect);
+                });
+            }
+        }
+    });
+    rows.forEach((row) => {
+        row.addEventListener("click", (event) => selectUnifiedRow(row, event.target));
         row.querySelectorAll("[data-metric-value-input]").forEach((valueInput) => {
             valueInput.value = formatMetricNumber(valueInput.value, valueInput.getAttribute("data-value-type") || "");
             valueInput.addEventListener("focus", () => {
@@ -1593,18 +1603,6 @@ function initUnifiedProofreadWorkbench() {
                     event.stopPropagation();
                     resetUnifiedValue(row, valueInput);
                 });
-            }
-            const unitSelect = valueInput.closest("[data-value-cell]")?.querySelector("[data-source-unit-select]");
-            if (unitSelect) {
-                unitSelect.addEventListener("change", () => markUnifiedUnitChanged(row, unitSelect));
-                const unitReset = unitSelect.closest("[data-value-cell]")?.querySelector("[data-reset-unit]");
-                if (unitReset) {
-                    unitReset.addEventListener("click", (event) => {
-                        event.preventDefault();
-                        event.stopPropagation();
-                        resetUnifiedUnit(row, unitSelect);
-                    });
-                }
             }
         });
         const standardInput = row.querySelector("[data-standard-term-input]");

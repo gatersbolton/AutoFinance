@@ -185,6 +185,7 @@ def build_unified_review_sheet(job: JobRecord, selected_item_id: str = "") -> di
     selected_id = str(selected.get("review_item_id", ""))
     for item in items:
         item["selected"] = str(item.get("review_item_id", "")) == selected_id
+    _attach_section_metadata(items)
     return {
         "items": items,
         "selected_item": selected,
@@ -194,6 +195,64 @@ def build_unified_review_sheet(job: JobRecord, selected_item_id: str = "") -> di
         "value_confidence_available_total": sum(1 for item in items if item.get("value_confidence_available")),
         "message": "",
     }
+
+
+def _attach_section_metadata(items: list[dict[str, Any]]) -> None:
+    sections: dict[str, list[dict[str, Any]]] = {}
+    for item in items:
+        sections.setdefault(str(item.get("display_section_key", "") or item.get("section_key", "") or ""), []).append(item)
+
+    for section_items in sections.values():
+        leaf_items = [
+            leaf
+            for item in section_items
+            for leaf in item.get("leaf_items", [])
+            if isinstance(leaf, dict)
+        ]
+        if not leaf_items:
+            leaf_items = section_items
+        raw_metric_ids = list(
+            dict.fromkeys(
+                str(leaf.get("raw_metric_id", "") or "")
+                for leaf in leaf_items
+                if str(leaf.get("raw_metric_id", "") or "")
+            )
+        )
+        original_dates = _distinct_non_empty_values(leaf.get("original_fill_date", "") for leaf in leaf_items)
+        current_dates = _distinct_non_empty_values(leaf.get("current_fill_date", "") for leaf in leaf_items)
+        amount_items = [leaf for leaf in leaf_items if str(leaf.get("value_type", "") or "") == "amount"]
+        original_units = _distinct_non_empty_values(leaf.get("original_unit", "") for leaf in amount_items)
+        current_units = _distinct_non_empty_values(leaf.get("current_unit", "") for leaf in amount_items)
+        first = section_items[0]
+        section_label = str(first.get("section_label", "") or "")
+        if len({str(item.get("section_key", "") or "") for item in section_items}) > 1:
+            section_label = re.sub(r"-(?:左|右|上|下)半部分$", "", section_label)
+        first.update(
+            {
+                "section_label": section_label,
+                "section_raw_metric_ids_joined": ",".join(raw_metric_ids),
+                "section_original_fill_date": original_dates[0] if len(original_dates) == 1 else "",
+                "section_current_fill_date": current_dates[0] if len(current_dates) == 1 else "",
+                "section_date_mixed": len(current_dates) > 1,
+                "section_original_unit": original_units[0] if len(original_units) == 1 else "元",
+                "section_current_unit": current_units[0] if len(current_units) == 1 else "元",
+                "section_unit_mixed": len(current_units) > 1,
+                "section_has_amounts": bool(amount_items),
+                "section_supported_amount_units": list(SUPPORTED_AMOUNT_UNITS),
+                "section_date_changed": any(bool(leaf.get("date_changed")) for leaf in leaf_items),
+                "section_unit_changed": any(bool(leaf.get("unit_changed")) for leaf in amount_items),
+                "section_temporal_review_required": any(
+                    bool(leaf.get("temporal_review_required")) for leaf in leaf_items
+                ),
+                "section_original_temporal_review_required": any(
+                    bool(leaf.get("original_temporal_review_required")) for leaf in leaf_items
+                ),
+            }
+        )
+
+
+def _distinct_non_empty_values(values: Iterable[Any]) -> list[str]:
+    return list(dict.fromkeys(text for value in values if (text := str(value or "").strip())))
 
 
 def load_unified_review_items(job: JobRecord) -> list[dict[str, Any]]:
@@ -296,6 +355,14 @@ def load_unified_review_items(job: JobRecord) -> list[dict[str, Any]]:
                 str(raw.get("logical_subtable_id", "")),
             ]
         )
+        display_section_key = "|".join(
+            [
+                str(raw.get("source_pdf_path", "") or mapping.get("source_pdf_path", "")),
+                str(raw.get("source_file", "") or mapping.get("source_file", "")),
+                str(raw.get("source_page_no", "") or mapping.get("source_page_no", "")),
+                str(raw.get("table_id", "")),
+            ]
+        )
         section_label = _section_label(raw, index)
         starts_section = section_key != last_section_key
         last_section_key = section_key
@@ -379,6 +446,7 @@ def load_unified_review_items(job: JobRecord) -> list[dict[str, Any]]:
             "show_mapping_decision_actions": bool(mapping.get("show_mapping_decision_actions", True)),
             "mapping_decision_note": str(mapping.get("mapping_decision_note") or ""),
             "section_key": section_key,
+            "display_section_key": display_section_key,
             "section_label": section_label,
             "starts_section": starts_section,
         }
@@ -404,7 +472,7 @@ def _merge_period_review_items(items: list[dict[str, Any]]) -> list[dict[str, An
     last_section_key = ""
     for group in grouped_items:
         finalized = _finalize_period_group(group)
-        section_key = str(finalized.get("section_key", "") or "")
+        section_key = str(finalized.get("display_section_key", "") or finalized.get("section_key", "") or "")
         finalized["starts_section"] = section_key != last_section_key
         last_section_key = section_key
         merged.append(finalized)
@@ -658,7 +726,13 @@ def save_unified_review_actions(job: JobRecord, edits: Iterable[dict[str, Any]],
     items = load_unified_review_items(job)
     by_item_id = {str(item.get("review_item_id", "")): item for item in items}
     by_raw_id: dict[str, dict[str, Any]] = {}
+    leaf_by_raw_id: dict[str, dict[str, Any]] = {}
     for item in items:
+        leaf_items = [candidate for candidate in item.get("leaf_items", []) if isinstance(candidate, dict)]
+        for leaf_item in leaf_items:
+            raw_metric_id_text = str(leaf_item.get("raw_metric_id", "") or "")
+            if raw_metric_id_text:
+                leaf_by_raw_id[raw_metric_id_text] = leaf_item
         for raw_metric_id in item.get("raw_metric_ids", []) or [item.get("raw_metric_id", "")]:
             raw_metric_id_text = str(raw_metric_id or "")
             if raw_metric_id_text:
@@ -686,17 +760,35 @@ def save_unified_review_actions(job: JobRecord, edits: Iterable[dict[str, Any]],
             "reset_unit",
         }:
             raise ValueError(f"不支持的统一校对动作: {edit_type}")
-        for target_item in _action_target_items(item, edit, edit_type):
+        target_items = _action_target_items(item, edit, edit_type)
+        if edit_type in {"date_change", "reset_date", "unit_change", "reset_unit"}:
+            requested_raw_metric_ids = _edit_raw_metric_ids(edit)
+            selected_leaf_items = [
+                leaf_by_raw_id[raw_metric_id]
+                for raw_metric_id in requested_raw_metric_ids
+                if raw_metric_id in leaf_by_raw_id
+                and (
+                    edit_type in {"date_change", "reset_date"}
+                    or str(leaf_by_raw_id[raw_metric_id].get("value_type", "") or "") == "amount"
+                )
+            ]
+            if selected_leaf_items:
+                target_items = selected_leaf_items
+        for target_item in target_items:
             action = _build_action_row(target_item, edit, edit_type=edit_type, reviewer_name=reviewer_name, created_at=created_at)
             if edit_type in {"value_change", "reset_value", "unit_change", "reset_unit"}:
                 if edit_type in {"unit_change", "reset_unit"}:
+                    if edit_type == "reset_unit":
+                        action["new_unit"] = str(target_item.get("original_unit", "") or "元")
+                        action["new_value"] = str(target_item.get("original_value_normalized", "") or "")
                     new_unit = _normalize_amount_unit(action["new_unit"])
                     action["new_unit"] = new_unit
-                    action["new_value"] = _normalized_yuan_value(
-                        target_item.get("value_raw", ""),
-                        new_unit,
-                        fallback=action.get("new_value", ""),
-                    )
+                    if edit_type == "unit_change":
+                        action["new_value"] = _normalized_yuan_value(
+                            target_item.get("value_raw", ""),
+                            new_unit,
+                            fallback=action.get("new_value", ""),
+                        )
                 parsed = parse_metric_number_input(action["new_value"], value_type=str(target_item.get("value_type", "")))
                 if not parsed.get("valid"):
                     raise ValueError("数值格式有误，请输入普通数字或带千分位分隔符的数字。")
@@ -704,6 +796,9 @@ def save_unified_review_actions(job: JobRecord, edits: Iterable[dict[str, Any]],
                 if parsed.get("precision_adjusted"):
                     precision_warnings_total += 1
             if edit_type in {"date_change", "reset_date"}:
+                if edit_type == "reset_date":
+                    action["new_date"] = str(target_item.get("original_fill_date", "") or "")
+                    action["new_item_date"] = str(target_item.get("original_item_date", "") or "")
                 if edit_type == "reset_date" and not str(action.get("new_date", "") or "").strip():
                     action["new_date"] = ""
                     action["new_item_date"] = str(target_item.get("original_item_date", "") or "")
@@ -758,7 +853,20 @@ def save_unified_review_actions(job: JobRecord, edits: Iterable[dict[str, Any]],
 
 
 def _action_target_items(item: dict[str, Any], edit: dict[str, Any], edit_type: str) -> list[dict[str, Any]]:
-    if edit_type in {"value_change", "reset_value", "unit_change", "reset_unit"}:
+    if edit_type in {"unit_change", "reset_unit"}:
+        raw_metric_ids = _edit_raw_metric_ids(edit)
+        if raw_metric_ids:
+            leaf_items = [candidate for candidate in item.get("leaf_items", []) if isinstance(candidate, dict)]
+            selected = [
+                candidate
+                for candidate in leaf_items
+                if str(candidate.get("raw_metric_id", "") or "") in raw_metric_ids
+                and str(candidate.get("value_type", "") or "") == "amount"
+            ]
+            if selected:
+                return selected
+        return [_value_item_for_edit(item, edit)]
+    if edit_type in {"value_change", "reset_value"}:
         return [_value_item_for_edit(item, edit)]
     raw_metric_ids = _edit_raw_metric_ids(edit)
     leaf_items = [candidate for candidate in item.get("leaf_items", []) if isinstance(candidate, dict)]
@@ -1048,7 +1156,8 @@ def _status_badges(
 
 
 def _section_label(raw: dict[str, Any], index: int) -> str:
-    return _source_group_label(raw, index)
+    label = _source_group_label(raw, index)
+    return re.sub(r"^第[^|]+\|\s*(?:填表日期[^|]+\|\s*)?", "", label).strip() or "表格区域"
 
 
 def _display_period_role(period_role_norm: Any, period_role_raw: Any = "") -> str:
