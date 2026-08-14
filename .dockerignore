@@ -9,6 +9,7 @@
 __pycache__/
 .pytest_cache/
 tmp/
+backups/
 outputs/
 normalized/
 normalized-*/
