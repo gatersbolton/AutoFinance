@@ -413,6 +413,126 @@ pre {
     margin-bottom: 96px;
 }
 
+.document-action-panel {
+    width: 100%;
+    max-width: none;
+    margin-bottom: 96px;
+    background: #fffdf8;
+    border-color: rgba(77, 85, 98, 0.22);
+}
+
+.document-result-summary h2 {
+    margin-bottom: 8px;
+}
+
+.document-result-summary p,
+.document-result-group p,
+.document-maintenance-actions p {
+    color: var(--muted);
+}
+
+.document-result-summary p {
+    margin: 0 0 20px;
+}
+
+.document-result-layout {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 18px;
+    align-items: start;
+}
+
+.document-result-layout--with-downloads {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.document-result-group {
+    min-width: 0;
+    height: 100%;
+    padding: 18px;
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    background: white;
+}
+
+.document-result-group--downloads {
+    background: #f3f8f6;
+    border-color: rgba(13, 108, 93, 0.22);
+}
+
+.document-result-group h3 {
+    margin: 0 0 6px;
+    font-size: 1.08rem;
+}
+
+.document-result-group p {
+    margin: 0 0 16px;
+}
+
+.document-primary-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+}
+
+.document-primary-actions form,
+.document-maintenance-actions form {
+    display: flex;
+    margin: 0;
+}
+
+.document-primary-actions .button {
+    min-width: 180px;
+    min-height: 46px;
+}
+
+.document-download-actions {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(150px, 1fr));
+    gap: 10px;
+}
+
+.document-download-actions .button {
+    width: 100%;
+    min-height: 44px;
+    border-radius: 12px;
+}
+
+.document-result-group .advanced-downloads {
+    margin-top: 16px;
+    padding-top: 14px;
+    border-top: 1px solid rgba(13, 108, 93, 0.16);
+}
+
+.document-result-group .advanced-downloads summary,
+.document-maintenance-actions summary {
+    cursor: pointer;
+    color: var(--muted);
+    font-weight: 700;
+}
+
+.document-result-group .advanced-downloads .actions,
+.document-maintenance-actions .actions {
+    margin-top: 12px;
+}
+
+.document-result-group .advanced-downloads .button {
+    padding: 9px 13px;
+    font-size: 0.9rem;
+}
+
+.document-maintenance-actions {
+    grid-column: 1 / -1;
+    padding: 14px 16px;
+    border: 1px dashed var(--line);
+    border-radius: 12px;
+    background: #faf8f3;
+}
+
+.document-maintenance-actions p {
+    margin: 10px 0 0;
+}
+
 .download-results-card {
     margin-top: 0;
     background: #fffdf8;
@@ -1277,7 +1397,7 @@ td {
 }
 
 .unified-review-table {
-    min-width: 1140px;
+    min-width: 920px;
     table-layout: fixed;
 }
 
@@ -1298,11 +1418,11 @@ td {
 }
 
 .unified-col-period-value {
-    width: 190px;
+    width: 128px;
 }
 
 .unified-col-standard-term {
-    width: 200px;
+    width: 160px;
 }
 
 .unified-col-status {
@@ -1702,6 +1822,11 @@ pre {
     }
 
     .result-banner {
+        grid-template-columns: 1fr;
+    }
+
+    .document-result-layout--with-downloads,
+    .document-download-actions {
         grid-template-columns: 1fr;
     }
 

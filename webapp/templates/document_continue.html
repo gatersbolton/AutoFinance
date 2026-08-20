@@ -4,62 +4,6 @@
 {% if document.is_processing %}
 <meta http-equiv="refresh" content="3">
 {% endif %}
-<style>
-    .document-action-panel {
-        max-width: 760px;
-        margin-bottom: 120px !important;
-        background: #fffdf8 !important;
-        border-color: rgba(77, 85, 98, 0.22) !important;
-    }
-
-    .document-action-panel h2 {
-        margin-bottom: 8px;
-    }
-
-    .document-action-panel p {
-        color: var(--muted);
-        margin-bottom: 18px;
-    }
-
-    .document-action-actions {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 16px !important;
-    }
-
-    .document-action-actions .button {
-        min-width: 148px !important;
-        min-height: 45px !important;
-    }
-
-    .document-action-actions .button--download {
-        background: #2f5d50 !important;
-        color: #ffffff !important;
-    }
-
-    .document-action-actions .button--review {
-        background: #4d5562 !important;
-        color: #ffffff !important;
-    }
-
-    .document-action-actions form {
-        margin: 0;
-    }
-
-    .advanced-downloads {
-        margin-top: 18px;
-    }
-
-    .advanced-downloads summary {
-        cursor: pointer;
-        color: var(--muted);
-        font-weight: 700;
-    }
-
-    .advanced-downloads .actions {
-        margin-top: 12px;
-    }
-</style>
 {% endblock %}
 {% block content %}
 <section class="page-heading">
@@ -70,8 +14,9 @@
 </section>
 
 <section class="card document-action-panel">
-    <h2>处理结果</h2>
-    <p>
+    <div class="document-result-summary">
+        <h2>处理结果</h2>
+        <p>
         {% if document.is_processing %}
         任务已进入后台队列，系统一次处理一份文件。本页会自动刷新。
         {% elif simple_flow.standard_ready %}
@@ -81,56 +26,94 @@
         {% else %}
         识别完成后可提取原始数据。
         {% endif %}
-    </p>
-    <div class="document-action-actions">
-        {% if document.is_processing %}
-        <button class="button button--secondary" type="button" disabled>后台处理中…</button>
-        {% elif simple_flow.combined_ready %}
-        <a class="button button--download" href="{{ url_prefix }}/documents/{{ document.doc_id }}/download/combined_metrics_xlsx">下载数据表</a>
-        <a class="button button--secondary" href="{{ url_prefix }}/documents/{{ document.doc_id }}/download/combined_metrics_csv">下载 CSV</a>
-        <a class="button button--secondary" href="{{ url_prefix }}/documents/{{ document.doc_id }}/download-preview/combined_metrics_xlsx" target="_blank" rel="noopener">预览下载版</a>
-        {% elif not simple_flow.raw_ready %}
-        <form action="{{ url_prefix }}/documents/{{ document.doc_id }}/raw-metrics/run" method="post">
-            <button class="button button--primary" type="submit">生成结构化数据</button>
-        </form>
-        {% endif %}
-
-        {% if simple_flow.raw_ready and not document.is_processing %}
-        <a class="button button--review" href="{{ url_prefix }}/documents/{{ document.doc_id }}/proofread">校对数据和映射</a>
-        <form action="{{ url_prefix }}/documents/{{ document.doc_id }}/standard-metrics/run" method="post">
-            {% if simple_flow.standard_ready %}
-            <button class="button button--secondary" type="submit">重新生成标准指标 / 标准映射</button>
-            {% else %}
-            <button class="button button--primary" type="submit">生成标准指标 / 标准映射</button>
-            {% endif %}
-        </form>
-        {% if simple_flow.standard_ready %}
-        <form action="{{ url_prefix }}/documents/{{ document.doc_id }}/generate-accounting-workbook" method="post">
-            <button class="button button--primary" type="submit">生成并下载会计报表</button>
-        </form>
-        {% if simple_flow.accounting_workbook_ready %}
-        <a class="button button--download" href="{{ url_prefix }}/documents/{{ document.doc_id }}/download/accounting_workbook">下载已生成会计报表</a>
-        {% endif %}
-        {% endif %}
-        {% endif %}
+        </p>
     </div>
 
-    {% if simple_flow.raw_ready or simple_flow.standard_ready %}
-    <details class="advanced-downloads">
-        <summary>高级下载</summary>
-        <div class="actions">
-            {% if simple_flow.raw_ready %}
-            <a class="button button--secondary" href="{{ url_prefix }}/documents/{{ document.doc_id }}/download/raw_metrics_csv">原始数据 CSV</a>
-            {% endif %}
-            {% if simple_flow.standard_ready %}
-            <a class="button button--secondary" href="{{ url_prefix }}/documents/{{ document.doc_id }}/download/standardized_metrics_csv">标准化数据 CSV</a>
-            {% endif %}
-            {% if simple_flow.combined_ready %}
-            <a class="button button--secondary" href="{{ url_prefix }}/documents/{{ document.doc_id }}/download/combined_download_summary">JSON 摘要</a>
-            {% endif %}
-        </div>
-    </details>
-    {% endif %}
+    <div class="document-result-layout{% if not document.is_processing and (simple_flow.raw_ready or simple_flow.standard_ready) %} document-result-layout--with-downloads{% endif %}">
+        <section class="document-result-group document-result-group--primary" data-result-primary-actions>
+            <h3>{% if document.is_processing %}当前状态{% else %}下一步{% endif %}</h3>
+            <p>
+                {% if document.is_processing %}
+                处理完成后，这里会显示校对和生成报表操作。
+                {% elif simple_flow.standard_ready %}
+                建议先校对数据，确认后再生成会计报表。
+                {% elif simple_flow.raw_ready %}
+                先检查识别结果，或继续生成标准映射。
+                {% else %}
+                先把识别结果整理成可校对的数据表。
+                {% endif %}
+            </p>
+            <div class="document-primary-actions">
+                {% if document.is_processing %}
+                <button class="button button--secondary" type="button" disabled>后台处理中…</button>
+                {% elif not simple_flow.raw_ready %}
+                <form action="{{ url_prefix }}/documents/{{ document.doc_id }}/raw-metrics/run" method="post">
+                    <button class="button button--primary" type="submit">生成结构化数据</button>
+                </form>
+                {% else %}
+                <a class="button button--review" href="{{ url_prefix }}/documents/{{ document.doc_id }}/proofread">校对数据和映射</a>
+                {% if not simple_flow.standard_ready %}
+                <form action="{{ url_prefix }}/documents/{{ document.doc_id }}/standard-metrics/run" method="post">
+                    <button class="button button--primary" type="submit">生成标准指标 / 标准映射</button>
+                </form>
+                {% elif not simple_flow.accounting_workbook_ready %}
+                <form action="{{ url_prefix }}/documents/{{ document.doc_id }}/generate-accounting-workbook" method="post">
+                    <button class="button button--primary" type="submit">生成并下载会计报表</button>
+                </form>
+                {% endif %}
+                {% endif %}
+            </div>
+        </section>
+
+        {% if not document.is_processing and (simple_flow.raw_ready or simple_flow.standard_ready) %}
+        <section class="document-result-group document-result-group--downloads" data-result-downloads>
+            <h3>下载结果</h3>
+            <p>常用文件集中在这里，需要哪个就下载哪个。</p>
+            <div class="document-download-actions">
+                {% if simple_flow.combined_ready %}
+                <a class="button button--download" href="{{ url_prefix }}/documents/{{ document.doc_id }}/download/combined_metrics_xlsx">数据表 Excel</a>
+                <a class="button button--secondary" href="{{ url_prefix }}/documents/{{ document.doc_id }}/download/combined_metrics_csv">数据表 CSV</a>
+                <a class="button button--secondary" href="{{ url_prefix }}/documents/{{ document.doc_id }}/download-preview/combined_metrics_xlsx" target="_blank" rel="noopener">预览数据表</a>
+                {% endif %}
+                {% if simple_flow.accounting_workbook_ready %}
+                <a class="button button--download" href="{{ url_prefix }}/documents/{{ document.doc_id }}/download/accounting_workbook">会计报表 Excel</a>
+                {% endif %}
+            </div>
+
+            <details class="advanced-downloads">
+                <summary>更多下载</summary>
+                <div class="actions">
+                    {% if simple_flow.raw_ready %}
+                    <a class="button button--secondary" href="{{ url_prefix }}/documents/{{ document.doc_id }}/download/raw_metrics_csv">原始数据 CSV</a>
+                    {% endif %}
+                    {% if simple_flow.standard_ready %}
+                    <a class="button button--secondary" href="{{ url_prefix }}/documents/{{ document.doc_id }}/download/standardized_metrics_csv">标准化数据 CSV</a>
+                    {% endif %}
+                    {% if simple_flow.combined_ready %}
+                    <a class="button button--secondary" href="{{ url_prefix }}/documents/{{ document.doc_id }}/download/combined_download_summary">处理摘要 JSON</a>
+                    {% endif %}
+                </div>
+            </details>
+        </section>
+        {% endif %}
+
+        {% if not document.is_processing and simple_flow.standard_ready %}
+        <details class="document-maintenance-actions">
+            <summary>重新处理数据</summary>
+            <p>仅在识别配置变化或需要重新计算时使用。</p>
+            <div class="actions">
+                <form action="{{ url_prefix }}/documents/{{ document.doc_id }}/standard-metrics/run" method="post">
+                    <button class="button button--secondary" type="submit">重新生成标准指标 / 标准映射</button>
+                </form>
+                {% if simple_flow.accounting_workbook_ready %}
+                <form action="{{ url_prefix }}/documents/{{ document.doc_id }}/generate-accounting-workbook" method="post">
+                    <button class="button button--secondary" type="submit">重新生成并下载会计报表</button>
+                </form>
+                {% endif %}
+            </div>
+        </details>
+        {% endif %}
+    </div>
 </section>
 
 {% endblock %}
